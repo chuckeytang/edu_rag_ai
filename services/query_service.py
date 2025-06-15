@@ -23,6 +23,8 @@ import chromadb
 from core.config import settings
 from models.schemas import StreamChunk
 from services.document_service import document_service
+
+PERSIST_DIR = settings.INDEX_PATH
 class QueryService:
     def __init__(self):
         self.chroma_path = settings.CHROMA_PATH
@@ -49,7 +51,8 @@ class QueryService:
             collection = chroma_client.get_or_create_collection(name=self.collection_name)
             chroma_store = ChromaVectorStore(chroma_collection=collection)
             storage_context = StorageContext.from_defaults(
-                vector_store=chroma_store
+                vector_store=chroma_store,
+                persist_dir=PERSIST_DIR
             )
             self.index = load_index_from_storage(storage_context, embed_model=self.embedding_model)
             logger.info("Index loaded from disk.")
@@ -71,7 +74,6 @@ class QueryService:
             logger.error(f"Failed to initialize index on startup: {e}")
         
     def initialize_index(self, documents):
-                    
         def clean_metadata(documents):
             cleaned_docs = []
             for doc in documents:
@@ -116,10 +118,38 @@ class QueryService:
                 storage_context=storage_context,
                 embed_model=self.embedding_model
             )
+
+            # initialize_index() 内部 —— 关键断点
+            logger.info(f"[DEBUG] 原始 documents 数 = {len(documents)}")
+
+            # 过滤无 embedding
+            logger.info(f"[DEBUG] 过滤后 valid_docs 数 = {len(valid_docs)}")
+
+            # 如果 valid_docs 仍有内容，再看一下示例
+            if valid_docs:
+                logger.info(f"[DEBUG] 样例 meta = {valid_docs[0].metadata}")
+                logger.info(f"[DEBUG] 样例 text = {valid_docs[0].text[:100]}...")
+
+            logger.info(f"[DEBUG] 内存 docstore 节点数 = {len(self.index.storage_context.docstore.docs)}")
+            self.index.storage_context.persist(persist_dir=PERSIST_DIR)
+            logger.info("[DEBUG] persist() 已执行")
             
             logger.info(f"Vector index initialized and persisted with {len(documents)} documents.")
             for i, doc in enumerate(documents):
                 logger.debug(f"Chunk {i+1}: {doc.text[:100]}... (metadata: {doc.metadata})")
+
+            # ① 检查 Chroma
+            # client = chromadb.PersistentClient(path=settings.CHROMA_PATH)
+            # col = client.get_collection("documents")
+            # print("Chroma 向量条数 =", col.count())
+            # print(col.query(query_texts=["photosynthesis"], n_results=2, include=["metadatas"]))
+
+            # ② 检查 llama-index
+            try:
+                res = query_service.query("What is photosynthesis?")
+                print("llama-index answer =", res)
+            except KeyError as e:
+                print("llama-index 报错:", e)
         except Exception as e:
             logger.error(f"Failed to initialize vector index: {e}")
             raise
@@ -139,6 +169,9 @@ class QueryService:
                     logger.debug(f"✅ Inserted document {idx+1}: {doc.metadata.get('file_name', 'unknown')} - {doc.text[:80]}...")
                 except Exception as e:
                     logger.error(f"Failed to insert document {idx+1}: {e}")
+            logger.info(f"[DEBUG] 内存 docstore 节点数 = {len(self.index.storage_context.docstore.docs)}")
+            self.index.storage_context.persist(persist_dir=PERSIST_DIR)
+            logger.info("[DEBUG] persist() 已执行")
 
         logger.info("Index update completed.")
 

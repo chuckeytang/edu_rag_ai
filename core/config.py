@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     DATA_CONFIG_DIR: str = "data/.config"
     BACKEND_CORS_ORIGINS: list[str] = ["*"]
     CHROMA_PATH: str = "./chroma_db"
+    INDEX_PATH: str = "./index_store"
     class Config:
         case_sensitive = True
         env_file = ".env"
