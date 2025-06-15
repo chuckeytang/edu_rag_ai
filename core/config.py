@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     DATA_DIR: str = "data/pdf"
     DATA_CONFIG_DIR: str = "data/.config"
     BACKEND_CORS_ORIGINS: list[str] = ["*"]
+    CHROMA_PATH: str = "./chroma_db"
     class Config:
         case_sensitive = True
         env_file = ".env"

@@ -2,6 +2,15 @@ from fastapi import FastAPI
 from core.config import settings
 from api.api_v1 import api_router
 from fastapi.middleware.cors import CORSMiddleware
+import logging
+
+# 全局日志配置
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="API for querying exam papers and syllabus documents using LLM RAG",
@@ -17,4 +26,4 @@ app.add_middleware(
 app.include_router(api_router, prefix=settings.API_V1_STR)
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run('main:app', host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run('main:app', host="0.0.0.0", port=6006, reload=True)

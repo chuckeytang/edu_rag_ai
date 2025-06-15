@@ -2,6 +2,17 @@ import os
 import re
 import shutil
 import hashlib
+
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) 
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    
 from typing import List, Optional, Tuple
 from fastapi import UploadFile
 from llama_index.core import SimpleDirectoryReader
@@ -15,6 +26,7 @@ class DocumentService:
     @property
     def hash_file(self):
         return os.path.join(self.data_config_dir, ".file_hashes")
+        
     def _load_existing_hashes(self) -> dict:
         hashes = {}
         if os.path.exists(self.hash_file):
@@ -36,9 +48,11 @@ class DocumentService:
             hash_obj.update(chunk)
         await file.seek(0)
         return hash_obj.hexdigest()
+
     async def is_duplicate_file(self, file: UploadFile) -> bool:
         file_hash = await self._calculate_file_hash(file)
         return file_hash in self.file_hashes
+
     async def save_uploaded_file(self, file: UploadFile) -> str:
         file_hash = await self._calculate_file_hash(file)
         if file_hash in self.file_hashes:
@@ -56,18 +70,44 @@ class DocumentService:
         self.file_hashes[file_hash] = file_path
         self._save_file_hashes()
         return file_path
+
     def load_documents(self, file_names: List[str] = None) -> List[LlamaDocument]:
         if file_names:
             input_files = [os.path.join(self.data_dir, fname) for fname in file_names]
         else:
             input_files = None
+
         try:
-            return SimpleDirectoryReader(
+            # 加载原始文档
+            docs = SimpleDirectoryReader(
                 input_files=input_files,
                 input_dir=self.data_dir if not input_files else None
             ).load_data()
+
+            # 安全补全 metadata
+            for idx, doc in enumerate(docs):
+                # 初始化 metadata 字典
+                if doc.metadata is None:
+                    doc.metadata = {}
+
+                # 设置默认 file_name
+                if "file_name" not in doc.metadata or doc.metadata["file_name"] is None:
+                    if input_files and len(input_files) == 1:
+                        doc.metadata["file_name"] = os.path.basename(input_files[0])
+                    else:
+                        doc.metadata["file_name"] = f"unknown_file_{idx}"
+
+                # 设置默认 page_label
+                if "page_label" not in doc.metadata or doc.metadata["page_label"] is None:
+                    doc.metadata["page_label"] = str(idx + 1)
+
+                logger.debug(f"[Document {idx}] Metadata: {doc.metadata}")
+
+            return docs
+
         except FileNotFoundError as e:
             raise ValueError(f"File not found: {e}")
+
     def filter_documents(self, documents: List[LlamaDocument]) -> Tuple[List[LlamaDocument], dict]:
         filtered_docs = []
         page_info = {}
@@ -79,6 +119,7 @@ class DocumentService:
                     page_info[fname] = set()
                 page_info[fname].add(doc.metadata["page_label"])
         return filtered_docs, page_info
+        
     @staticmethod
     def _is_blank_page(text: str) -> bool:
         text = text.strip()
