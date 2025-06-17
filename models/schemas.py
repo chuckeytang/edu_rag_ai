@@ -9,7 +9,7 @@ class Document(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     similarity_top_k: Optional[int] = 10
-    target_files: Optional[List[str]] = None
+    target_file_ids: Optional[List[str]] = None  # ✅ 使用 hash 列表代替文件名
     prompt: Optional[str] = None
 class QueryResponseNode(BaseModel):
     file_name: str
@@ -25,6 +25,7 @@ class UploadResponse(BaseModel):
     pages_loaded: int
     total_pages: int
     status: str  
+    file_hash: str 
     existing_file: Optional[str] = None
 class StreamingResponseWrapper:
     def __init__(self, async_generator):

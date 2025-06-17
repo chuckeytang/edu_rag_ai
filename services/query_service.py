@@ -138,18 +138,23 @@ class QueryService:
             for i, doc in enumerate(documents):
                 logger.debug(f"Chunk {i+1}: {doc.text[:100]}... (metadata: {doc.metadata})")
 
-            # ① 检查 Chroma
+            # 检查 Chroma
             # client = chromadb.PersistentClient(path=settings.CHROMA_PATH)
             # col = client.get_collection("documents")
             # print("Chroma 向量条数 =", col.count())
-            # print(col.query(query_texts=["photosynthesis"], n_results=2, include=["metadatas"]))
+            
+            # query_emb = self.embedding_model.get_text_embedding("photosynthesis")
+            # res = col.query(query_embeddings=[query_emb],
+            #                 n_results=2,
+            #                 include=["metadatas"])
+            # print("Chroma 查询结果(含 metadata) =", res)
 
-            # ② 检查 llama-index
-            try:
-                res = query_service.query("What is photosynthesis?")
-                print("llama-index answer =", res)
-            except KeyError as e:
-                print("llama-index 报错:", e)
+            # 检查 llama-index
+            # try:
+            #     res = query_service.query("What is photosynthesis?")
+            #     print("llama-index answer =", res)
+            # except KeyError as e:
+            #     print("llama-index 报错:", e)
         except Exception as e:
             logger.error(f"Failed to initialize vector index: {e}")
             raise
@@ -206,6 +211,7 @@ class QueryService:
             text_qa_template=self._create_qa_prompt(prompt)
         )
         return query_engine.query(question)
+        
     async def stream_query(self, question: str, similarity_top_k: int = 10, prompt: str = None) -> AsyncGenerator[str, None]:
         if not self.index:
             self._initialize_index_on_startup()
@@ -228,13 +234,21 @@ class QueryService:
     async def query_with_files(
             self,
             question: str,
-            file_names: List[str],
+            file_hashes: List[str],
             similarity_top_k: int = 10,
             prompt: str = None
     ) -> Union[str, AsyncGenerator[str, None]]:
-        target_docs = document_service.get_documents_by_filenames(file_names)
-        if not target_docs:
-            raise ValueError("No valid documents found with the given filenames")
+        # ✅ 从 hash 获取路径
+        file_paths = []
+        for h in file_hashes:
+            path = document_service.file_hashes.get(h)
+            if path:
+                file_paths.append(path)
+
+        if not file_paths:
+            raise ValueError("No valid documents found for the given file hashes")
+
+        target_docs = document_service.load_documents(file_paths)
         temp_index = VectorStoreIndex(target_docs, embed_model=self.embedding_model)
         query_engine = temp_index.as_query_engine(
             llm=self.llm,

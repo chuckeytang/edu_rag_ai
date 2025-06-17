@@ -4,3 +4,5 @@ __pycache__
 .env
 index_store
 storage
+.config
+data/pdf

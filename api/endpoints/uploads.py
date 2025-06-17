@@ -32,6 +32,7 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
                         file_name=file.filename,
                         pages_loaded=0,
                         total_pages=0,
+                        file_hash=file_hash,
                         status="duplicate"
                     )
                 )
@@ -49,6 +50,7 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
                     file_name=file.filename,
                     pages_loaded=0,
                     total_pages=0,
+                    file_hash="unknown",
                     status="error"
                 )
             )
@@ -78,6 +80,7 @@ async def _handle_single_file(
             file_name=file.filename,
             pages_loaded=0,
             total_pages=0,
+            file_hash=file_hash,
             status="duplicate",
             existing_file=existing_file
         )
@@ -100,5 +103,6 @@ async def _handle_single_file(
         file_name=os.path.basename(file_path),
         pages_loaded=len(filtered_docs),
         total_pages=len(docs),
+        file_hash=file_hash,
         status="new"
     )

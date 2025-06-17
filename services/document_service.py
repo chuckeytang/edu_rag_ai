@@ -40,6 +40,19 @@ class DocumentService:
         with open(self.hash_file, "w") as f:
             for file_hash, file_path in self.file_hashes.items():
                 f.write(f"{file_hash}:{file_path}\n")
+
+    def list_all_files(self) -> List[str]:
+        """
+        返回 data_dir 下所有文件的文件名（不包含路径）
+        """
+        if not os.path.exists(self.data_dir):
+            return []
+
+        return [
+            f for f in os.listdir(self.data_dir)
+            if os.path.isfile(os.path.join(self.data_dir, f))
+        ]
+
     @staticmethod
     async def _calculate_file_hash(file: UploadFile) -> str:
         file.file.seek(0)
@@ -73,12 +86,15 @@ class DocumentService:
 
     def load_documents(self, file_names: List[str] = None) -> List[LlamaDocument]:
         if file_names:
-            input_files = [os.path.join(self.data_dir, fname) for fname in file_names]
+            input_files = [
+                fname if os.path.isabs(fname) or "/" in fname or "\\" in fname
+                else os.path.join(self.data_dir, fname)
+                for fname in file_names
+            ]
         else:
             input_files = None
 
         try:
-            # 加载原始文档
             docs = SimpleDirectoryReader(
                 input_files=input_files,
                 input_dir=self.data_dir if not input_files else None
@@ -86,18 +102,15 @@ class DocumentService:
 
             # 安全补全 metadata
             for idx, doc in enumerate(docs):
-                # 初始化 metadata 字典
                 if doc.metadata is None:
                     doc.metadata = {}
 
-                # 设置默认 file_name
                 if "file_name" not in doc.metadata or doc.metadata["file_name"] is None:
                     if input_files and len(input_files) == 1:
                         doc.metadata["file_name"] = os.path.basename(input_files[0])
                     else:
                         doc.metadata["file_name"] = f"unknown_file_{idx}"
 
-                # 设置默认 page_label
                 if "page_label" not in doc.metadata or doc.metadata["page_label"] is None:
                     doc.metadata["page_label"] = str(idx + 1)
 

@@ -72,7 +72,7 @@ async def query_with_files(
 ):
     async def generate():
         try:
-            if not request.target_files:
+            if not request.target_file_ids:
                 async for chunk in query_service.stream_query(
                         question=request.question,
                         similarity_top_k=request.similarity_top_k,
@@ -82,8 +82,9 @@ async def query_with_files(
             else:
                 async for chunk in query_service.query_with_files(
                         question=request.question,
-                        file_names=request.target_files,
-                        similarity_top_k=request.similarity_top_k
+                        file_hashes=request.target_file_ids,
+                        similarity_top_k=request.similarity_top_k,
+                        prompt=request.prompt
                 ):
                     yield StreamChunk(content=chunk).json() + "\n"
                 yield StreamChunk(content="", is_last=True).json() + "\n"

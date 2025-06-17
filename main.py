@@ -14,7 +14,9 @@ logging.basicConfig(
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="API for querying exam papers and syllabus documents using LLM RAG",
-    version=settings.VERSION
+    version=settings.VERSION,
+    docs_url="/docs",        # Swagger UI 路径
+    redoc_url="/redoc"       # ReDoc 文档路径
 )
 app.add_middleware(
     CORSMiddleware,
