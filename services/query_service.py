@@ -9,14 +9,15 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 from typing import AsyncGenerator, List, Union
-from llama_index.core import VectorStoreIndex, PromptTemplate
+from llama_index.core.vector_stores import VectorStoreQuery, MetadataFilters, MetadataFilter
+from llama_index.core.retrievers import VectorIndexRetriever
+
+from llama_index.core import VectorStoreIndex, PromptTemplate, StorageContext, load_index_from_storage
 from llama_index.llms.dashscope import DashScope, DashScopeGenerationModels
 from llama_index.embeddings.dashscope import DashScopeEmbedding, DashScopeTextEmbeddingModels
-from llama_index.core import StorageContext, load_index_from_storage
-
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from chromadb.config import Settings
 import chromadb
+from chromadb.config import Settings
 
 # from llama_index.cura import CURARetriever
 # print(CURARetriever)
@@ -180,11 +181,83 @@ class QueryService:
 
         logger.info("Index update completed.")
 
+    def query_with_filters(self, question: str, filters: dict, similarity_top_k: int = 5):
+        if not self.index:
+            self._initialize_index_on_startup()
+            if not self.index:
+                raise ValueError("Index is not initialized. Failed to load documents.")
+
+        metadata_filters = self._build_metadata_filters(filters)
+        
+        retriever = VectorIndexRetriever(
+            index=self.index,
+            similarity_top_k=similarity_top_k,
+            filters=metadata_filters
+        )
+        
+        query_engine = self.index.as_query_engine(
+            llm=self.llm,
+            retriever=retriever,
+            text_qa_template=self.qa_prompt
+        )
+
+        logger.info(f"Querying with text: '{question}' and filters: {filters}")
+        response = query_engine.query(question)
+        return response
+
+    # Helper function to convert a simple dict to LlamaIndex's filter objects
+    def _build_metadata_filters(self, filter_dict: dict) -> MetadataFilters:
+        """
+        Converts a dictionary of filters into a MetadataFilters object.
+        Example input: {"subject": "Physics", "gen_year": "2023"}
+        """
+        filter_list = []
+        for key, value in filter_dict.items():
+            if value is None:
+                continue
+            
+            # For lists like 'levelList', we might need special handling if needed,
+            # but ChromaDB supports the 'in' operator. For now, we'll use simple equality.
+            # LlamaIndex uses '==' as the default operator.
+            new_filter = MetadataFilter(key=key, value=str(value)) # Ensure value is a string
+            filter_list.append(new_filter)
+        
+        return MetadataFilters(filters=filter_list)
+
+    # You can also create an async version for streaming if needed
+    async def stream_query_with_filters(
+        self, question: str, filters: dict, similarity_top_k: int = 5
+    ) -> AsyncGenerator[str, None]:
+        if not self.index:
+            self._initialize_index_on_startup()
+            if not self.index:
+                raise ValueError("Index not initialized.")
+
+        metadata_filters = self._build_metadata_filters(filters)
+        retriever = VectorIndexRetriever(
+            index=self.index,
+            similarity_top_k=similarity_top_k,
+            filters=metadata_filters
+        )
+        query_engine = self.index.as_query_engine(
+            llm=self.llm,
+            retriever=retriever,
+            streaming=True,
+            text_qa_template=self.qa_prompt
+        )
+        
+        response = await query_engine.aquery(question)
+        if hasattr(response, 'response_gen'):
+            async for chunk in response.response_gen:
+                yield StreamChunk(content=chunk).json() + "\n"
+        yield StreamChunk(content="", is_last=True).json() + "\n"
+            
     def _create_qa_prompt(self, prompt: str = None) -> PromptTemplate:
         if prompt:
             return PromptTemplate(prompt)
         else:
             return self.default_qa_prompt
+
     @property
     def default_qa_prompt(self) -> PromptTemplate:
         return PromptTemplate(
@@ -198,6 +271,7 @@ class QueryService:
             "Document content: {context_str}\n"
             "Query: {query_str}"
         )
+        
     def query(self, question: str, similarity_top_k: int = 10, prompt: str = None):
         if not self.index:
             self._initialize_index_on_startup()
@@ -211,7 +285,7 @@ class QueryService:
             text_qa_template=self._create_qa_prompt(prompt)
         )
         return query_engine.query(question)
-        
+
     async def stream_query(self, question: str, similarity_top_k: int = 10, prompt: str = None) -> AsyncGenerator[str, None]:
         if not self.index:
             self._initialize_index_on_startup()

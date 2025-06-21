@@ -97,3 +97,27 @@ async def query_with_files(
         StreamingResponseWrapper(generate()),
         media_type="text/event-stream"
     )
+
+@router.post("/query-with-filters")
+def perform_query(request: QueryRequest):
+    """
+    Performs a query against the RAG system, with optional metadata filters.
+    """
+    try:
+        response = query_service.query_with_filters(
+            question=request.question,
+            filters=request.filters
+        )
+        return {
+            "answer": response.response,
+            "source_nodes": [
+                {
+                    "text": node.get_text()[:300] + "...",
+                    "score": node.get_score(),
+                    "metadata": node.metadata
+                } for node in response.source_nodes
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error during query: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

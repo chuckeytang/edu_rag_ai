@@ -12,6 +12,14 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: list[str] = ["*"]
     CHROMA_PATH: str = "./chroma_db"
     INDEX_PATH: str = "./index_store"
+
+    # OSS configuration fields here
+    OSS_PROVIDER: str = "ALIYUN"
+    OSS_ENDPOINT: str = "https://oss-accelerate.aliyuncs.com"
+    OSS_ACCESS_KEY_ID: str
+    OSS_ACCESS_KEY_SECRET: str
+    OSS_BUCKET_NAME: str
+
     class Config:
         case_sensitive = True
         env_file = ".env"
@@ -21,4 +29,8 @@ class Settings(BaseSettings):
     def __init_data_dir(self):
         os.makedirs(self.DATA_DIR, exist_ok=True)
         os.makedirs(self.DATA_CONFIG_DIR, exist_ok=True)
+
 settings = Settings(DASHSCOPE_API_KEY=os.getenv("DASHSCOPE_API_KEY"))
+settings = Settings(OSS_ACCESS_KEY_ID=os.getenv("OSS_ACCESS_KEY_ID"))
+settings = Settings(OSS_ACCESS_KEY_SECRET=os.getenv("OSS_ACCESS_KEY_SECRET"))
+settings = Settings(OSS_BUCKET_NAME=os.getenv("OSS_BUCKET_NAME"))

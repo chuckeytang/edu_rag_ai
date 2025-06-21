@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 class DocumentMetadata(BaseModel):
     file_name: str
@@ -39,3 +39,23 @@ class StreamChunk(BaseModel):
 class DebugRequest(BaseModel):
     filename: str
     question: str
+
+class RAGMetadata(BaseModel):
+    clazz: Optional[str] = None
+    exam: Optional[str] = None
+    subject: Optional[str] = None
+    level_list: Optional[List[str]] = Field(default_factory=list, alias="levelList")
+    type: str
+    title: str
+    author_id: Optional[int] = Field(None, alias="authorId")
+    author: Optional[str] = None
+    file_name: str = Field(..., alias="fileName")
+    file_size: str = Field(..., alias="fileSize")
+    gen_year: str = Field(..., alias="genYear")
+    is_vip: bool = Field(..., alias="isVip")
+    material_id: int = Field(..., alias="materialId")
+    
+# The request from Java will contain the OSS key and the full metadata
+class UploadFromOssRequest(BaseModel):
+    file_key: str = Field(..., description="The object key for the file in the public OSS bucket.", alias="fileKey")
+    metadata: RAGMetadata

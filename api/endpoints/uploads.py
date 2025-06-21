@@ -1,9 +1,9 @@
 import os
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from typing import List
 from services.document_service import document_service
 from services.query_service import query_service
-from models.schemas import UploadResponse
+from models.schemas import UploadResponse, UploadFromOssRequest
 router = APIRouter()
 
 # ---- 单文件上传保持你刚改好的版本 ----
@@ -105,4 +105,57 @@ async def _handle_single_file(
         total_pages=len(docs),
         file_hash=file_hash,
         status="new"
+    )
+
+def process_and_index_task(request: UploadFromOssRequest):
+    """
+    This function orchestrates the entire RAG pipeline and is executed in the background.
+    1. Downloads file from OSS.
+    2. Processes file to get documents with metadata.
+    3. Indexes the documents.
+    4. Cleans up temporary files.
+    """
+    local_file_path = None
+    try:
+        # Step 1: Download file from OSS to a temporary local path
+        logger.info(f"Background task started for: {request.metadata.file_name}")
+        local_file_path = oss_service.download_file(request.file_key)
+        
+        # Step 2: Process the local file to get document chunks with metadata
+        documents_to_index = document_service.process_oss_file(
+            local_file_path=local_file_path,
+            metadata=request.metadata
+        )
+        
+        # Step 3: If there are documents, pass them to the query service for indexing
+        if documents_to_index:
+            query_service.update_index(documents_to_index)
+            logger.info(f"Indexing task for {request.metadata.file_name} completed successfully.")
+        else:
+            logger.info(f"No documents to index for {request.metadata.file_name} (file may be a duplicate or empty).")
+
+    except Exception as e:
+        logger.error(f"Error in background task for file {request.metadata.file_name}: {e}", exc_info=True)
+    finally:
+        # Step 4: CRITICAL - Always clean up the temporary download directory
+        if local_file_path:
+            temp_dir = os.path.dirname(local_file_path)
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"Cleaned up temporary directory: {temp_dir}")
+
+@router.post("/upload-from-oss", response_model=UploadResponse, status_code=202)
+async def upload_from_oss(request: UploadFromOssRequest, background_tasks: BackgroundTasks):
+    """
+    Main RAG pipeline endpoint.
+    Schedules the file download, processing, and indexing as a background task.
+    """
+    # Add the single orchestrator function to the background tasks
+    background_tasks.add_task(process_and_index_task, request)
+    
+    logger.info(f"Accepted request to process file: {request.metadata.file_name}")
+    return UploadResponse(
+        message="Accepted: File processing and indexing has been scheduled.",
+        file_name=request.metadata.file_name,
+        status="processing"
     )

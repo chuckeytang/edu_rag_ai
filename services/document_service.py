@@ -2,8 +2,14 @@ import os
 import re
 import shutil
 import hashlib
-
 import logging
+
+from typing import List, Optional, Tuple
+from fastapi import UploadFile
+from llama_index.core import SimpleDirectoryReader
+from llama_index.core.schema import Document as LlamaDocument
+from core.config import settings
+from models.schemas import RAGMetadata
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -13,16 +19,63 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     
-from typing import List, Optional, Tuple
-from fastapi import UploadFile
-from llama_index.core import SimpleDirectoryReader
-from llama_index.core.schema import Document as LlamaDocument
-from core.config import settings
 class DocumentService:
     def __init__(self):
         self.data_dir = settings.DATA_DIR
         self.data_config_dir = settings.DATA_CONFIG_DIR
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.data_config_dir, exist_ok=True)
         self.file_hashes = self._load_existing_hashes()
+
+    def process_oss_file(self, local_file_path: str, metadata: RAGMetadata) -> List[LlamaDocument]:
+        """
+        Processes a local file by hashing, saving, loading with metadata, and filtering.
+
+        Returns:
+            A list of filtered LlamaDocument objects ready for indexing,
+            or an empty list if the file is a duplicate or has no content.
+        """
+        # 1. Calculate hash from the local file path
+        file_hash = self._calculate_local_file_hash(local_file_path)
+
+        # 2. Check for duplicates
+        if file_hash in self.file_hashes:
+            logger.warning(f"Duplicate file detected. Hash: {file_hash}. Skipping processing.")
+            # Return an empty list for duplicates
+            return []
+        
+        # 3. Save the file permanently to the data directory
+        permanent_path = os.path.join(self.data_dir, metadata.file_name)
+        counter = 1
+        while os.path.exists(permanent_path):
+            name, ext = os.path.splitext(metadata.file_name)
+            permanent_path = os.path.join(self.data_dir, f"{name}_{counter}{ext}")
+            counter += 1
+        # Use copy instead of move to handle potential cross-device issues in Docker
+        shutil.copy(local_file_path, permanent_path)
+
+        # Update and save the hash mapping
+        self.file_hashes[file_hash] = permanent_path
+        self._save_file_hashes()
+        
+        # 4. Load the document and inject the rich metadata
+        metadata_dict = metadata.dict(by_alias=True)
+        documents = self.load_documents(
+            file_names=[permanent_path], 
+            extra_metadata=metadata_dict
+        )
+
+        # 5. Filter blank pages
+        filtered_docs, _ = self.filter_documents(documents)
+        if not filtered_docs:
+            logger.warning(f"No content found in file {metadata.file_name} after filtering.")
+            # Return an empty list for empty files
+            return []
+        
+        logger.info(f"Successfully processed {len(filtered_docs)} document chunks from {metadata.file_name}.")
+        # 6. Return the processed documents
+        return filtered_docs
+    
     @property
     def hash_file(self):
         return os.path.join(self.data_config_dir, ".file_hashes")
@@ -36,10 +89,20 @@ class DocumentService:
                         file_hash, file_path = line.strip().split(":", 1)
                         hashes[file_hash] = file_path
         return hashes
+
     def _save_file_hashes(self):
         with open(self.hash_file, "w") as f:
             for file_hash, file_path in self.file_hashes.items():
                 f.write(f"{file_hash}:{file_path}\n")
+
+    @staticmethod
+    def _calculate_local_file_hash(file_path: str) -> str:
+        """Calculates SHA256 hash for a file given its local path."""
+        hash_obj = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(8192):
+                hash_obj.update(chunk)
+        return hash_obj.hexdigest()
 
     def list_all_files(self) -> List[str]:
         """
@@ -84,7 +147,7 @@ class DocumentService:
         self._save_file_hashes()
         return file_path
 
-    def load_documents(self, file_names: List[str] = None) -> List[LlamaDocument]:
+    def load_documents(self, file_names: List[str] = None, extra_metadata: Optional[dict] = None) -> List[LlamaDocument]:
         if file_names:
             input_files = [
                 fname if os.path.isabs(fname) or "/" in fname or "\\" in fname
@@ -100,24 +163,26 @@ class DocumentService:
                 input_dir=self.data_dir if not input_files else None
             ).load_data()
 
-            # 安全补全 metadata
             for idx, doc in enumerate(docs):
+                # Always initialize metadata if it's None
                 if doc.metadata is None:
                     doc.metadata = {}
+                
+                # --- THIS IS THE KEY INJECTION POINT ---
+                # Inject the rich metadata from the Java service
+                if extra_metadata:
+                    doc.metadata.update(extra_metadata)
 
-                if "file_name" not in doc.metadata or doc.metadata["file_name"] is None:
-                    if input_files and len(input_files) == 1:
-                        doc.metadata["file_name"] = os.path.basename(input_files[0])
-                    else:
-                        doc.metadata["file_name"] = f"unknown_file_{idx}"
-
-                if "page_label" not in doc.metadata or doc.metadata["page_label"] is None:
+                # Fallback completion logic (mostly for old files or direct uploads)
+                if "file_name" not in doc.metadata:
+                     doc.metadata["file_name"] = os.path.basename(doc.id_)
+                if "page_label" not in doc.metadata:
                     doc.metadata["page_label"] = str(idx + 1)
-
-                logger.debug(f"[Document {idx}] Metadata: {doc.metadata}")
+            
+            if docs and extra_metadata:
+                 logger.debug(f"Metadata injected into first page: {docs[0].metadata}")
 
             return docs
-
         except FileNotFoundError as e:
             raise ValueError(f"File not found: {e}")
 
