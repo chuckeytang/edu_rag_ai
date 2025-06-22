@@ -59,3 +59,4 @@ class RAGMetadata(BaseModel):
 class UploadFromOssRequest(BaseModel):
     file_key: str = Field(..., description="The object key for the file in the public OSS bucket.", alias="fileKey")
     metadata: RAGMetadata
+    collection_name: Optional[str] = Field(None, alias="collectionName")

@@ -3,6 +3,16 @@ from typing import List, Optional
 from services.document_service import document_service
 from models.schemas import Document, DocumentMetadata, DebugRequest
 import os
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) 
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    
 router = APIRouter()
 
 from fastapi import Query

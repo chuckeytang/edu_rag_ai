@@ -26,55 +26,6 @@ class DocumentService:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.data_config_dir, exist_ok=True)
         self.file_hashes = self._load_existing_hashes()
-
-    def process_oss_file(self, local_file_path: str, metadata: RAGMetadata) -> List[LlamaDocument]:
-        """
-        Processes a local file by hashing, saving, loading with metadata, and filtering.
-
-        Returns:
-            A list of filtered LlamaDocument objects ready for indexing,
-            or an empty list if the file is a duplicate or has no content.
-        """
-        # 1. Calculate hash from the local file path
-        file_hash = self._calculate_local_file_hash(local_file_path)
-
-        # 2. Check for duplicates
-        if file_hash in self.file_hashes:
-            logger.warning(f"Duplicate file detected. Hash: {file_hash}. Skipping processing.")
-            # Return an empty list for duplicates
-            return []
-        
-        # 3. Save the file permanently to the data directory
-        permanent_path = os.path.join(self.data_dir, metadata.file_name)
-        counter = 1
-        while os.path.exists(permanent_path):
-            name, ext = os.path.splitext(metadata.file_name)
-            permanent_path = os.path.join(self.data_dir, f"{name}_{counter}{ext}")
-            counter += 1
-        # Use copy instead of move to handle potential cross-device issues in Docker
-        shutil.copy(local_file_path, permanent_path)
-
-        # Update and save the hash mapping
-        self.file_hashes[file_hash] = permanent_path
-        self._save_file_hashes()
-        
-        # 4. Load the document and inject the rich metadata
-        metadata_dict = metadata.dict(by_alias=True)
-        documents = self.load_documents(
-            file_names=[permanent_path], 
-            extra_metadata=metadata_dict
-        )
-
-        # 5. Filter blank pages
-        filtered_docs, _ = self.filter_documents(documents)
-        if not filtered_docs:
-            logger.warning(f"No content found in file {metadata.file_name} after filtering.")
-            # Return an empty list for empty files
-            return []
-        
-        logger.info(f"Successfully processed {len(filtered_docs)} document chunks from {metadata.file_name}.")
-        # 6. Return the processed documents
-        return filtered_docs
     
     @property
     def hash_file(self):
@@ -88,6 +39,7 @@ class DocumentService:
                     if ":" in line:
                         file_hash, file_path = line.strip().split(":", 1)
                         hashes[file_hash] = file_path
+        logger.info(f"DocumentService: Loaded {len(hashes)} content hashes from '{self.hash_file}'.")
         return hashes
 
     def _save_file_hashes(self):
@@ -96,7 +48,7 @@ class DocumentService:
                 f.write(f"{file_hash}:{file_path}\n")
 
     @staticmethod
-    def _calculate_local_file_hash(file_path: str) -> str:
+    def _calculate_file_hash(file_path: str) -> str:
         """Calculates SHA256 hash for a file given its local path."""
         hash_obj = hashlib.sha256()
         with open(file_path, "rb") as f:

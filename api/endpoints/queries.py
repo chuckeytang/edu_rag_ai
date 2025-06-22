@@ -2,6 +2,16 @@ from fastapi import APIRouter, HTTPException
 from services.query_service import query_service
 from models.schemas import QueryRequest, QueryResponse, QueryResponseNode, StreamChunk, StreamingResponseWrapper
 from fastapi.responses import StreamingResponse
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) 
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    
 router = APIRouter()
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
