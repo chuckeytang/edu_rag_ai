@@ -122,107 +122,28 @@ async def _handle_single_file(
 
 def process_and_index_task(request: UploadFromOssRequest):
     """
-    Orchestrates the RAG pipeline using the OSS file_key for deduplication.
-    1. Downloads file from OSS.
-    2. Checks for duplicates using file_key.
-    3. Processes file to get documents with metadata.
-    4. Indexes the documents.
-    5. Cleans up temporary files.
-    6. Updates the task status/result.
+    一个简洁的后台任务调度器。
+    它调用 DocumentOssService 来执行所有复杂的业务逻辑，
+    然后用返回的结果更新全局的任务状态。
     """
-    local_file_path = None
-    pages_loaded = 0
-    total_pages = 0
-    task_status = "error" # Default to error
-    file_hash = request.file_key
-    message = "An unexpected error occurred during processing."
-    existing_file = None
+    logger.info(f"[TASK_ID: {task_id}] Background task started. Delegating to DocumentOssService...")
+    
+    # 调用服务执行完整流程，并获取最终状态
+    final_status = document_oss_service.process_new_oss_file(request)
 
-    task_id = str(request.metadata.material_id) if request.metadata.material_id else str(uuid.uuid4())
-    logger.info(f"[TASK_ID: {task_id}] Background task CREATED for file: '{request.metadata.file_name}'.")
-
-    # Initial status update
+    # 用服务返回的结果更新全局任务字典
     processing_task_results[task_id] = UploadResponse(
-        message="Processing started.",
+        message=final_status["message"],
         file_name=request.metadata.file_name,
-        pages_loaded=pages_loaded,
-        total_pages=total_pages,
-        file_hash=file_hash, 
-        status="processing",
+        pages_loaded=final_status["pages_loaded"],
+        total_pages=final_status["total_pages"],
+        file_hash=request.file_key, # file_hash 字段现在存储 oss_key
+        status=final_status["status"],
+        # 如果是 "duplicate"，可以考虑从final_status中获取更多信息
+        existing_file={"file_key": request.file_key} if final_status["status"] == "duplicate" else None
     )
-    logger.info(f"[TASK_ID: {task_id}] Initial status set to 'processing'.")
+    logger.info(f"[TASK_ID: {task_id}] Background task finished. Final status: '{final_status['status']}'")
 
-    try:
-        # Step 1: Download file from OSS
-        logger.info(f"[TASK_ID: {task_id}] Step 1: Starting file download from OSS Key: '{request.file_key}'.")
-        local_file_path = oss_service.download_file_to_temp(request.file_key)
-        logger.info(f"[TASK_ID: {task_id}] File downloaded to temporary path: '{local_file_path}'.")
-
-        # Step 2: Deduplication check using the OSS file_key
-        logger.info(f"[TASK_ID: {task_id}] Step 2: Checking for duplicate using OSS key: '{request.file_key}'.")
-        if request.file_key in document_oss_service.processed_files:
-            existing_file_path = document_oss_service.processed_files[request.file_key]
-            existing_file = existing_file_path
-            message = "This exact OSS file has already been processed."
-            task_status = "duplicate"
-            logger.info(f"[TASK_ID: {task_id}] Duplicate file key detected. The file at this OSS path was already indexed. Task will now finalize.")
-        else:
-            logger.info(f"[TASK_ID: {task_id}] No duplicate key found. Proceeding to process file content.")
-
-            # Step 3: Process the local file using the new service
-            logger.info(f"[TASK_ID: {task_id}] Step 3: Processing file to load and filter document pages.")
-            loaded_docs, filtered_docs = document_oss_service.process_temp_file(
-                local_file_path=local_file_path,
-                file_key=request.file_key,
-                metadata=request.metadata.dict()
-            )
-
-            if not filtered_docs:
-                message = "No valid content found in the file after filtering."
-                task_status = "error"
-                logger.warning(f"[TASK_ID: {task_id}] File processing resulted in zero valid pages for indexing.")
-            else:
-                total_pages = len(loaded_docs)
-                pages_loaded = len(filtered_docs)
-                logger.info(f"[TASK_ID: {task_id}] File processing complete. Total pages found: {total_pages}. Valid pages for indexing: {pages_loaded}.")
-
-                # Step 4: Index the documents
-                collection_to_index = request.collection_name or "public_collection"
-                logger.info(f"[TASK_ID: {task_id}] Step 4: Starting to index {pages_loaded} document chunks into collection '{collection_to_index}'.")
-                query_service.update_index(filtered_docs, collection_name=collection_to_index)
-                logger.info(f"[TASK_ID: {task_id}] Indexing complete.")
-
-                message = "File from OSS has been processed and indexed successfully."
-                task_status = "success"
-
-    except Exception as e:
-        message = f"An unexpected error occurred: {str(e)}"
-        task_status = "error"
-        logger.error(f"[TASK_ID: {task_id}] Unhandled exception for file '{request.metadata.file_name}': {e}", exc_info=True)
-    finally:
-        # Step 5: Cleanup
-        logger.info(f"[TASK_ID: {task_id}] Step 5: Entering finalization and cleanup block.")
-        if local_file_path:
-            temp_dir = os.path.dirname(local_file_path)
-            if os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                    logger.info(f"[TASK_ID: {task_id}] Cleaned up temporary directory: '{temp_dir}'.")
-                except Exception as e:
-                    logger.error(f"[TASK_ID: {task_id}] Failed to clean up temporary directory '{temp_dir}': {e}", exc_info=True)
-
-        # Final status update
-        final_result = UploadResponse(
-            message=message,
-            file_name=request.metadata.file_name,
-            pages_loaded=pages_loaded,
-            total_pages=total_pages,
-            file_hash=file_hash, 
-            status=task_status,
-            existing_file=existing_file
-        )
-        processing_task_results[task_id] = final_result
-        logger.info(f"[TASK_ID: {task_id}] Background task finished with status: '{task_status}'. Final message: '{message}'.")
 
 @router.post("/upload-from-oss", response_model=UploadResponse, status_code=202)
 async def upload_from_oss(request: UploadFromOssRequest, background_tasks: BackgroundTasks):

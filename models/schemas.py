@@ -9,7 +9,6 @@ class Document(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     collection_name: str = Field(..., alias="collectionName") 
-    # 元数据过滤器
     filters: Optional[Dict] = Field(default_factory=dict)
     similarity_top_k: Optional[int] = 10
     target_file_ids: Optional[List[str]] = None  # ✅ 使用 hash 列表代替文件名

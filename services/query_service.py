@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -25,6 +26,7 @@ from chromadb.config import Settings
 from core.config import settings
 from models.schemas import StreamChunk
 from services.document_service import document_service
+from services.oss_service import oss_service
 
 PERSIST_DIR = settings.INDEX_PATH
 class QueryService:
@@ -272,7 +274,7 @@ class QueryService:
         
         # 3. 返回召回的原始节点
         return retrieved_nodes
-        
+
     # Helper function to convert a simple dict to LlamaIndex's filter objects
     def _build_metadata_filters(self, filter_dict: dict) -> MetadataFilters:
         """
@@ -294,7 +296,7 @@ class QueryService:
 
     # You can also create an async version for streaming if needed
     async def stream_query_with_filters(
-        self, question: str, filters: dict, similarity_top_k: int = 5, prompt: str = None
+        self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5, prompt: str = None
     ) -> AsyncGenerator[str, None]:
         """
         对指定的collection执行带元数据过滤的流式查询。
@@ -374,33 +376,83 @@ class QueryService:
     async def query_with_files(
             self,
             question: str,
-            file_hashes: List[str],
+            file_identifiers: List[str],
             similarity_top_k: int = 10,
             prompt: str = None
     ) -> Union[str, AsyncGenerator[str, None]]:
-        # ✅ 从 hash 获取路径
-        file_paths = []
-        for h in file_hashes:
-            path = document_service.file_hashes.get(h)
-            if path:
-                file_paths.append(path)
+        
+        logger.info(f"Starting query_with_files with {len(file_identifiers)} identifiers.")
+        
+        permanent_paths = [] # 存放已经永久保存在本地的文件的路径
+        temp_dirs_to_clean = [] # 存放为本次查询临时下载的文件的目录
+        
+        try:
+            # --- 核心修改：双重查找和临时文件管理 ---
+            for identifier in file_identifiers:
+                path = None
+                is_temporary = False
 
-        if not file_paths:
-            raise ValueError("No valid documents found for the given file hashes")
+                # 1. 首先在 document_service (内容哈希) 中查找
+                path = document_service.file_hashes.get(identifier)
+                if path:
+                    logger.info(f"  ✅ Found permanent path '{path}' for content_hash '{identifier}'.")
 
-        target_docs = document_service.load_documents(file_paths)
-        temp_index = VectorStoreIndex(target_docs, embed_model=self.embedding_model)
-        query_engine = temp_index.as_query_engine(
-            llm=self.llm,
-            streaming=True,
-            similarity_top_k=similarity_top_k,
-            text_qa_template=self._create_qa_prompt(prompt)
-        )
-        response = await query_engine.aquery(question)
-        if hasattr(response, 'response_gen'):
-            async for chunk in response.response_gen:
-                yield chunk
-        else:
-            yield response.response
+                # 2. 如果找不到，则尝试从OSS下载
+                if not path:
+                    try:
+                        logger.info(f"  Identifier '{identifier}' not found locally, attempting to download from OSS...")
+                        # oss_service.download_file_to_temp 会创建一个临时目录并返回完整路径
+                        path = oss_service.download_file_to_temp(identifier)
+                        is_temporary = True
+                        # 将临时文件所在的目录记录下来，以便事后清理
+                        temp_dirs_to_clean.append(os.path.dirname(path))
+                        logger.info(f"  ✅ Successfully downloaded to temporary path '{path}' for oss_key '{identifier}'.")
+                    except Exception as e:
+                        logger.warning(f"  ❌ Failed to download or find identifier '{identifier}': {e}")
+                        continue # 跳过这个无效的ID
+
+                if path and os.path.exists(path):
+                    permanent_paths.append(path)
+                else:
+                    logger.warning(f"  ❌ Path '{path}' for identifier '{identifier}' does not exist on disk.")
+
+            if not permanent_paths:
+                raise ValueError("No valid local documents could be found or downloaded for the given identifiers.")
+            
+            unique_paths = list(set(permanent_paths))
+            logger.info(f"Found {len(unique_paths)} unique local files to build temporary index.")
+
+            # --- 后续的临时索引和查询逻辑保持不变 ---
+            target_docs = document_service.load_documents(unique_paths)
+            if not target_docs:
+                raise ValueError("Located files could not be loaded or are empty.")
+
+            temp_index = VectorStoreIndex.from_documents(target_docs, embed_model=self.embedding_model)
+            query_engine = temp_index.as_query_engine(
+                llm=self.llm,
+                streaming=True,
+                similarity_top_k=min(similarity_top_k, len(target_docs)),
+                text_qa_template=self._create_qa_prompt(prompt)
+            )
+            
+            response = await query_engine.aquery(question)
+            
+            # 流式返回结果
+            if hasattr(response, 'response_gen'):
+                async for chunk in response.response_gen:
+                    yield chunk
+            else:
+                yield response.response
+        
+        finally:
+            # --- 无论成功还是失败，都清理本次查询下载的临时文件 ---
+            if temp_dirs_to_clean:
+                logger.info(f"Cleaning up {len(temp_dirs_to_clean)} temporary director(y/ies)...")
+                for temp_dir in temp_dirs_to_clean:
+                    try:
+                        shutil.rmtree(temp_dir)
+                        logger.info(f"  ✅ Successfully removed temporary directory: {temp_dir}")
+                    except Exception as e:
+                        logger.error(f"  ❌ Failed to remove temporary directory {temp_dir}: {e}", exc_info=True)
             
 query_service = QueryService()

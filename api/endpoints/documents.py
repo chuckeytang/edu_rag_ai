@@ -100,7 +100,7 @@ async def get_oss_document_metadata(
     """
     try:
         # 1. 根据 key 查找永久存储路径 (逻辑不变)
-        permanent_path = document_oss_service.processed_oss_keys.get(file_key)
+        permanent_path = document_oss_service.processed_files.get(file_key)
         if not permanent_path or not os.path.exists(permanent_path):
             raise HTTPException(status_code=404, detail=f"File for key '{file_key}' not found on disk.")
 
@@ -111,7 +111,6 @@ async def get_oss_document_metadata(
         if not filtered_docs:
             return []
 
-        # --- 核心修改 2: 构造新的、结构更丰富的响应体 ---
         response_chunks = []
         for doc in filtered_docs:
             # Pydantic 可以直接从字典创建模型实例
@@ -130,10 +129,3 @@ async def get_oss_document_metadata(
     except Exception as e:
         logger.error(f"Failed to get metadata for OSS key '{file_key}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/debug-question")
-async def debug_question_search(request: DebugRequest):
-    return document_service.debug_question_search(
-        request.filename,
-        request.question
-    )

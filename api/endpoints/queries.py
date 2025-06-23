@@ -146,7 +146,7 @@ async def stream_query_with_filters(request: QueryRequest):
             ).json() + "\n"
     return StreamingResponse(StreamingResponseWrapper(generate()), media_type="text/event-stream")
 
-@router.post("/query-with-files")
+@router.post("/stream-query-with-files")
 async def query_with_files(
         request: QueryRequest,
         response_class=StreamingResponse
@@ -154,16 +154,21 @@ async def query_with_files(
     async def generate():
         try:
             if not request.target_file_ids:
+                logger.info(f"No target_file_ids provided. Performing a regular stream query on collection '{request.collection_name}'.")
+                if not request.collection_name:
+                    raise ValueError("collection_name is required for a general query.")
                 async for chunk in query_service.stream_query(
                         question=request.question,
+                        collection_name=request.collection_name,
                         similarity_top_k=request.similarity_top_k,
                         prompt=request.prompt
                 ):
                     yield chunk
             else:
+                logger.info(f"target_file_ids provided. Performing a query within specific files.")
                 async for chunk in query_service.query_with_files(
                         question=request.question,
-                        file_hashes=request.target_file_ids,
+                        file_identifiers=request.target_file_ids,
                         similarity_top_k=request.similarity_top_k,
                         prompt=request.prompt
                 ):
