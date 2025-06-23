@@ -7,8 +7,8 @@ services:
       dockerfile: docker/Dockerfile  # Dockerfile路径
     ports:
       - "8000:8000"
-    volumes:
-      - ../:/app  # 挂载整个项目目录
+    # volumes:
+      # - ../:/app  # 挂载整个项目目录
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
