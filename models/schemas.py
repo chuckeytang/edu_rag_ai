@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 class DocumentMetadata(BaseModel):
     file_name: str
     page_label: str
@@ -8,6 +8,9 @@ class Document(BaseModel):
     metadata: DocumentMetadata
 class QueryRequest(BaseModel):
     question: str
+    collection_name: str = Field(..., alias="collectionName") 
+    # 元数据过滤器
+    filters: Optional[Dict] = Field(default_factory=dict)
     similarity_top_k: Optional[int] = 10
     target_file_ids: Optional[List[str]] = None  # ✅ 使用 hash 列表代替文件名
     prompt: Optional[str] = None
@@ -26,6 +29,7 @@ class UploadResponse(BaseModel):
     total_pages: int
     status: str  
     file_hash: str 
+    task_id: Optional[str] = 0
     existing_file: Optional[str] = None
 class StreamingResponseWrapper:
     def __init__(self, async_generator):
@@ -60,3 +64,8 @@ class UploadFromOssRequest(BaseModel):
     file_key: str = Field(..., description="The object key for the file in the public OSS bucket.", alias="fileKey")
     metadata: RAGMetadata
     collection_name: Optional[str] = Field(None, alias="collectionName")
+
+class DocumentChunkResponse(BaseModel):
+    page_label: str
+    text_snippet: str
+    metadata: RAGMetadata

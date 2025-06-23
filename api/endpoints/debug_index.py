@@ -9,7 +9,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 from typing import List, Optional
-
+from models.schemas import QueryRequest
 from fastapi import APIRouter, HTTPException, Query
 
 from services.query_service import query_service  
@@ -17,55 +17,112 @@ from services.query_service import query_service
 router = APIRouter()
 @router.get("/indexed", summary="列出索引中的节点（chunk）")
 def list_indexed(
+    collection_name: str = Query(..., description="要查询的Collection名称"),
     limit: int = Query(20, ge=1, le=1000, description="最多返回多少个节点"),
     file_name: Optional[str] = Query(
         None, description="按 metadata.file_name 关键字模糊过滤（不区分大小写）"
     ),
 ):
     """
-    适配 llama-index ≥0.11（node_store）和 ≤0.10（docstore）两套结构。
-    - 若两处都取不到节点，则直接到 Chroma collection 里 peek。
+    从指定的ChromaDB Collection中直接“窥视”数据，用于调试。
     """
-    if query_service.index is None:
-        raise HTTPException(status_code=404, detail="Index not initialized")
+    try:
+        # --- 核心修改 2: 通过 chroma_client 按名称获取指定的 collection ---
+        col = query_service.chroma_client.get_collection(name=collection_name)
+    except ValueError:
+        # 如果 get_collection 找不到同名collection，ChromaDB会抛出ValueError
+        logger.warning(f"Debug endpoint: Collection '{collection_name}' not found.")
+        raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found in ChromaDB.")
+    except Exception as e:
+        logger.error(f"Failed to get collection '{collection_name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get collection '{collection_name}': {e}")
 
-    sc = query_service.index.storage_context
-    nodes: List = []
-    vs = sc.vector_store
-    if hasattr(vs, "_collection"):                # ChromaVectorStore
-        col = vs._collection                      # type: ignore
-        peek = col.peek(limit) 
-        docs = peek.get("documents", [])
-        metas = peek.get("metadatas", [])
-        ids = peek.get("ids", [])
-        logger.info(f"[DEBUG] Chroma peek 返回 {len(docs)} 条")
-        # 直接构造返回
-        items = []
-        for _id, doc, meta in zip(ids, docs, metas):
-            if file_name and file_name.lower() not in (meta.get("file_name") or "").lower():
-                continue
-            items.append({
-                "node_id": meta.get("doc_id") or meta.get("id_") or "",
-                "chroma_id": _id,
-                "file_name": meta.get("file_name"),
-                "page_label": meta.get("page_label"),
-                "text_snippet": (doc or "")[:200] + ("..." if doc and len(doc) > 200 else "")
-            })
-        return items[:limit]
+    # --- 后续的 peek 和数据处理逻辑保持不变，因为它们是直接操作 collection 对象 ---
+    logger.info(f"Peeking into collection '{collection_name}' with limit {limit}...")
+    peek_result = col.peek(limit=limit * 5) # Peek more to allow for filtering
+    
+    items = []
+    # 安全地解包，避免因数据为空而出错
+    ids = peek_result.get("ids") or []
+    docs = peek_result.get("documents") or []
+    metas = peek_result.get("metadatas") or []
+
+    for _id, doc, meta in zip(ids, docs, metas):
+        # 如果需要文件名过滤，并且当前项不匹配，则跳过
+        if file_name and file_name.lower() not in (meta.get("file_name") or "").lower():
+            continue
+            
+        items.append({
+            "node_id": meta.get("doc_id") or meta.get("id_") or "",
+            "chroma_id": _id,
+            "file_name": meta.get("file_name"),
+            "page_label": meta.get("page_label"),
+            "text_snippet": (doc or "")[:200] + ("..." if doc and len(doc) > 200 else "")
+        })
+        
+        # 因为我们 peek 了更多数据用于过滤，所以在这里手动限制返回数量
+        if len(items) >= limit:
+            break
+            
+    return items
 
 @router.get("/indexed/{chroma_id}", summary="查看单个节点的完整内容与元数据")
-def get_node(chroma_id: str):
-    if query_service.index is None:
-        raise HTTPException(status_code=404, detail="Index not initialized")
+def get_node(chroma_id: str,
+            collection_name: str = Query(..., description="该节点所在的Collection名称")):
+    """
+    从指定的ChromaDB Collection中，按ID获取单个节点的详细信息。
+    """
+    try:
+        # --- 核心修改 2: 同样，先按名称获取指定的 collection ---
+        col = query_service.chroma_client.get_collection(name=collection_name)
+    except ValueError:
+        logger.warning(f"Debug endpoint: Collection '{collection_name}' not found for node id '{chroma_id}'.")
+        raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found in ChromaDB.")
+    except Exception as e:
+        logger.error(f"Failed to get collection '{collection_name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get collection '{collection_name}': {e}")
 
-    col = query_service.index.storage_context.vector_store._collection  # type: ignore
+    # --- 后续的 get 和数据处理逻辑保持不变 ---
     res = col.get(ids=[chroma_id], include=["documents", "metadatas"])
 
-    if not res["ids"]:
-        raise HTTPException(status_code=404, detail="chroma_id not found")
+    if not res.get("ids"):
+        raise HTTPException(status_code=404, detail=f"Node with chroma_id '{chroma_id}' not found in collection '{collection_name}'.")
 
     return {
         "chroma_id": res["ids"][0],
         "metadata":  res["metadatas"][0],
         "text":      res["documents"][0],
     }
+
+@router.post("/retrieve-with-filters", summary="[DEBUG] 测试带过滤的节点召回")
+def debug_retrieve_with_filters(request: QueryRequest):
+    """
+    一个用于调试的端点。
+    它只执行召回步骤，并返回召回的节点列表及其元数据，
+    帮助您确认Filter是否按预期工作。
+    """
+    try:
+        retrieved_nodes = query_service.retrieve_with_filters(
+            question=request.question,
+            collection_name=request.collection_name,
+            filters=request.filters,
+            similarity_top_k=request.similarity_top_k
+        )
+        
+        # 将召回的节点信息格式化后返回
+        results = []
+        for node_with_score in retrieved_nodes:
+            results.append({
+                "score": node_with_score.score,
+                "node_id": node_with_score.node.node_id,
+                "text_snippet": node_with_score.get_text()[:300] + "...",
+                "metadata": node_with_score.metadata
+            })
+            
+        return results
+        
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Debug retrieval failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")

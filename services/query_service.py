@@ -74,22 +74,38 @@ class QueryService:
 
         # 2. 从持久化存储（ChromaDB/OSS）加载
         try:
-            logger.info(f"Loading index for collection '{collection_name}' from storage...")
+            # 首先，确认ChromaDB中是否存在该collection
+            logger.info(f"Checking for collection '{collection_name}' in ChromaDB...")
             collection = self.chroma_client.get_collection(name=collection_name)
             vector_store = ChromaVectorStore(chroma_collection=collection)
-            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-            
-            # 从存储中加载LlamaIndex的索引结构
-            index = load_index_from_storage(storage_context, embed_model=self.embedding_model)
-            
-            logger.info(f"Successfully loaded index for collection '{collection_name}'. Caching in memory.")
-            # 3. 存入内存缓存
-            self.indices[collection_name] = index
-            return index
-        except Exception as e:
-            # 如果在ChromaDB中也找不到这个collection（例如，这是一个全新的用户），则返回None
-            logger.warning(f"Could not load index for collection '{collection_name}': {e}. It may not exist yet.")
+            storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
+            logger.info(f"Collection '{collection_name}' found in ChromaDB.")
+
+        except ValueError:
+            # get_collection 找不到会抛出 ValueError，这意味着collection确实不存在
+            logger.warning(f"Collection '{collection_name}' does not exist in ChromaDB.")
             return None
+
+        # 3. 尝试从存储中加载完整的LlamaIndex索引（包括其元数据）
+        try:
+            logger.info(f"Attempting to load full index with metadata for '{collection_name}' from '{PERSIST_DIR}'...")
+            index = load_index_from_storage(storage_context, embed_model=self.embedding_model)
+            logger.info(f"Successfully loaded index with metadata for collection '{collection_name}'.")
+
+        except Exception as e:
+            # 4. 如果加载失败（很可能是本地元数据丢失），则从已有的VectorStore重建索引对象
+            logger.warning(f"Could not load LlamaIndex metadata from '{PERSIST_DIR}' for collection '{collection_name}'. Error: {e}")
+            logger.info(f"Reconstructing index object from existing VectorStore for '{collection_name}'...")
+            index = VectorStoreIndex.from_vector_store(
+                vector_store=vector_store,
+                embed_model=self.embedding_model,
+                storage_context=storage_context
+            )
+            logger.info(f"Successfully reconstructed index from VectorStore for '{collection_name}'.")
+        
+        # 5. 将加载或重建的索引存入内存缓存
+        self.indices[collection_name] = index
+        return index
         
     def initialize_index(self, documents: list, collection_name: str):
         def clean_metadata(documents):
@@ -205,7 +221,7 @@ class QueryService:
 
         logger.info("Index update completed.")
 
-    def query_with_filters(self, question: str, filters: dict, similarity_top_k: int = 5, prompt: str = None):
+    def query_with_filters(self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5, prompt: str = None):
         """
         对指定的collection执行带元数据过滤的查询。
         """
@@ -217,16 +233,12 @@ class QueryService:
             raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
 
         metadata_filters = self._build_metadata_filters(filters)
-        
-        retriever = VectorIndexRetriever(
-            index=index,
-            similarity_top_k=similarity_top_k,
-            filters=metadata_filters
-        )
+        logger.info(f"Constructed LlamaIndex MetadataFilters: {metadata_filters}")
         
         query_engine = index.as_query_engine(
             llm=self.llm,
-            retriever=retriever,
+            filters=metadata_filters,
+            similarity_top_k=similarity_top_k,
             text_qa_template=self._create_qa_prompt(prompt)
         )
 
@@ -234,6 +246,33 @@ class QueryService:
         response = query_engine.query(question)
         return response
 
+
+    def retrieve_with_filters(self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5):
+        """
+        [DEBUG METHOD] 仅执行带过滤的召回，并返回召回的节点列表。
+        """
+        logger.info(f"[DEBUG] Retrieving from collection '{collection_name}' with filters: {filters}")
+        
+        index = self._get_or_load_index(collection_name)
+        if not index:
+            raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
+
+        metadata_filters = self._build_metadata_filters(filters)
+
+        # 1. 创建一个Retriever，配置和查询时完全一样
+        retriever = index.as_retriever(
+            filters=metadata_filters,
+            similarity_top_k=similarity_top_k
+        )
+        
+        # 2. 执行召回
+        retrieved_nodes = retriever.retrieve(question)
+        
+        logger.info(f"[DEBUG] Retriever found {len(retrieved_nodes)} nodes matching the criteria.")
+        
+        # 3. 返回召回的原始节点
+        return retrieved_nodes
+        
     # Helper function to convert a simple dict to LlamaIndex's filter objects
     def _build_metadata_filters(self, filter_dict: dict) -> MetadataFilters:
         """
@@ -268,14 +307,11 @@ class QueryService:
             raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
 
         metadata_filters = self._build_metadata_filters(filters)
-        retriever = VectorIndexRetriever(
-            index=index,
-            similarity_top_k=similarity_top_k,
-            filters=metadata_filters
-        )
+
         query_engine = index.as_query_engine(
             llm=self.llm,
-            retriever=retriever,
+            filters=metadata_filters,
+            similarity_top_k=similarity_top_k,
             streaming=True,
             text_qa_template=self._create_qa_prompt(prompt)
         )
@@ -306,7 +342,7 @@ class QueryService:
             "Query: {query_str}"
         )
         
-    def query(self, question: str, similarity_top_k: int = 10, prompt: str = None):
+    def query(self, question: str, collection_name: str, similarity_top_k: int = 10, prompt: str = None):
         """
         对指定collection执行普通查询（无元数据过滤）。
         此方法现在调用功能更全的 query_with_filters 方法。
@@ -314,13 +350,13 @@ class QueryService:
         # 核心修改：调用带有filter功能的方法，并传递一个空的filters字典
         return self.query_with_filters(
             question=question,
-            filters={}, # 传递空字典表示不过滤
             collection_name=collection_name,
+            filters={}, # 传递空字典表示不过滤
             similarity_top_k=similarity_top_k,
             prompt=prompt
         )
 
-    async def stream_query(self, question: str, similarity_top_k: int = 10, prompt: str = None) -> AsyncGenerator[str, None]:
+    async def stream_query(self, question: str, collection_name: str, similarity_top_k: int = 10, prompt: str = None) -> AsyncGenerator[str, None]:
         """
         对指定collection执行流式查询（无元数据过滤）。
         此方法现在调用功能更全的 stream_query_with_filters 方法。

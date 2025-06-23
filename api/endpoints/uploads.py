@@ -120,7 +120,7 @@ async def _handle_single_file(
         status="new"
     )
 
-async def process_and_index_task(request: UploadFromOssRequest):
+def process_and_index_task(request: UploadFromOssRequest):
     """
     Orchestrates the RAG pipeline using the OSS file_key for deduplication.
     1. Downloads file from OSS.
@@ -241,6 +241,7 @@ async def upload_from_oss(request: UploadFromOssRequest, background_tasks: Backg
         pages_loaded=0,
         total_pages=0,
         file_hash="", 
+        task_id=task_id,
         status="processing"
     )
 

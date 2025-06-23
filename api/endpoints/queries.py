@@ -15,9 +15,13 @@ if not logger.handlers:
 router = APIRouter()
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
+    """
+    处理不带元数据过滤的查询请求。
+    """
     try:
         response = query_service.query(
             question=request.question,
+            collection_name=request.collection_name, 
             similarity_top_k=request.similarity_top_k,
             prompt=request.prompt
         )
@@ -56,12 +60,59 @@ async def query_documents(request: QueryRequest):
             status_code=500,
             detail=f"Query processing error: {str(e)}"
         )
+
+@router.post("/query-with-filters", response_model=QueryResponse)
+async def query_with_filters(request: QueryRequest):
+    """
+    处理带元数据过滤的查询请求。
+    使用与 /query 相同的请求模型，但会利用其中的 filters 字段。
+    """
+    try:
+        # 调用 query_service.query_with_filters 方法
+        response = query_service.query_with_filters(
+            question=request.question,
+            collection_name=request.collection_name,
+            filters=request.filters, # 传递 filters
+            similarity_top_k=request.similarity_top_k,
+            prompt=request.prompt
+        )
+        
+        # 响应处理逻辑与上面完全相同
+        nodes = []
+        for node in response.source_nodes:
+            try:
+                file_name = node.metadata.get("file_name", "unknown")
+                page_label = node.metadata.get("page_label", "unknown")
+                if hasattr(node, 'text'):
+                    node_text = node.text
+                elif hasattr(node, 'node') and hasattr(node.node, 'text'):
+                    node_text = node.node.text
+                elif hasattr(node, 'get_content'):
+                    node_text = node.get_content()
+                else:
+                    node_text = "[Node text not accessible]"
+                nodes.append(QueryResponseNode(
+                    file_name=file_name,
+                    page_label=page_label,
+                    content=node_text,
+                    score=node.score
+                ))
+            except Exception as e:
+                continue
+        return QueryResponse(response=response.response, nodes=nodes)
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query processing error: {str(e)}")
+
 @router.post("/stream-query", response_class=StreamingResponse)
 async def stream_query(request: QueryRequest):
     async def generate():
         try:
             async for chunk in query_service.stream_query(
                     question=request.question,
+                    collection_name=request.collection_name,
                     similarity_top_k=request.similarity_top_k,
                     prompt=request.prompt
             ):
@@ -75,6 +126,26 @@ async def stream_query(request: QueryRequest):
         StreamingResponseWrapper(generate()),
         media_type="text/event-stream"
     )
+
+@router.post("/stream-query-with-filters", response_class=StreamingResponse)
+async def stream_query_with_filters(request: QueryRequest):
+    async def generate():
+        try:
+            async for chunk in query_service.stream_query_with_filters(
+                    question=request.question,
+                    collection_name=request.collection_name,
+                    filters=request.filters, # 传递 filters
+                    similarity_top_k=request.similarity_top_k,
+                    prompt=request.prompt
+            ):
+                yield chunk
+        except Exception as e:
+            yield StreamChunk(
+                content=f"Error: {str(e)}",
+                is_last=True
+            ).json() + "\n"
+    return StreamingResponse(StreamingResponseWrapper(generate()), media_type="text/event-stream")
+
 @router.post("/query-with-files")
 async def query_with_files(
         request: QueryRequest,
@@ -107,27 +178,3 @@ async def query_with_files(
         StreamingResponseWrapper(generate()),
         media_type="text/event-stream"
     )
-
-@router.post("/query-with-filters")
-def perform_query(request: QueryRequest):
-    """
-    Performs a query against the RAG system, with optional metadata filters.
-    """
-    try:
-        response = query_service.query_with_filters(
-            question=request.question,
-            filters=request.filters
-        )
-        return {
-            "answer": response.response,
-            "source_nodes": [
-                {
-                    "text": node.get_text()[:300] + "...",
-                    "score": node.get_score(),
-                    "metadata": node.metadata
-                } for node in response.source_nodes
-            ]
-        }
-    except Exception as e:
-        logger.error(f"Error during query: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
