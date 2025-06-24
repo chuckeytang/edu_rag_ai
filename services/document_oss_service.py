@@ -10,6 +10,8 @@ from llama_index.core.schema import Document as LlamaDocument
 from models.schemas import UploadResponse, UploadFromOssRequest, UpdateMetadataRequest
 from core.config import settings
 from models.schemas import RAGMetadata
+from services.oss_service import oss_service
+from services.query_service import query_service  
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +59,9 @@ class DocumentOssService:
         total_pages = 0
         
         file_key = request.file_key
-        metadata = request.metadata.dict()
-        file_name = metadata.get("file_name", "unknown_file")
+        accessible_to = request.metadata.accessible_to or []
+        metadata = request.metadata.model_dump(by_alias=True, exclude_unset=True)
+        file_name = metadata.get("fileName", "unknown_file")
         collection_name = request.collection_name or "public_collection"
 
         # 1. 去重检查 (Deduplication Check)
@@ -71,8 +74,20 @@ class DocumentOssService:
             
         try:
             # 2. 下载文件到临时位置 (Download)
-            logger.info(f"Downloading file from OSS for key: '{file_key}'")
-            local_file_path = oss_service.download_file_to_temp(file_key)
+            # 根据 'accessible_to' 字段决定使用哪个 bucket
+            if "public" in accessible_to:
+                target_bucket = settings.OSS_PUBLIC_BUCKET_NAME
+                logger.info(f"'{file_key}' identified as a public document. Using public bucket: '{target_bucket}'.")
+            else:
+                target_bucket = settings.OSS_PRIVATE_BUCKET_NAME
+                logger.info(f"'{file_key}' identified as a private document. Using private bucket: '{target_bucket}'.")
+            
+            # 2. 下载文件到临时位置 (Download)
+            # 将决定好的 target_bucket 传递给 oss_service
+            local_file_path = oss_service.download_file_to_temp(
+                object_key=file_key, 
+                bucket_name=target_bucket
+            )
 
             # 3. 从临时文件加载和处理文档 (Process)
             logger.info(f"Processing temporary file: '{local_file_path}'")
@@ -85,6 +100,10 @@ class DocumentOssService:
                 total_pages = len(all_docs)
                 pages_loaded = len(filtered_docs)
                 
+                logger.debug(f"Type of filtered_docs: {type(filtered_docs)}")
+                for i, item in enumerate(filtered_docs):
+                    logger.debug(f"Item {i} in filtered_docs has type: {type(item)}")
+                    
                 # 4. 索引文档 (Index)
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
                 query_service.update_index(filtered_docs, collection_name=collection_name)

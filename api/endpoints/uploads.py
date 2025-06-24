@@ -107,6 +107,10 @@ async def _handle_single_file(
     if not filtered_docs:
         raise HTTPException(status_code=400, detail="No valid content found in the uploaded file")
 
+    logger.debug(f"Type of filtered_docs: {type(filtered_docs)}")
+    for i, item in enumerate(filtered_docs):
+        logger.debug(f"Item {i} in filtered_docs has type: {type(item)}")
+        
     # 5. 更新向量索引
     query_service.update_index(filtered_docs)
 
@@ -136,12 +140,12 @@ def process_and_index_task(request: UploadFromOssRequest):
     processing_task_results[task_id] = UploadResponse(
         message=final_status["message"],
         file_name=request.metadata.file_name,
-        pages_loaded=final_status["pages_loaded"],
-        total_pages=final_status["total_pages"],
-        file_hash=request.file_key, # file_hash 字段现在存储 oss_key
+        pages_loaded=final_status.get("pages_loaded", 0),
+        total_pages=final_status.get("total_pages", 0), 
+        file_hash=request.file_key,
         status=final_status["status"],
         # 如果是 "duplicate"，可以考虑从final_status中获取更多信息
-        existing_file={"file_key": request.file_key} if final_status["status"] == "duplicate" else None
+        existing_file=request.file_key if final_status["status"] == "duplicate" else None
     )
     logger.info(f"[TASK_ID: {task_id}] Background task finished. Final status: '{final_status['status']}'")
 

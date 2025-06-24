@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     OSS_ACCESS_KEY_ID: str
     OSS_ACCESS_KEY_SECRET: str
     OSS_PUBLIC_BUCKET_NAME: str
+    OSS_PRIVATE_BUCKET_NAME: str
 
     # CHROMADB OSS configuration fields here
     OSS_PUBLIC_VECTOR_BUCKET: str
@@ -42,6 +43,7 @@ settings = Settings(OSS_ENDPOINT=os.getenv("OSS_ENDPOINT"))
 settings = Settings(OSS_ACCESS_KEY_ID=os.getenv("OSS_ACCESS_KEY_ID"))
 settings = Settings(OSS_ACCESS_KEY_SECRET=os.getenv("OSS_ACCESS_KEY_SECRET"))
 settings = Settings(OSS_PUBLIC_BUCKET_NAME=os.getenv("OSS_PUBLIC_BUCKET_NAME"))
+settings = Settings(OSS_PRIVATE_BUCKET_NAME=os.getenv("OSS_PRIVATE_BUCKET_NAME"))
 
 settings = Settings(OSS_PUBLIC_VECTOR_BUCKET=os.getenv("OSS_PUBLIC_VECTOR_BUCKET"))
 settings = Settings(AWS_S3_ENDPOINT_URL=os.getenv("AWS_S3_ENDPOINT_URL"))
