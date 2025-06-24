@@ -140,6 +140,16 @@ class DocumentOssService:
         logger.info(f"Loading documents from temporary path: '{local_file_path}'")
         all_docs = SimpleDirectoryReader(input_files=[local_file_path]).load_data()
         
+        for key, value in metadata.items():
+            # 如果发现任何一个值是列表类型
+            if isinstance(value, list):
+                # 将该列表转换为我们统一的“分隔符字符串”格式
+                # 例如: ["public"] -> ",public,"
+                # 例如: [] -> ",," (这仍然是一个合法的字符串)
+                transformed_value = f",{','.join(map(str, value))},"
+                metadata[key] = transformed_value
+                logger.info(f"Transformed list in metadata key '{key}' to string: '{transformed_value}'")
+
         for doc in all_docs:
             if doc.metadata is None:
                 doc.metadata = {}
@@ -147,7 +157,7 @@ class DocumentOssService:
             if "page_label" not in doc.metadata:
                 doc.metadata["page_label"] = doc.metadata.get('page_label', '1')
 
-        filtered_docs = self._filter_documents(all_docs)
+        filtered_docs, _ = self._filter_documents(all_docs)
         return all_docs, filtered_docs
 
     def _filter_documents(self, documents: List[LlamaDocument]) -> Tuple[List[LlamaDocument], dict]:

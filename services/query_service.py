@@ -10,7 +10,7 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-from typing import AsyncGenerator, List, Union
+from typing import Any, AsyncGenerator, List, Union
 from llama_index.core.vector_stores import VectorStoreQuery, MetadataFilters, MetadataFilter
 from llama_index.core.retrievers import VectorIndexRetriever
 
@@ -27,6 +27,7 @@ from core.config import settings
 from models.schemas import StreamChunk
 from services.document_service import document_service
 from services.oss_service import oss_service
+from typing import List, Dict
 
 PERSIST_DIR = settings.INDEX_PATH
 class QueryService:
@@ -67,7 +68,7 @@ class QueryService:
         按需加载的核心方法。
         1. 检查内存缓存中是否存在指定collection的索引。
         2. 如果存在，直接返回。
-        3. 如果不存在，从ChromaDB/OSS加载，存入缓存后再返回。
+        3. 如果不存在，从ChromaDB获取或创建collection，构建索引对象，存入缓存后再返回。
         """
         # 1. 检查内存缓存
         if collection_name in self.indices:
@@ -83,7 +84,7 @@ class QueryService:
             storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
             logger.info(f"Collection '{collection_name}' found in ChromaDB.")
 
-        except ValueError:
+        except (Exception, ValueError) as e:
             # get_collection 找不到会抛出 ValueError，这意味着collection确实不存在
             logger.warning(f"Collection '{collection_name}' does not exist in ChromaDB.")
             return None
@@ -110,19 +111,6 @@ class QueryService:
         return index
         
     def initialize_index(self, documents: list, collection_name: str):
-        def clean_metadata(documents):
-            cleaned_docs = []
-            for doc in documents:
-                metadata = {}
-                for k, v in doc.metadata.items():
-                    if v is None:
-                        metadata[k] = "unknown"
-                    else:
-                        metadata[k] = str(v) 
-                doc.metadata = metadata
-                cleaned_docs.append(doc)
-            return cleaned_docs
-
         try:
             texts = [doc.text for doc in documents]
             embs = self.embedding_model.get_text_embedding_batch(texts)
@@ -138,8 +126,6 @@ class QueryService:
             
             if not valid_docs:
                 raise ValueError("所有文档的 embedding 都无效，无法构建索引。")
-
-            valid_docs = clean_metadata(valid_docs)
 
             # === 回退为 chroma_client 模式 ===
             collection = self.chroma_client.get_or_create_collection(name=collection_name)
@@ -184,13 +170,6 @@ class QueryService:
             #                 n_results=2,
             #                 include=["metadatas"])
             # print("Chroma 查询结果(含 metadata) =", res)
-
-            # 检查 llama-index
-            # try:
-            #     res = query_service.query("What is photosynthesis?")
-            #     print("llama-index answer =", res)
-            # except KeyError as e:
-            #     print("llama-index 报错:", e)
             return new_index
         except Exception as e:
             logger.error(f"Failed to initialize vector index: {e}")
@@ -234,12 +213,12 @@ class QueryService:
             logger.error(f"Query failed because collection '{collection_name}' does not exist.")
             raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
 
-        metadata_filters = self._build_metadata_filters(filters)
-        logger.info(f"Constructed LlamaIndex MetadataFilters: {metadata_filters}")
+        chroma_where_clause = self._build_chroma_where_clause(filters)
+        logger.info(f"Constructed ChromaDB `where` clause: {chroma_where_clause}")
         
         query_engine = index.as_query_engine(
             llm=self.llm,
-            filters=metadata_filters,
+            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
             similarity_top_k=similarity_top_k,
             text_qa_template=self._create_qa_prompt(prompt)
         )
@@ -275,24 +254,46 @@ class QueryService:
         # 3. 返回召回的原始节点
         return retrieved_nodes
 
-    # Helper function to convert a simple dict to LlamaIndex's filter objects
-    def _build_metadata_filters(self, filter_dict: dict) -> MetadataFilters:
+    def _build_chroma_where_clause(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Converts a dictionary of filters into a MetadataFilters object.
-        Example input: {"subject": "Physics", "gen_year": "2023"}
+        Builds a native ChromaDB `where` clause dictionary from a high-level filter dict.
+        This handles the special case for `accessible_to` using $or and $like.
         """
-        filter_list = []
-        for key, value in filter_dict.items():
-            if value is None:
-                continue
-            
-            # For lists like 'levelList', we might need special handling if needed,
-            # but ChromaDB supports the 'in' operator. For now, we'll use simple equality.
-            # LlamaIndex uses '==' as the default operator.
-            new_filter = MetadataFilter(key=key, value=str(value)) # Ensure value is a string
-            filter_list.append(new_filter)
+        if not filters:
+            return {}
+
+        and_conditions = []
         
-        return MetadataFilters(filters=filter_list)
+        for key, value in filters.items():
+            # --- 核心逻辑：特殊处理 accessible_to ---
+            if key == "accessible_to" and isinstance(value, list):
+                if not value: continue # Skip if the list is empty
+                
+                # Create an $or condition for each item in the accessible_to list
+                or_conditions = [
+                    {"accessible_to": {"$like": f"%,{item},%"}} for item in value
+                ]
+                
+                if or_conditions:
+                    # If there's more than one, wrap in $or. If only one, no need for $or.
+                    if len(or_conditions) > 1:
+                        and_conditions.append({"$or": or_conditions})
+                    else:
+                        and_conditions.append(or_conditions[0])
+            
+            # --- 其他所有过滤器按标准处理 (例如，精确匹配) ---
+            else:
+                and_conditions.append({key: {"$eq": value}})
+
+        if not and_conditions:
+            return {}
+        
+        # If there are multiple top-level conditions, wrap them in $and
+        if len(and_conditions) > 1:
+            return {"$and": and_conditions}
+        
+        # Otherwise, just return the single condition
+        return and_conditions[0]
 
     # You can also create an async version for streaming if needed
     async def stream_query_with_filters(
@@ -308,11 +309,12 @@ class QueryService:
             logger.error(f"Stream query failed because collection '{collection_name}' does not exist.")
             raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
 
-        metadata_filters = self._build_metadata_filters(filters)
-
+        chroma_where_clause = self._build_chroma_where_clause(filters)
+        logger.info(f"Constructed ChromaDB `where` clause: {chroma_where_clause}")
+        
         query_engine = index.as_query_engine(
             llm=self.llm,
-            filters=metadata_filters,
+            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
             similarity_top_k=similarity_top_k,
             streaming=True,
             text_qa_template=self._create_qa_prompt(prompt)
@@ -388,9 +390,9 @@ class QueryService:
         
         try:
             # --- 核心修改：双重查找和临时文件管理 ---
+            private_bucket_name = settings.OSS_PRIVATE_BUCKET_NAME
             for identifier in file_identifiers:
                 path = None
-                is_temporary = False
 
                 # 1. 首先在 document_service (内容哈希) 中查找
                 path = document_service.file_hashes.get(identifier)
@@ -402,8 +404,10 @@ class QueryService:
                     try:
                         logger.info(f"  Identifier '{identifier}' not found locally, attempting to download from OSS...")
                         # oss_service.download_file_to_temp 会创建一个临时目录并返回完整路径
-                        path = oss_service.download_file_to_temp(identifier)
-                        is_temporary = True
+                        path = oss_service.download_file_to_temp(
+                            object_key=identifier,
+                            bucket_name=private_bucket_name)
+                        
                         # 将临时文件所在的目录记录下来，以便事后清理
                         temp_dirs_to_clean.append(os.path.dirname(path))
                         logger.info(f"  ✅ Successfully downloaded to temporary path '{path}' for oss_key '{identifier}'.")
