@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple
 
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.schema import Document as LlamaDocument
-from models.schemas import UploadResponse, UploadFromOssRequest
+from models.schemas import UploadResponse, UploadFromOssRequest, UpdateMetadataRequest
 from core.config import settings
 from models.schemas import RAGMetadata
 
@@ -45,54 +45,6 @@ class DocumentOssService:
             for key, filename in self.processed_files.items():
                 f.write(f"{key}:{filename}\n")
 
-    # def process_temp_file(self, local_file_path: str, file_key: str, metadata: dict) -> Tuple[List[LlamaDocument], List[LlamaDocument]]:
-    #     """
-    #     Processes a file directly from its temporary local path without saving it permanently.
-    #     1. Updates the tracking of processed file keys with the filename for readability.
-    #     2. Loads the document content FROM THE TEMP PATH and injects metadata.
-    #     3. Filters blank pages.
-    #     4. Returns both all loaded docs and the filtered docs.
-    #     """
-    #     # 1. Update tracking with the new file_key and save the readable filename as its value.
-    #     #    NOTE: We are NOT saving the file permanently anymore.
-    #     original_filename = metadata.get('file_name', 'unknown_filename')
-    #     self.processed_files[file_key] = original_filename
-    #     self._save_processed_keys()
-    #     logger.info(f"Added OSS key '{file_key}' (Filename: '{original_filename}') to processed files cache.")
-
-    #     # 2. Load documents directly from the provided temporary path
-    #     logger.info(f"Loading documents directly from temporary path: '{local_file_path}'")
-    #     all_docs = self._load_documents_with_metadata(
-    #         file_name=local_file_path, # <-- Use the temp path here
-    #         extra_metadata=metadata
-    #     )
-
-    #     # 3. Filter blank pages
-    #     filtered_docs, _ = self._filter_documents(all_docs)
-
-    #     return all_docs, filtered_docs
-
-    # def _load_documents_with_metadata(self, file_name: str, extra_metadata: Optional[dict] = None) -> List[LlamaDocument]:
-    #     """Loads a single document and injects metadata into each page."""
-    #     try:
-    #         docs = SimpleDirectoryReader(input_files=[file_name]).load_data()
-
-    #         for doc in docs:
-    #             if doc.metadata is None:
-    #                 doc.metadata = {}
-    #             if extra_metadata:
-    #                 doc.metadata.update(extra_metadata)
-    #             if "page_label" not in doc.metadata:
-    #                 doc.metadata["page_label"] = doc.metadata.get('page_label', '1')
-
-    #         logger.debug(f"Metadata injected into {len(docs)} pages from file '{file_name}'.")
-    #         return docs
-    #     except FileNotFoundError as e:
-    #         logger.error(f"File not found during document loading: {e}")
-    #         raise ValueError(f"File not found: {e}")
-
-
-    # --- 核心修改：这是一个新的、封装了完整流程的公共方法 ---
     def process_new_oss_file(self, request: UploadFromOssRequest) -> dict:
         """
         一个完整的、自包含的OSS文件处理流程。
@@ -110,8 +62,8 @@ class DocumentOssService:
         collection_name = request.collection_name or "public_collection"
 
         # 1. 去重检查 (Deduplication Check)
-        if file_key in self.processed_oss_keys:
-            original_filename = self.processed_oss_keys[file_key]
+        if file_key in self.processed_files:
+            original_filename = self.processed_files[file_key]
             return {
                 "message": f"This OSS file has already been processed (Original Filename: {original_filename}).",
                 "status": "duplicate"
@@ -138,7 +90,7 @@ class DocumentOssService:
                 query_service.update_index(filtered_docs, collection_name=collection_name)
                 
                 # 5. 成功后，更新处理记录
-                self.processed_oss_keys[file_key] = file_name
+                self.processed_files[file_key] = file_name
                 self._save_processed_keys()
                 
                 message = "File from OSS has been processed and indexed successfully."
@@ -193,5 +145,64 @@ class DocumentOssService:
                 page_info[fname].add(doc.metadata.get("page_label", "unknown"))
         return filtered_docs, page_info
 
+    def update_document_metadata(self, request: UpdateMetadataRequest) -> dict:
+        """
+        Finds a document by its material_id in the metadata and updates it.
+        Returns a dictionary with the final status.
+        """
+        material_id = request.material_id
+        task_status = "error"
+        message = f"An unexpected error occurred while updating metadata for material_id {material_id}."
+        
+        try:
+            # Assumes query_service holds the logic to get the collection
+            collection = self.query_service.get_collection("public_collection")
+
+            # 1. Find the document in ChromaDB using its material_id
+            logger.info(f"Searching for document with material_id: {material_id} to update.")
+            results = collection.get(
+                where={"material_id": material_id},
+                include=[] # We only need the ID, no need to fetch payload
+            )
+
+            if not results or not results['ids']:
+                message = f"Document with material_id {material_id} not found. Cannot perform update."
+                task_status = "not_found"
+                logger.warning(message)
+                return {"message": message, "status": task_status}
+
+            # In case multiple chunks have the same material_id, update all of them.
+            doc_ids_to_update = results['ids']
+            logger.info(f"Found {len(doc_ids_to_update)} document chunks with material_id {material_id}. Internal ChromaDB IDs: {doc_ids_to_update}")
+
+            # 2. Prepare the new metadata payload
+            # model_dump will convert the Pydantic model to a dict.
+            # exclude_unset=True is crucial: it ensures we only include fields that
+            # were explicitly sent in the request, preventing accidental overwrites with None.
+            new_metadata = request.metadata.model_dump(by_alias=True, exclude_unset=True)
+            
+            # Since we are updating multiple docs, we need a list of metadatas
+            metadatas_to_update = [new_metadata] * len(doc_ids_to_update)
+
+            # 3. Perform the update operation
+            collection.update(
+                ids=doc_ids_to_update,
+                metadatas=metadatas_to_update
+            )
+            
+            message = f"Successfully updated metadata for material_id: {material_id}."
+            task_status = "success"
+            logger.info(message)
+
+        except Exception as e:
+            logger.error(f"Error during metadata update for material_id '{material_id}': {e}", exc_info=True)
+            message = f"An error occurred: {str(e)}"
+            task_status = "error"
+        
+        return {
+            "message": message,
+            "status": task_status,
+        }
+        
 # Create a singleton instance for the application to use
 document_oss_service = DocumentOssService()

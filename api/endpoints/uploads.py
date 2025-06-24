@@ -5,7 +5,7 @@ from services.document_service import document_service
 from services.document_oss_service import document_oss_service
 from services.oss_service import oss_service
 from services.query_service import query_service
-from models.schemas import UploadResponse, UploadFromOssRequest
+from models.schemas import UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
 import shutil
 router = APIRouter()
 
@@ -126,6 +126,7 @@ def process_and_index_task(request: UploadFromOssRequest):
     它调用 DocumentOssService 来执行所有复杂的业务逻辑，
     然后用返回的结果更新全局的任务状态。
     """
+    task_id = str(request.metadata.material_id) if request.metadata.material_id else "N/A"
     logger.info(f"[TASK_ID: {task_id}] Background task started. Delegating to DocumentOssService...")
     
     # 调用服务执行完整流程，并获取最终状态
@@ -164,6 +165,52 @@ async def upload_from_oss(request: UploadFromOssRequest, background_tasks: Backg
         file_hash="", 
         task_id=task_id,
         status="processing"
+    )
+
+def update_metadata_task(request: UpdateMetadataRequest):
+    """
+    A thin background task dispatcher for metadata updates.
+    It calls DocumentOssService to perform the logic and updates the global task status.
+    """
+    task_id = str(request.material_id)
+    logger.info(f"[TASK_ID: {task_id}] Metadata update task started. Delegating to DocumentOssService...")
+    
+    # Call the new service method to execute the update flow
+    final_status = document_oss_service.update_document_metadata(request)
+
+    # Update the global task results dictionary with the outcome
+    # We use the UpdateMetadataResponse schema for consistency
+    processing_task_results[task_id] = UpdateMetadataResponse(
+        message=final_status["message"],
+        material_id=request.material_id,
+        task_id=task_id,
+        status=final_status["status"]
+    )
+    logger.info(f"[TASK_ID: {task_id}] Metadata update task finished. Final status: '{final_status['status']}'")
+
+@router.post(
+    "/update-metadata", 
+    response_model=UpdateMetadataResponse, 
+    status_code=202
+)
+async def update_metadata(request: UpdateMetadataRequest, background_tasks: BackgroundTasks):
+    """
+    Schedules the metadata update for an existing document as a background task.
+    """
+    task_id = str(request.material_id)
+    logger.info(f"Received request to update metadata for material_id: {request.material_id}. Assigning Task ID: {task_id}.")
+
+    # Schedule the new, thin task dispatcher
+    background_tasks.add_task(update_metadata_task, request)
+    
+    logger.info(f"Task ID {task_id} for metadata update has been successfully scheduled.")
+
+    # Return an immediate response indicating the task is scheduled
+    return UpdateMetadataResponse(
+        message="Accepted: Metadata update has been scheduled.",
+        material_id=request.material_id,
+        task_id=task_id,
+        status="scheduled"
     )
 
 # --- Polling Endpoint (New) ---

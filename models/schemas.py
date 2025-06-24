@@ -44,6 +44,7 @@ class DebugRequest(BaseModel):
     question: str
 
 class RAGMetadata(BaseModel):
+    accessible_to: Optional[List[str]] = Field(None, alias="accessible_to")
     clazz: Optional[str] = None
     exam: Optional[str] = None
     subject: Optional[str] = None
@@ -54,7 +55,7 @@ class RAGMetadata(BaseModel):
     author: Optional[str] = None
     file_name: str = Field(..., alias="fileName")
     file_size: str = Field(..., alias="fileSize")
-    gen_year: str = Field(..., alias="genYear")
+    gen_year: Optional[str] = Field(None, alias="genYear")
     is_vip: bool = Field(..., alias="isVip")
     material_id: int = Field(..., alias="materialId")
     
@@ -64,6 +65,16 @@ class UploadFromOssRequest(BaseModel):
     metadata: RAGMetadata
     collection_name: Optional[str] = Field(None, alias="collectionName")
 
+class UpdateMetadataRequest(BaseModel):
+    material_id: int = Field(..., alias="materialId", description="The ID of the material to update.")
+    metadata: RAGMetadata = Field(..., description="The new metadata payload.")
+
+class UpdateMetadataResponse(BaseModel):
+    message: str
+    material_id: int
+    task_id: str
+    status: str
+    
 class DocumentChunkResponse(BaseModel):
     page_label: str
     text_snippet: str
