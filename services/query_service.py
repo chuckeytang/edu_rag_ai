@@ -15,8 +15,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 from typing import Any, AsyncGenerator, List, Union
-from llama_index.core.vector_stores import VectorStoreQuery, MetadataFilters, MetadataFilter
-from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.schema import Document as LlamaDocument
 
 from llama_index.core import VectorStoreIndex, PromptTemplate, StorageContext, load_index_from_storage
 from llama_index.llms.dashscope import DashScope, DashScopeGenerationModels
@@ -28,7 +27,7 @@ from chromadb.config import Settings
 # from llama_index.cura import CURARetriever
 # print(CURARetriever)
 from core.config import settings
-from models.schemas import StreamChunk, UpdateMetadataRequest
+from models.schemas import StreamChunk
 from services.document_service import document_service
 from services.oss_service import oss_service
 from typing import List, Dict
@@ -152,7 +151,7 @@ class QueryService:
 
             # 如果 valid_docs 仍有内容，再看一下示例
             if valid_docs:
-                logger.info(f"[DEBUG] 样例 meta = {valid_docs[0].metadata}")
+                logger.info(f"[DEBUG] 样例 meta = {valid_docs[0].extra_info}")
                 logger.info(f"[DEBUG] 样例 text = {valid_docs[0].text[:100]}...")
 
             logger.info(f"[DEBUG] 内存 docstore 节点数 = {len(new_index.storage_context.docstore.docs)}")
@@ -162,7 +161,7 @@ class QueryService:
             self.indices[collection_name] = new_index
             logger.info(f"New index for collection '{collection_name}' has been cached in memory.")
             for i, doc in enumerate(documents):
-                logger.debug(f"Chunk {i+1}: {doc.text[:100]}... (metadata: {doc.metadata})")
+                logger.debug(f"Chunk {i+1}: {doc.text[:100]}... (metadata: {doc.extra_info})")
 
             # 检查 Chroma
             # client = chromadb.PersistentClient(path=settings.CHROMA_PATH)
@@ -197,7 +196,7 @@ class QueryService:
             for idx, doc in enumerate(new_documents):
                 try:
                     index.insert(doc)
-                    logger.debug(f"✅ Inserted document {idx+1}: {doc.metadata.get('file_name', 'unknown')} - {doc.text[:80]}...")
+                    logger.debug(f"✅ Inserted document {idx+1}: {doc.extra_info.get('file_name', 'unknown')} - {doc.text[:80]}...")
                 except Exception as e:
                     logger.error(f"Failed to insert document {idx+1}: {e}")
             logger.info(f"[DEBUG] 内存 docstore 节点数 = {len(index.storage_context.docstore.docs)}")
@@ -238,58 +237,65 @@ class QueryService:
         logger.info(f"Found {len(nodes)} nodes matching the filters.")
         return nodes
 
-    def update_document_metadata(self, request: UpdateMetadataRequest, collection_name: str) -> dict:
+    def add_public_acl_to_material(self, material_id: int, collection_name: str) -> dict:
         """
-        Finds a document by its material_id in the metadata and updates it.
-        Returns a dictionary with the final status.
+        为已存在的私有文档添加公共权限。
+        此方法通过创建并插入新的、带有 "public" 权限的节点副本来实现。
         """
-        material_id = request.material_id
         task_status = "error"
-        message = f"An unexpected error occurred while updating metadata for material_id {material_id}."
+        message = f"An unexpected error occurred while publishing material {material_id}."
         
         try:
-            collection = self.chroma_client.get_collection(collection_name)
+            collection = self.chroma_client.get_collection(name=collection_name)
 
-            # 1. Find the document in ChromaDB using its material_id
-            logger.info(f"Searching for document with material_id: {material_id} to update.")
+            # 1. 找到该 material_id 对应的所有节点（它们应该是私有的）
+            logger.info(f"Finding existing nodes for material_id: {material_id} to publish.")
             results = collection.get(
                 where={"material_id": material_id},
-                include=[] # We only need the ID, no need to fetch payload
+                include=["metadatas", "documents"] # 我们需要完整信息来创建副本
             )
-
+            
             if not results or not results['ids']:
-                message = f"Document with material_id {material_id} not found. Cannot perform update."
+                message = f"No existing nodes found for material_id {material_id} to publish."
                 task_status = "not_found"
                 logger.warning(message)
                 return {"message": message, "status": task_status}
 
-            # In case multiple chunks have the same material_id, update all of them.
-            doc_ids_to_update = results['ids']
-            logger.info(f"Found {len(doc_ids_to_update)} document chunks with material_id {material_id}. Internal ChromaDB IDs: {doc_ids_to_update}")
-
-            # 2. Prepare the new metadata payload
-            # model_dump will convert the Pydantic model to a dict.
-            # exclude_unset=True is crucial: it ensures we only include fields that
-            # were explicitly sent in the request, preventing accidental overwrites with None.
-            new_metadata = request.metadata.model_dump(exclude_unset=True)
-            db_ready_metadata = prepare_metadata_for_storage(new_metadata)
-
-            # Since we are updating multiple docs, we need a list of metadatas
-            metadatas_to_update = [db_ready_metadata] * len(doc_ids_to_update)
-
-            # 3. Perform the update operation
-            collection.update(
-                ids=doc_ids_to_update,
-                metadatas=metadatas_to_update
-            )
+            # 2. 为每个找到的节点创建一个新的“公共”节点对象
+            public_nodes_to_add = []
+            for i in range(len(results['ids'])):
+                metadata_copy = results['metadatas'][i].copy() if results['metadatas'][i] else {}
+                # 检查是否已经存在公共副本，避免重复添加
+                if metadata_copy.get('accessible_to') == 'public':
+                    logger.warning(f"Node {results['ids'][i]} for material_id {material_id} is already public. Skipping.")
+                    continue
+                
+                # 设置新节点的权限为 'public'
+                metadata_copy['accessible_to'] = 'public'
+                
+                # 创建新的 LlamaDocument 对象
+                # 注意：ID必须是唯一的，我们可以在旧ID上加一个前缀
+                new_public_node = LlamaDocument(
+                    text=results['documents'][i],
+                    metadata=metadata_copy,
+                )
+                public_nodes_to_add.append(new_public_node)
             
-            message = f"Successfully updated metadata for material_id: {material_id}."
+            # 3. 将这些新的公共节点插入到索引中
+            if public_nodes_to_add:
+                logger.info(f"Adding {len(public_nodes_to_add)} new public nodes for material_id {material_id}.")
+                # 调用自身的 update_index 方法来执行插入
+                self.update_index(public_nodes_to_add, collection_name)
+            else:
+                logger.info(f"No new public nodes needed for material_id {material_id}, it might have been published already.")
+
+            message = f"Successfully published material {material_id} by adding/verifying public nodes."
             task_status = "success"
             logger.info(message)
 
         except Exception as e:
-            logger.error(f"Error during metadata update for material_id '{material_id}': {e}", exc_info=True)
-            message = f"An error occurred: {str(e)}"
+            logger.error(f"Error during publishing of material_id '{material_id}': {e}", exc_info=True)
+            message = str(e)
             task_status = "error"
         
         return {

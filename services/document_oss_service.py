@@ -72,75 +72,75 @@ class DocumentOssService:
         try:
             # --- 1. 使用 Pydantic 的 model_dump() 自动处理别名和命名转换 ---
             # model_dump() 不带参数，会生成一个以字段名(snake_case)为键的字典
-            clean_metadata = request.metadata.model_dump()
+            base_metadata = request.metadata.model_dump()
             
             # 将顶层的 file_key 也添加到元数据中
-            clean_metadata['file_key'] = file_key
-            
-            # --- 2. 对列表字段进行特殊转换 ---
-            # 这里的键已经是正确的蛇形命名 (snake_case)
-            for key, value in clean_metadata.items():
-                if isinstance(value, list):
-                    # 将列表转换为 ",item1,item2," 格式的字符串
-                    transformed_value = f",{','.join(map(str, value))},"
-                    clean_metadata[key] = transformed_value
-                    logger.info(f"Transformed list in metadata key '{key}' to string: '{transformed_value}'")
+            base_metadata['file_key'] = file_key
+            base_metadata.pop('accessible_to', None)
+            base_metadata.pop('level_list', None) 
+            base_metadata = {k: v for k, v in base_metadata.items() if v is not None}
+            logger.info(f"Constructed base metadata for duplication: {base_metadata}")
 
-            # --- 3. 移除所有值为 None 的键，保持元数据干净 ---
-            clean_metadata = {k: v for k, v in clean_metadata.items() if v is not None}
-            logger.info(f"Constructed clean metadata for indexing: {clean_metadata}")
-
-            # --- 去重检查 ---
-            display_file_name = clean_metadata.get("file_name", "unknown_file")
-            
-            # 下载文件到临时位置 (Download)
-            # 使用请求中的原始列表进行判断
+            # --- 2. 决定存储桶并下载文件 (逻辑不变) ---
+            display_file_name = base_metadata.get("file_name", "unknown_file")
             accessible_to_list = request.metadata.accessible_to or []
             if "public" in accessible_to_list:
                 target_bucket = settings.OSS_PUBLIC_BUCKET_NAME
             else:
                 target_bucket = settings.OSS_PRIVATE_BUCKET_NAME
-            
             local_file_path = oss_service.download_file_to_temp(
                 object_key=file_key, 
                 bucket_name=target_bucket
             )
 
-            # --- 从临时文件加载文档并应用干净的元数据 ---
+            # --- 3. 加载原始文档区块 (逻辑不变) ---
             logger.info(f"Loading documents from temporary file: '{local_file_path}'")
-            # 我们只用 SimpleDirectoryReader 来解析文本和页码
             all_docs = SimpleDirectoryReader(input_files=[local_file_path]).load_data()
+            total_pages = len(all_docs)
             
-            # 关键：我们忽略 LlamaIndex 自动生成的元数据，强制使用我们自己构建的 clean_metadata
-            for doc in all_docs:
-                page_label = doc.metadata.get("page_label", "1") # 只保留页码
-                doc.metadata = clean_metadata.copy() # 使用干净元数据的副本
-                doc.metadata["page_label"] = page_label # 再把页码加上
+            # --- 4. 核心修改：根据权限列表，创建节点副本 ---
+            logger.info("Applying node duplication strategy based on ACLs...")
+            final_nodes_to_index = []
 
-            filtered_docs = all_docs
+            # 如果权限列表为空，为了防止文档丢失，默认将其归属给作者
+            if not accessible_to_list and 'author_id' in base_metadata:
+                acl_tag = str(base_metadata['author_id'])
+                accessible_to_list.append(acl_tag)
+                logger.warning(f"ACL list was empty. Defaulting to author_id: {acl_tag}")
 
-            if not filtered_docs:
-                message = "No valid content found in the file after filtering."
+            # 为每一个权限标签，创建一套完整的文档节点副本
+            for acl_tag in accessible_to_list:
+                for doc in all_docs:
+                    # 复制基础元数据
+                    metadata_copy = base_metadata.copy()
+                    # 为这个副本设置单一的、字符串类型的访问标签
+                    metadata_copy['accessible_to'] = str(acl_tag)
+                    # 保留原始的页码信息
+                    metadata_copy['page_label'] = doc.metadata.get("page_label", "1")
+                    
+                    # 创建一个新的 LlamaDocument 节点对象
+                    new_node = LlamaDocument(
+                        text=doc.text,
+                        metadata=metadata_copy
+                    )
+                    final_nodes_to_index.append(new_node)
+            
+            pages_loaded = len(final_nodes_to_index)
+            logger.info(f"Generated a total of {pages_loaded} nodes for indexing.")
+            
+            # 5. 索引所有生成的节点
+            if not final_nodes_to_index:
+                message = "No valid content found or no nodes generated for indexing."
                 task_status = "error"
             else:
-                total_pages = len(all_docs)
-                pages_loaded = len(filtered_docs)
-                
-                logger.debug(f"Type of filtered_docs: {type(filtered_docs)}")
-                for i, item in enumerate(filtered_docs):
-                    logger.debug(f"Item {i} in filtered_docs has type: {type(item)}")
-                    
-                # 索引文档 (Index)
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
-                query_service.update_index(filtered_docs, collection_name=collection_name)
+                query_service.update_index(final_nodes_to_index, collection_name=collection_name)
                 
-                # 成功后，更新处理记录
                 self.processed_files[file_key] = display_file_name
                 self._save_processed_keys()
                 
                 message = "File from OSS has been processed and indexed successfully."
                 task_status = "success"
-                logger.info(f"Successfully processed and indexed file for key: '{file_key}'")
 
         except Exception as e:
             logger.error(f"Error during processing of OSS key '{file_key}': {e}", exc_info=True)
