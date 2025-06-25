@@ -59,40 +59,66 @@ class DocumentOssService:
         total_pages = 0
         
         file_key = request.file_key
-        accessible_to = request.metadata.accessible_to or []
-        metadata = request.metadata.model_dump(by_alias=True, exclude_unset=True)
-        file_name = metadata.get("fileName", "unknown_file")
-        collection_name = request.collection_name or "public_collection"
 
-        # 1. 去重检查 (Deduplication Check)
+        # 从请求中获取原始元数据字典
+        collection_name = request.collection_name or "public_collection"
+         
         if file_key in self.processed_files:
-            original_filename = self.processed_files[file_key]
             return {
-                "message": f"This OSS file has already been processed (Original Filename: {original_filename}).",
+                "message": f"This OSS file has already been processed (Original Filename: {self.processed_files[file_key]}).",
                 "status": "duplicate"
             }
-            
+        
         try:
-            # 2. 下载文件到临时位置 (Download)
-            # 根据 'accessible_to' 字段决定使用哪个 bucket
-            if "public" in accessible_to:
+            # --- 1. 使用 Pydantic 的 model_dump() 自动处理别名和命名转换 ---
+            # model_dump() 不带参数，会生成一个以字段名(snake_case)为键的字典
+            clean_metadata = request.metadata.model_dump()
+            
+            # 将顶层的 file_key 也添加到元数据中
+            clean_metadata['file_key'] = file_key
+            
+            # --- 2. 对列表字段进行特殊转换 ---
+            # 这里的键已经是正确的蛇形命名 (snake_case)
+            for key, value in clean_metadata.items():
+                if isinstance(value, list):
+                    # 将列表转换为 ",item1,item2," 格式的字符串
+                    transformed_value = f",{','.join(map(str, value))},"
+                    clean_metadata[key] = transformed_value
+                    logger.info(f"Transformed list in metadata key '{key}' to string: '{transformed_value}'")
+
+            # --- 3. 移除所有值为 None 的键，保持元数据干净 ---
+            clean_metadata = {k: v for k, v in clean_metadata.items() if v is not None}
+            logger.info(f"Constructed clean metadata for indexing: {clean_metadata}")
+
+            # --- 去重检查 ---
+            display_file_name = clean_metadata.get("file_name", "unknown_file")
+            
+            # 下载文件到临时位置 (Download)
+            # 使用请求中的原始列表进行判断
+            accessible_to_list = request.metadata.accessible_to or []
+            if "public" in accessible_to_list:
                 target_bucket = settings.OSS_PUBLIC_BUCKET_NAME
-                logger.info(f"'{file_key}' identified as a public document. Using public bucket: '{target_bucket}'.")
             else:
                 target_bucket = settings.OSS_PRIVATE_BUCKET_NAME
-                logger.info(f"'{file_key}' identified as a private document. Using private bucket: '{target_bucket}'.")
             
-            # 2. 下载文件到临时位置 (Download)
-            # 将决定好的 target_bucket 传递给 oss_service
             local_file_path = oss_service.download_file_to_temp(
                 object_key=file_key, 
                 bucket_name=target_bucket
             )
 
-            # 3. 从临时文件加载和处理文档 (Process)
-            logger.info(f"Processing temporary file: '{local_file_path}'")
-            all_docs, filtered_docs = self._prepare_documents_from_temp_file(local_file_path, metadata)
+            # --- 从临时文件加载文档并应用干净的元数据 ---
+            logger.info(f"Loading documents from temporary file: '{local_file_path}'")
+            # 我们只用 SimpleDirectoryReader 来解析文本和页码
+            all_docs = SimpleDirectoryReader(input_files=[local_file_path]).load_data()
             
+            # 关键：我们忽略 LlamaIndex 自动生成的元数据，强制使用我们自己构建的 clean_metadata
+            for doc in all_docs:
+                page_label = doc.metadata.get("page_label", "1") # 只保留页码
+                doc.metadata = clean_metadata.copy() # 使用干净元数据的副本
+                doc.metadata["page_label"] = page_label # 再把页码加上
+
+            filtered_docs = all_docs
+
             if not filtered_docs:
                 message = "No valid content found in the file after filtering."
                 task_status = "error"
@@ -104,12 +130,12 @@ class DocumentOssService:
                 for i, item in enumerate(filtered_docs):
                     logger.debug(f"Item {i} in filtered_docs has type: {type(item)}")
                     
-                # 4. 索引文档 (Index)
+                # 索引文档 (Index)
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
                 query_service.update_index(filtered_docs, collection_name=collection_name)
                 
-                # 5. 成功后，更新处理记录
-                self.processed_files[file_key] = file_name
+                # 成功后，更新处理记录
+                self.processed_files[file_key] = display_file_name
                 self._save_processed_keys()
                 
                 message = "File from OSS has been processed and indexed successfully."
@@ -121,7 +147,7 @@ class DocumentOssService:
             message = f"An error occurred: {str(e)}"
             task_status = "error"
         finally:
-            # 6. 清理临时文件 (Cleanup)
+            # 清理临时文件
             if local_file_path:
                 temp_dir = os.path.dirname(local_file_path)
                 if os.path.exists(temp_dir):
@@ -134,31 +160,6 @@ class DocumentOssService:
             "pages_loaded": pages_loaded,
             "total_pages": total_pages
         }
-
-    # 这个方法现在是私有的，只在内部被 `process_new_oss_file` 调用
-    def _prepare_documents_from_temp_file(self, local_file_path: str, metadata: dict) -> Tuple[List[LlamaDocument], List[LlamaDocument]]:
-        logger.info(f"Loading documents from temporary path: '{local_file_path}'")
-        all_docs = SimpleDirectoryReader(input_files=[local_file_path]).load_data()
-        
-        for key, value in metadata.items():
-            # 如果发现任何一个值是列表类型
-            if isinstance(value, list):
-                # 将该列表转换为我们统一的“分隔符字符串”格式
-                # 例如: ["public"] -> ",public,"
-                # 例如: [] -> ",," (这仍然是一个合法的字符串)
-                transformed_value = f",{','.join(map(str, value))},"
-                metadata[key] = transformed_value
-                logger.info(f"Transformed list in metadata key '{key}' to string: '{transformed_value}'")
-
-        for doc in all_docs:
-            if doc.metadata is None:
-                doc.metadata = {}
-            doc.metadata.update(metadata)
-            if "page_label" not in doc.metadata:
-                doc.metadata["page_label"] = doc.metadata.get('page_label', '1')
-
-        filtered_docs, _ = self._filter_documents(all_docs)
-        return all_docs, filtered_docs
 
     def _filter_documents(self, documents: List[LlamaDocument]) -> Tuple[List[LlamaDocument], dict]:
         """Filters out blank or empty pages from a list of documents."""

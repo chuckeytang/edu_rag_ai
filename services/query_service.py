@@ -2,6 +2,10 @@ import logging
 import os
 import shutil
 
+from llama_cloud import TextNode
+
+from core.metadata_utils import prepare_metadata_for_storage
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
 if not logger.handlers:
@@ -202,8 +206,39 @@ class QueryService:
 
         logger.info("Index update completed.")
 
+    def get_nodes_by_metadata_filter(self, collection_name: str, filters: dict) -> List[TextNode]:
+        """
+        根据元数据过滤器，直接从ChromaDB中获取所有匹配的节点。
+        这不是相似度搜索，而是精确的数据拉取。
+        """
+        logger.info(f"Directly fetching nodes from '{collection_name}' with filters: {filters}")
+        collection = self.chroma_client.get_collection(name=collection_name)
+        
+        # 使用 collection.get() 方法进行元数据过滤
+        # include 列表确保我们取回所有需要的信息
+        results = collection.get(
+            where=filters,
+            include=["metadatas", "documents"]
+        )
+        
+        if not results or not results['ids']:
+            logger.info(f"No nodes found for filters: {filters}")
+            return []
+            
+        # 将ChromaDB返回的结果重新构建为LlamaIndex的TextNode对象列表
+        nodes = []
+        for i in range(len(results['ids'])):
+            node = TextNode(
+                id_=results['ids'][i],
+                text=results['documents'][i],
+                extra_info=results['metadatas'][i] or {}
+            )
+            nodes.append(node)
+            
+        logger.info(f"Found {len(nodes)} nodes matching the filters.")
+        return nodes
 
-    def update_document_metadata(self, request: UpdateMetadataRequest) -> dict:
+    def update_document_metadata(self, request: UpdateMetadataRequest, collection_name: str) -> dict:
         """
         Finds a document by its material_id in the metadata and updates it.
         Returns a dictionary with the final status.
@@ -213,7 +248,7 @@ class QueryService:
         message = f"An unexpected error occurred while updating metadata for material_id {material_id}."
         
         try:
-            collection = self.chroma_client.get_collection("public_collection")
+            collection = self.chroma_client.get_collection(collection_name)
 
             # 1. Find the document in ChromaDB using its material_id
             logger.info(f"Searching for document with material_id: {material_id} to update.")
@@ -236,10 +271,11 @@ class QueryService:
             # model_dump will convert the Pydantic model to a dict.
             # exclude_unset=True is crucial: it ensures we only include fields that
             # were explicitly sent in the request, preventing accidental overwrites with None.
-            new_metadata = request.metadata.model_dump(by_alias=True, exclude_unset=True)
-            
+            new_metadata = request.metadata.model_dump(exclude_unset=True)
+            db_ready_metadata = prepare_metadata_for_storage(new_metadata)
+
             # Since we are updating multiple docs, we need a list of metadatas
-            metadatas_to_update = [new_metadata] * len(doc_ids_to_update)
+            metadatas_to_update = [db_ready_metadata] * len(doc_ids_to_update)
 
             # 3. Perform the update operation
             collection.update(
@@ -315,44 +351,31 @@ class QueryService:
 
     def _build_chroma_where_clause(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Builds a native ChromaDB `where` clause dictionary from a high-level filter dict.
-        This handles the special case for `accessible_to` using $or and $like.
+        为 ChromaDB 构建原生 where 子句。
+        此版本只使用 ChromaDB 明确支持的操作符，如 $in 和 $eq。
         """
         if not filters:
             return {}
 
-        and_conditions = []
+        chroma_filters = []
         
         for key, value in filters.items():
-            # --- 核心逻辑：特殊处理 accessible_to ---
-            if key == "accessible_to" and isinstance(value, list):
-                if not value: continue # Skip if the list is empty
-                
-                # Create an $or condition for each item in the accessible_to list
-                or_conditions = [
-                    {"accessible_to": {"$like": f"%,{item},%"}} for item in value
-                ]
-                
-                if or_conditions:
-                    # If there's more than one, wrap in $or. If only one, no need for $or.
-                    if len(or_conditions) > 1:
-                        and_conditions.append({"$or": or_conditions})
-                    else:
-                        and_conditions.append(or_conditions[0])
-            
-            # --- 其他所有过滤器按标准处理 (例如，精确匹配) ---
-            else:
-                and_conditions.append({key: {"$eq": value}})
+            # 对 accessible_to 字段，直接使用 $in 操作符
+            if key == "accessible_to" and isinstance(value, list) and value:
+                chroma_filters.append({"accessible_to": {"$in": value}})
+            # 其他所有字段，使用 $eq (等于) 操作符
+            elif key != "accessible_to":
+                chroma_filters.append({key: {"$eq": value}})
 
-        if not and_conditions:
+        if not chroma_filters:
             return {}
         
-        # If there are multiple top-level conditions, wrap them in $and
-        if len(and_conditions) > 1:
-            return {"$and": and_conditions}
+        # 如果有多个过滤条件，用 $and 连接
+        if len(chroma_filters) > 1:
+            return {"$and": chroma_filters}
         
-        # Otherwise, just return the single condition
-        return and_conditions[0]
+        # 只有一个条件，直接返回
+        return chroma_filters[0]
 
     # You can also create an async version for streaming if needed
     async def stream_query_with_filters(

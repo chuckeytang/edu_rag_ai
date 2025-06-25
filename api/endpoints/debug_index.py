@@ -55,6 +55,7 @@ def list_indexed(
         items.append({
             "node_id": meta.get("doc_id") or meta.get("id_") or "",
             "chroma_id": _id,
+            "metadata": meta,
             "file_name": meta.get("file_name"),
             "page_label": meta.get("page_label"),
             "text_snippet": (doc or "")[:200] + ("..." if doc and len(doc) > 200 else "")
