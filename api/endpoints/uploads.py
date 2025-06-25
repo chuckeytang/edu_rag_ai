@@ -180,7 +180,7 @@ def update_metadata_task(request: UpdateMetadataRequest):
     logger.info(f"[TASK_ID: {task_id}] Metadata update task started. Delegating to DocumentOssService...")
     
     # Call the new service method to execute the update flow
-    final_status = document_oss_service.update_document_metadata(request)
+    final_status = query_service.update_document_metadata(request)
 
     # Update the global task results dictionary with the outcome
     # We use the UpdateMetadataResponse schema for consistency

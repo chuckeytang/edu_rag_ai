@@ -24,7 +24,7 @@ from chromadb.config import Settings
 # from llama_index.cura import CURARetriever
 # print(CURARetriever)
 from core.config import settings
-from models.schemas import StreamChunk
+from models.schemas import StreamChunk, UpdateMetadataRequest
 from services.document_service import document_service
 from services.oss_service import oss_service
 from typing import List, Dict
@@ -202,6 +202,65 @@ class QueryService:
 
         logger.info("Index update completed.")
 
+
+    def update_document_metadata(self, request: UpdateMetadataRequest) -> dict:
+        """
+        Finds a document by its material_id in the metadata and updates it.
+        Returns a dictionary with the final status.
+        """
+        material_id = request.material_id
+        task_status = "error"
+        message = f"An unexpected error occurred while updating metadata for material_id {material_id}."
+        
+        try:
+            collection = self.chroma_client.get_collection("public_collection")
+
+            # 1. Find the document in ChromaDB using its material_id
+            logger.info(f"Searching for document with material_id: {material_id} to update.")
+            results = collection.get(
+                where={"material_id": material_id},
+                include=[] # We only need the ID, no need to fetch payload
+            )
+
+            if not results or not results['ids']:
+                message = f"Document with material_id {material_id} not found. Cannot perform update."
+                task_status = "not_found"
+                logger.warning(message)
+                return {"message": message, "status": task_status}
+
+            # In case multiple chunks have the same material_id, update all of them.
+            doc_ids_to_update = results['ids']
+            logger.info(f"Found {len(doc_ids_to_update)} document chunks with material_id {material_id}. Internal ChromaDB IDs: {doc_ids_to_update}")
+
+            # 2. Prepare the new metadata payload
+            # model_dump will convert the Pydantic model to a dict.
+            # exclude_unset=True is crucial: it ensures we only include fields that
+            # were explicitly sent in the request, preventing accidental overwrites with None.
+            new_metadata = request.metadata.model_dump(by_alias=True, exclude_unset=True)
+            
+            # Since we are updating multiple docs, we need a list of metadatas
+            metadatas_to_update = [new_metadata] * len(doc_ids_to_update)
+
+            # 3. Perform the update operation
+            collection.update(
+                ids=doc_ids_to_update,
+                metadatas=metadatas_to_update
+            )
+            
+            message = f"Successfully updated metadata for material_id: {material_id}."
+            task_status = "success"
+            logger.info(message)
+
+        except Exception as e:
+            logger.error(f"Error during metadata update for material_id '{material_id}': {e}", exc_info=True)
+            message = f"An error occurred: {str(e)}"
+            task_status = "error"
+        
+        return {
+            "message": message,
+            "status": task_status,
+        }
+    
     def query_with_filters(self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5, prompt: str = None):
         """
         对指定的collection执行带元数据过滤的查询。
@@ -238,11 +297,11 @@ class QueryService:
         if not index:
             raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
 
-        metadata_filters = self._build_metadata_filters(filters)
+        chroma_where_clause = self._build_chroma_where_clause(filters)
 
         # 1. 创建一个Retriever，配置和查询时完全一样
         retriever = index.as_retriever(
-            filters=metadata_filters,
+            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
             similarity_top_k=similarity_top_k
         )
         
