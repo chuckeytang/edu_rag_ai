@@ -3,12 +3,21 @@ version: "3.8"
 services:
   llm-ninja:
     build:
-      context: .. # 指向项目根目录
-      dockerfile: docker/Dockerfile # Dockerfile路径
+      context: .. # 指向项目根目录，即 /var/app/edu_rag_ai
+      dockerfile: docker/Dockerfile # Dockerfile路径，即 /var/app/edu_rag_ai/docker/Dockerfile
     ports:
       - "8010:8010"
-    # volumes:
-    # - ../:/app  # 挂载整个项目目录
+    volumes:
+      # 挂载命名卷到容器内部的每个数据目录
+      - chroma_db_volume:/app/chroma_db # 对应 ./chroma_db
+      - data_volume:/app/data # 对应 ./data
+      - index_store_volume:/app/index_store # 对应 ./index_store
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
+
+# 在文件底部定义命名卷
+volumes:
+  chroma_db_volume:
+  data_volume:
+  index_store_volume:
