@@ -1,7 +1,19 @@
 import os
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+print("="*50)
+print(f"[DEBUG] Before  {os.environ.get('AWS_DEFAULT_REGION')}")
+print(f"[DEBUG] Before  {os.environ.get('OSS_PRIVATE_BUCKET_NAME')}")
+print(f"[DEBUG] Before  {os.environ.get('AWS_S3_ENDPOINT_URL')}")
+
 load_dotenv()
+
+print(f"[DEBUG] Before  {os.environ.get('AWS_DEFAULT_REGION')}")
+print(f"[DEBUG] Before  {os.environ.get('OSS_PRIVATE_BUCKET_NAME')}")
+print(f"[DEBUG] Before  {os.environ.get('AWS_S3_ENDPOINT_URL')}")
+print("="*50)
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "LLM Ninja API"
     VERSION: str = "1.0.0"
