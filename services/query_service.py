@@ -471,80 +471,56 @@ class QueryService:
             prompt: str = None
     ) -> Union[str, AsyncGenerator[str, None]]:
         
-        logger.info(f"Starting query_with_files with {len(file_identifiers)} identifiers.")
-        
-        permanent_paths = [] # 存放已经永久保存在本地的文件的路径
-        temp_dirs_to_clean = [] # 存放为本次查询临时下载的文件的目录
-        
+        logger.info(f"Executing query within specific files (material_ids): {file_identifiers}")
+
+        # --- 1. 输入校验与准备 ---
+        if not file_identifiers:
+            raise ValueError("file_identifiers list cannot be empty for a file-specific query.")
+
         try:
-            # --- 核心修改：双重查找和临时文件管理 ---
-            private_bucket_name = settings.OSS_PRIVATE_BUCKET_NAME
-            for identifier in file_identifiers:
-                path = None
+            material_ids_as_int = [int(mid) for mid in file_identifiers]
+        except ValueError:
+            raise TypeError("All file_identifiers must be valid integers (material_id).")
 
-                # 1. 首先在 document_service (内容哈希) 中查找
-                path = document_service.file_hashes.get(identifier)
-                if path:
-                    logger.info(f"  ✅ Found permanent path '{path}' for content_hash '{identifier}'.")
+        # --- 2. 直接构建最终、正确的 ChromaDB `where` 子句 ---
+        # 这是整个方案的核心，确保我们只使用被明确支持的 $in 操作符
+        chroma_where_clause = {
+            "material_id": {
+                "$in": material_ids_as_int
+            }
+        }
+        logger.info(f"Constructed a direct and final ChromaDB `where` clause: {chroma_where_clause}")
 
-                # 2. 如果找不到，则尝试从OSS下载
-                if not path:
-                    try:
-                        logger.info(f"  Identifier '{identifier}' not found locally, attempting to download from OSS...")
-                        # oss_service.download_file_to_temp 会创建一个临时目录并返回完整路径
-                        path = oss_service.download_file_to_temp(
-                            object_key=identifier,
-                            bucket_name=private_bucket_name)
-                        
-                        # 将临时文件所在的目录记录下来，以便事后清理
-                        temp_dirs_to_clean.append(os.path.dirname(path))
-                        logger.info(f"  ✅ Successfully downloaded to temporary path '{path}' for oss_key '{identifier}'.")
-                    except Exception as e:
-                        logger.warning(f"  ❌ Failed to download or find identifier '{identifier}': {e}")
-                        continue # 跳过这个无效的ID
+        # --- 3. 获取索引对象 (复用现有逻辑) ---
+        # 假设所有文档都在 'public_collection'，如果不是，这里需要动态传入
+        collection_name = "public_collection" 
+        index = self._get_or_load_index(collection_name)
+        if not index:
+            error_message = f"Query failed because collection '{collection_name}' does not exist."
+            logger.error(error_message)
+            raise ValueError(error_message)
 
-                if path and os.path.exists(path):
-                    permanent_paths.append(path)
-                else:
-                    logger.warning(f"  ❌ Path '{path}' for identifier '{identifier}' does not exist on disk.")
-
-            if not permanent_paths:
-                raise ValueError("No valid local documents could be found or downloaded for the given identifiers.")
-            
-            unique_paths = list(set(permanent_paths))
-            logger.info(f"Found {len(unique_paths)} unique local files to build temporary index.")
-
-            # --- 后续的临时索引和查询逻辑保持不变 ---
-            target_docs = document_service.load_documents(unique_paths)
-            if not target_docs:
-                raise ValueError("Located files could not be loaded or are empty.")
-
-            temp_index = VectorStoreIndex.from_documents(target_docs, embed_model=self.embedding_model)
-            query_engine = temp_index.as_query_engine(
-                llm=self.llm,
-                streaming=True,
-                similarity_top_k=min(similarity_top_k, len(target_docs)),
-                text_qa_template=self._create_qa_prompt(prompt)
-            )
-            
-            response = await query_engine.aquery(question)
-            
-            # 流式返回结果
-            if hasattr(response, 'response_gen'):
-                async for chunk in response.response_gen:
-                    yield chunk
-            else:
-                yield response.response
+        # --- 4. 直接构建查询引擎，不再调用其他方法 ---
+        # 将我们手动构建的、100%正确的 where 子句通过 vector_store_kwargs 传递
+        query_engine = index.as_query_engine(
+            llm=self.llm,
+            vector_store_kwargs={"where": chroma_where_clause},
+            similarity_top_k=similarity_top_k,
+            streaming=True,
+            text_qa_template=self._create_qa_prompt(prompt)
+        )
         
-        finally:
-            # --- 无论成功还是失败，都清理本次查询下载的临时文件 ---
-            if temp_dirs_to_clean:
-                logger.info(f"Cleaning up {len(temp_dirs_to_clean)} temporary director(y/ies)...")
-                for temp_dir in temp_dirs_to_clean:
-                    try:
-                        shutil.rmtree(temp_dir)
-                        logger.info(f"  ✅ Successfully removed temporary directory: {temp_dir}")
-                    except Exception as e:
-                        logger.error(f"  ❌ Failed to remove temporary directory {temp_dir}: {e}", exc_info=True)
+        # --- 5. 执行查询并流式返回结果 (逻辑不变) ---
+        response = await query_engine.aquery(question)
+        
+        if hasattr(response, 'response_gen'):
+            async for chunk in response.response_gen:
+                yield chunk
+        # 在 LlamaIndex 的某些版本中，非流式结果也可能需要这样处理
+        elif hasattr(response, 'response'):
+             yield response.response
+        else:
+             logger.warning("Response object has no 'response_gen' or 'response' attribute.")
+             yield ""
             
 query_service = QueryService()
