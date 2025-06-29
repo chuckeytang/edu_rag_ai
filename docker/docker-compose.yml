@@ -8,10 +8,10 @@ services:
     ports:
       - "8010:8010"
     volumes:
-      # 挂载命名卷到容器内部的每个数据目录
-      - chroma_db_volume:/app/chroma_db # 对应 ./chroma_db
-      - data_volume:/app/data # 对应 ./data
-      - index_store_volume:/app/index_store # 对应 ./index_store
+      # 宿主机路径 (相对于 docker-compose.yml) : 容器内部路径
+      - ../chroma_db:/app/chroma_db
+      - ../data:/app/data
+      - ../index_store:/app/index_store
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
