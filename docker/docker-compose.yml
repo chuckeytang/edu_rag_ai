@@ -1,14 +1,14 @@
-version: '3.8'
+version: "3.8"
 
 services:
   llm-ninja:
     build:
-      context: ..  # 指向项目根目录
-      dockerfile: docker/Dockerfile  # Dockerfile路径
+      context: .. # 指向项目根目录
+      dockerfile: docker/Dockerfile # Dockerfile路径
     ports:
-      - "8000:8000"
+      - "8010:8010"
     # volumes:
-      # - ../:/app  # 挂载整个项目目录
+    # - ../:/app  # 挂载整个项目目录
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
