@@ -20,3 +20,6 @@ api_router.include_router(
 api_router.include_router(
     debug_index.router, prefix="/debug", tags=["debug"]
 )
+api_router.include_router(
+    debug_index.router, prefix="/extraction", tags=["extraction"]
+)

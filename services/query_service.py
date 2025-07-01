@@ -523,4 +523,42 @@ class QueryService:
              logger.warning("Response object has no 'response_gen' or 'response' attribute.")
              yield ""
             
+    def delete_nodes_by_metadata(self, collection_name: str, filters: dict) -> dict:
+        """
+        根据元数据过滤器，直接从ChromaDB中删除所有匹配的节点。
+        """
+        logger.info(f"Attempting to delete nodes from '{collection_name}' with filters: {filters}")
+        
+        if not filters:
+            message = "Deletion filters cannot be empty."
+            logger.error(message)
+            return {"status": "error", "message": message}
+            
+        try:
+            collection = self.chroma_client.get_collection(name=collection_name)
+            
+            # 先查询一下有多少条匹配，方便打日志
+            results = collection.get(where=filters, include=[])
+            count = len(results.get('ids', []))
+
+            if count == 0:
+                message = f"No documents found matching the filters. Nothing to delete."
+                logger.warning(message)
+                return {"status": "success", "message": message}
+
+            # 调用 ChromaDB 的核心删除方法
+            collection.delete(where=filters)
+            
+            # 持久化变更（如果需要，取决于您的ChromaDB配置）
+            # self.chroma_client.persist() 
+            
+            message = f"Successfully deleted {count} document nodes matching filters: {filters}"
+            logger.info(message)
+            return {"status": "success", "message": message}
+
+        except Exception as e:
+            message = f"An error occurred during deletion: {e}"
+            logger.error(message, exc_info=True)
+            return {"status": "error", "message": message}
+        
 query_service = QueryService()

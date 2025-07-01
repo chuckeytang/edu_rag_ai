@@ -183,3 +183,4 @@ async def query_with_files(
         StreamingResponseWrapper(generate()),
         media_type="text/event-stream"
     )
+

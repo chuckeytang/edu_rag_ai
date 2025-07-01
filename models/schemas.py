@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 class DocumentMetadata(BaseModel):
     file_name: str
     page_label: str
@@ -79,7 +79,11 @@ class UpdateMetadataResponse(BaseModel):
     material_id: int
     task_id: str
     status: str
-    
+
+class DeleteByMetadataRequest(BaseModel):
+    collection_name: str = Field(..., description="The name of the collection to delete from.")
+    filters: Optional[Dict] = Field(..., description="The `where` clause to filter documents for deletion.")
+
 class DocumentChunkResponse(BaseModel):
     page_label: str
     text_snippet: str

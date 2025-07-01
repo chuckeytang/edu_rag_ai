@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str
     AWS_DEFAULT_REGION: str
 
+    DEEPSEEK_API_BASE: str
+    DEEPSEEK_API_KEY: str
+
     class Config:
         case_sensitive = True
         env_file = ".env"

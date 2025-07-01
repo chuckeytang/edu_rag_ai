@@ -5,7 +5,7 @@ from services.document_service import document_service
 from services.document_oss_service import document_oss_service
 from services.oss_service import oss_service
 from services.query_service import query_service
-from models.schemas import UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
+from models.schemas import DeleteByMetadataRequest, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
 import shutil
 router = APIRouter()
 
@@ -232,3 +232,27 @@ async def get_task_status(task_id: str):
     
     logger.info(f"Found status for Task ID '{task_id}'. Current status: '{result.status}'. Returning result to client.")
     return result
+
+
+@router.post("/delete-by-metadata", summary="[同步操作] 根据元数据删除文档")
+def delete_by_metadata(request: DeleteByMetadataRequest):
+    """
+    接收来自后端的指令，根据元数据过滤器删除ChromaDB中的文档。
+    这是一个同步操作，因为删除通常很快。
+    """
+    logger.info(f"Received request to delete documents with filters: {request.filters}")
+    try:
+        result = query_service.delete_nodes_by_metadata(
+            collection_name=request.collection_name,
+            filters=request.filters
+        )
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result["message"])
+        
+        return result
+        
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Deletion request failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during deletion: {str(e)}")
