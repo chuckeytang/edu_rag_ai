@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 # 现有 endpoint
-from api.endpoints import documents, queries, uploads
+from api.endpoints import documents, extraction, queries, uploads
 # 新增调试 endpoint
 from api.endpoints import debug_index
 
@@ -21,5 +21,5 @@ api_router.include_router(
     debug_index.router, prefix="/debug", tags=["debug"]
 )
 api_router.include_router(
-    debug_index.router, prefix="/extraction", tags=["extraction"]
+    extraction.router, prefix="/extraction", tags=["extraction"]
 )

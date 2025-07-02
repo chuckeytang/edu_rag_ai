@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 print("="*50)
 print(f"[DEBUG] Before  {os.environ.get('AWS_DEFAULT_REGION')}")
@@ -43,25 +43,19 @@ class Settings(BaseSettings):
     DEEPSEEK_API_BASE: str
     DEEPSEEK_API_KEY: str
 
-    class Config:
-        case_sensitive = True
-        env_file = ".env"
+    # 使用 SettingsConfigDict 来配置 Pydantic
+    model_config = SettingsConfigDict(
+        case_sensitive=True,
+        env_file=".env",
+        extra="ignore" # 如果 .env 中有模型中未定义的字段，会忽略而不是报错
+    )
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.__init_data_dir()
+
     def __init_data_dir(self):
         os.makedirs(self.DATA_DIR, exist_ok=True)
         os.makedirs(self.DATA_CONFIG_DIR, exist_ok=True)
 
-settings = Settings(DASHSCOPE_API_KEY=os.getenv("DASHSCOPE_API_KEY"))
-settings = Settings(OSS_ENDPOINT=os.getenv("OSS_ENDPOINT"))
-settings = Settings(OSS_ACCESS_KEY_ID=os.getenv("OSS_ACCESS_KEY_ID"))
-settings = Settings(OSS_ACCESS_KEY_SECRET=os.getenv("OSS_ACCESS_KEY_SECRET"))
-settings = Settings(OSS_PUBLIC_BUCKET_NAME=os.getenv("OSS_PUBLIC_BUCKET_NAME"))
-settings = Settings(OSS_PRIVATE_BUCKET_NAME=os.getenv("OSS_PRIVATE_BUCKET_NAME"))
-
-settings = Settings(OSS_PUBLIC_VECTOR_BUCKET=os.getenv("OSS_PUBLIC_VECTOR_BUCKET"))
-settings = Settings(AWS_S3_ENDPOINT_URL=os.getenv("AWS_S3_ENDPOINT_URL"))
-settings = Settings(AWS_ACCESS_KEY_ID=os.getenv("AWS_ACCESS_KEY_ID"))
-settings = Settings(AWS_SECRET_ACCESS_KEY=os.getenv("AWS_SECRET_ACCESS_KEY"))
-settings = Settings(AWS_DEFAULT_REGION=os.getenv("AWS_DEFAULT_REGION"))
+settings = Settings()

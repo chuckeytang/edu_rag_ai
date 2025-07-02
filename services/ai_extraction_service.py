@@ -6,16 +6,20 @@ import os
 import shutil
 from typing import List, Dict, Any, Optional
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from llama_index.llms.openai_like import OpenAILike
-from llama_index.program import LLMTextCompletionProgram
-from llama_index.output_parsers import PydanticOutputParser
+from llama_index.core.program import LLMTextCompletionProgram
+from llama_index.core.output_parsers import PydanticOutputParser
+from llama_index.core import SimpleDirectoryReader
 
 from core.config import settings # 假设settings包含DeepSeek配置
+from models.schemas import ExtractedDocumentMetadata
 from services.oss_service import oss_service # 用于从OSS下载文件
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) 
 
 # --- Pydantic 模型定义 ---
 class DocumentMetadata(BaseModel):
@@ -54,56 +58,61 @@ class AIExtractionService:
 
         # 预定义的选项集合 (这些应该从Spring后端获取，或从数据库加载)
         # 实际应用中，这些可能通过构造函数参数传入，或通过单独的服务获取
-        self.COURSE_SYSTEM_OPTIONS = ["IB", "IGCSE", "AP", "A-Level", "GCSE", "O-Level"]
-        self.EXAM_BOARD_OPTIONS = ["CAIE", "Edexcel", "AQA", "OCR"]
-        self.LABEL_OPTIONS = ["Znotes", "Definitions", "Paper 5", "Book", "Notes", "Past Paper", "Textbook Chapter"]
-        self.LEVEL_OPTIONS = ["AS", "A2", "SL", "HL", "Year 10", "Year 11", "Year 12", "Year 13"]
-        self.SUBJECT_OPTIONS = ["Chemistry", "Business", "Computer Science", "Physics", "Mathematics", "Biology", "Economics", "History"]
-        self.DOCUMENT_TYPE_OPTIONS = ["Handout", "Paper 1", "Paper 2", "Paper 3", "IA", "Essay", "Syllabus", "Revision Guide"]
+        self.CLAZZ_OPTIONS = ["A-Level", "IGCSE", "AP", "A-Level", "GCSE", "IB", "SAT", "竞赛"]
+        self.EXAM_BOARD_OPTIONS = ["CAIE", "Edexcel", "AQA"]
+        self.LABEL_OPTIONS = []
+        self.LEVEL_OPTIONS = ["SL","HL","AS","A2"]
+        self.SUBJECT_OPTIONS = ["Chinese A Lang&Lit","Economics","Physics","Biology","Business","English","Mathematics","Chemistry","Psychology","Accounting","Computer Science","Further Math","Geography","Calculus AB","Calculus BC","Computer Science A","Environmental Science","Macroeconomics","Microeconomics","Physics 1: Algebra-Based","Physics C: Electricity & Magnetism","Physics C: Mechanics","Statistics","Business Management","English A Lang&Lit","English A Literature","English B","ESS","Global Politics","History","Maths AA","Maths AI","Philosophy","SEHS","TOK","Visual Arts","Business Studies","English Literature","ESL","ICT","Additional Math","Combined Science","Maths","Reading and Writing","AMC10","BBO","BPho 中/高级","MAT","Math Kangaroo","NEC","UKChO","UKMT"]
+        self.DOCUMENT_TYPE_OPTIONS = ["Handout", "Paper1", "Book", "IA"]
 
-    async def _get_content_from_oss_or_text(self, file_key: Optional[str] = None, text_content: Optional[str] = None) -> str:
+    async def _get_content_from_oss_or_text(self, 
+                                            file_key: Optional[str] = None, 
+                                            text_content: Optional[str] = None,
+                                            is_public: bool = False # 新增参数
+                                            ) -> str:
         """
         根据 file_key 从 OSS 下载文件并提取内容，或直接使用提供的文本内容。
+        根据 is_public 参数决定从公共桶或私有桶下载。
         """
         if file_key:
             local_file_path = None
             try:
-                # 假设所有需要提取元数据的文档都在公共桶中（或根据实际情况判断桶）
-                # 这里为了简化，假设直接从公共桶下载
-                target_bucket = settings.OSS_PUBLIC_BUCKET_NAME # 或者根据文件类型/用户权限判断
+                # 根据 is_public 决定目标桶
+                target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if is_public else settings.OSS_PRIVATE_BUCKET_NAME
+                logger.info(f"Attempting to download '{file_key}' from bucket: '{target_bucket}'")
+
                 local_file_path = oss_service.download_file_to_temp(
                     object_key=file_key, 
                     bucket_name=target_bucket
                 )
                 
                 # 使用 SimpleDirectoryReader 来读取文件内容
-                from llama_index.core import SimpleDirectoryReader
-                # LlamaIndex 默认会尝试加载多种文件类型，pypdf已经包含在您的依赖中
                 reader = SimpleDirectoryReader(input_files=[local_file_path])
                 documents = reader.load_data()
                 
                 full_content = "\n".join([doc.text for doc in documents])
                 return full_content
             except Exception as e:
-                logger.error(f"从OSS下载或读取文件 '{file_key}' 失败: {e}")
-                raise HTTPException(status_code=500, detail=f"从OSS下载或读取文件失败: {e}")
+                logger.error(f"从OSS下载或读取文件 '{file_key}' 失败 (桶: {target_bucket}): {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"从OSS下载或读取文件失败: {e}. 请检查文件键和权限。")
             finally:
                 if local_file_path and os.path.exists(os.path.dirname(local_file_path)):
-                    shutil.rmtree(os.path.dirname(local_file_path)) # 清理临时目录
+                    shutil.rmtree(os.path.dirname(local_file_path))
                     logger.info(f"Cleaned up temporary directory for {file_key}")
         elif text_content:
             return text_content
         else:
-            raise ValueError("必须提供 file_key 或 text_content。")
+            raise ValueError("必须提供 'file_key' 或 'text_content' 中的至少一个。")
 
-    async def extract_document_metadata(self, file_key: Optional[str] = None, text_content: Optional[str] = None) -> DocumentMetadata:
+    async def extract_document_metadata(self, file_key: Optional[str] = None, text_content: Optional[str] = None, is_public: bool = True) -> ExtractedDocumentMetadata: # 新增 is_public
         """
         使用DeepSeek模型从文档内容中提取元数据。
-        支持从OSS下载文件或直接提供文本内容。
+        支持从OSS下载文件或直接提供文本内容，并根据 is_public 决定桶。
         """
-        doc_content = await self._get_content_from_oss_or_text(file_key, text_content)
+        doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public) # 传递 is_public
 
-        course_systems_str = ", ".join(self.COURSE_SYSTEM_OPTIONS)
+        # ... (提示词构建逻辑不变) ...
+        clazz_str = ", ".join(self.CLAZZ_OPTIONS)
         exam_boards_str = ", ".join(self.EXAM_BOARD_OPTIONS)
         labels_str = ", ".join(self.LABEL_OPTIONS)
         levels_str = ", ".join(self.LEVEL_OPTIONS)
@@ -116,7 +125,7 @@ class AIExtractionService:
         如果某个字段在文档中找不到对应信息，或者无法匹配到提供的选项，请将其设为 null 或空列表。
 
         可选项列表：
-        - 课程体系 (clazz): [{course_systems_str}]
+        - 课程体系 (clazz): [{clazz_str}]
         - 考试局 (exam): [{exam_boards_str}]
         - 标签 (labelList): [{labels_str}]
         - 等级 (levelList): [{levels_str}]
@@ -131,7 +140,7 @@ class AIExtractionService:
         请提供JSON格式的元数据：
         """
 
-        parser = PydanticOutputParser(output_cls=DocumentMetadata)
+        parser = PydanticOutputParser(output_cls=ExtractedDocumentMetadata) # 使用更新后的模型名
         program = LLMTextCompletionProgram.from_defaults(
             output_parser=parser,
             prompt_template_str=prompt_template,
@@ -140,20 +149,21 @@ class AIExtractionService:
         )
 
         try:
-            metadata = await program.aprogram(document_content=doc_content) # 使用 aprogram 进行异步调用
-            logger.info(f"成功提取元数据：{metadata.json()}")
+            metadata = await program.acall(document_content=doc_content)
+            logger.info(f"成功提取元数据：{metadata.model_dump_json(indent=2)}") # 使用 model_dump_json，并可选地设置 indent 使输出更易读
             return metadata
         except Exception as e:
             logger.error(f"提取元数据时发生错误: {e}", exc_info=True)
-            raise
+            raise HTTPException(status_code=500, detail=f"元数据提取过程中AI服务出错: {e}") # 明确是AI服务错误
 
-    async def extract_knowledge_flashcards(self, file_key: Optional[str] = None, text_content: Optional[str] = None) -> List[Flashcard]:
+    async def extract_knowledge_flashcards(self, file_key: Optional[str] = None, text_content: Optional[str] = None, is_public: bool = True) -> List[Flashcard]: # 新增 is_public
         """
         使用DeepSeek模型从文档内容中提炼知识点，形成记忆卡。
-        支持从OSS下载文件或直接提供文本内容。
+        支持从OSS下载文件或直接提供文本内容，并根据 is_public 决定桶。
         """
-        doc_content = await self._get_content_from_oss_or_text(file_key, text_content)
+        doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public) # 传递 is_public
 
+        # ... (提示词构建逻辑不变) ...
         prompt_template = """
         您是一个教育专家，请仔细阅读以下文档内容，并从中提炼出重要的知识点。
         每个知识点应该被表示为一张“记忆卡”，包含一个“术语”和一个“解释”。
@@ -182,12 +192,12 @@ class AIExtractionService:
         )
 
         try:
-            flashcard_list_obj = await program.aprogram(document_content=doc_content) # 使用 aprogram 进行异步调用
+            flashcard_list_obj = await program.acall(document_content=doc_content)
             logger.info(f"成功提取记忆卡，数量：{len(flashcard_list_obj.flashcards)}")
             return flashcard_list_obj.flashcards
         except Exception as e:
             logger.error(f"提取记忆卡时发生错误: {e}", exc_info=True)
-            raise
+            raise HTTPException(status_code=500, detail=f"记忆卡提取过程中AI服务出错: {e}") # 明确是AI服务错误
 
 # 创建一个单例实例
 ai_extraction_service = AIExtractionService()

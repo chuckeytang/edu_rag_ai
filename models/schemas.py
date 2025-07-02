@@ -43,6 +43,57 @@ class DebugRequest(BaseModel):
     filename: str
     question: str
 
+# 请求体模型，用于接收文本内容或 OSS file_key
+class ExtractionRequest(BaseModel):
+    file_key: Optional[str] = None # OSS 文件键
+    content: Optional[str] = None  # 直接的文本内容
+    is_public: Optional[bool] = True
+
+    # 确保至少提供一个
+    class Config:
+        extra = "forbid"
+        # 验证器：确保 file_key 或 content 至少有一个被提供
+        @classmethod
+        def validate_at_least_one(cls, values):
+            if not values.get('file_key') and not values.get('content'):
+                raise ValueError("必须提供 'file_key' 或 'content' 中的至少一个。")
+            if values.get('file_key') and values.get('content'):
+                raise ValueError("不能同时提供 'file_key' 和 'content'。")
+            return values
+        
+        json_schema_extra = {
+            "examples": [
+                {
+                    "file_key": "path/to/your/document.pdf",
+                    "is_public": True
+                },
+                {
+                    "file_key": "path/to/your/private_document.docx",
+                    "is_public": False
+                },
+                {
+                    "content": "This is a sample document content about Chemistry."
+                }
+            ]
+        }
+        
+# 用于文档元数据提取
+class ExtractedDocumentMetadata(BaseModel): # 新的、更具体的元数据模型名称
+    clazz: Optional[str] = Field(None, description="课程体系名称，如：IB、IGCSE、AP...，匹配课程体系选项集合中的一个")
+    exam: Optional[str] = Field(None, description="考试局名称，如：CAIE、Edexcel、AQA，匹配考试局选项集合中的一个")
+    labelList: List[str] = Field([], description="标签名称列表，该字段是从一个label集合中，匹配对应的label，如：[\"Znotes\",\"Definitions\",\"Paper 5\",\"Book\"...]，当然如果没有匹配也可以填空")
+    levelList: List[str] = Field([], description="等级名称，如：[\"AS\",\"A2\",...]，匹配等级集合中的0-多个")
+    subject: Optional[str] = Field(None, description="学科，如：Chemistry、Business、Computer Science，匹配学科选项集合中的一个")
+    type: Optional[str] = Field(None, description="资料类型，如：Handout、Paper1、IA...，匹配资料类型选项集合中的一个")
+
+# 用于知识点（记忆卡）提炼
+class Flashcard(BaseModel):
+    term: str = Field(..., description="知识点或术语，例如：光合作用, 二氧化碳固定")
+    explanation: str = Field(..., description="对术语的简洁解释，一小段话。")
+
+class FlashcardList(BaseModel): # 用于解析LLM返回的列表，内部使用
+    flashcards: List[Flashcard] = Field(..., description="提取到的记忆卡列表。")
+
 class RAGMetadata(BaseModel):
     material_id: int = Field(...)
     author_id: Optional[int] = Field(None)

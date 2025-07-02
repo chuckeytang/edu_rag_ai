@@ -4,37 +4,10 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
 
+from models.schemas import ExtractionRequest
 from services.ai_extraction_service import ai_extraction_service, DocumentMetadata, Flashcard # 导入新服务和模型
 
 router = APIRouter()
-
-# 请求体模型，用于接收文本内容或 OSS file_key
-class ExtractionRequest(BaseModel):
-    file_key: Optional[str] = None # OSS 文件键
-    content: Optional[str] = None  # 直接的文本内容
-
-    # 确保至少提供一个
-    class Config:
-        extra = "forbid"
-        # 验证器：确保 file_key 或 content 至少有一个被提供
-        @classmethod
-        def validate_at_least_one(cls, values):
-            if not values.get('file_key') and not values.get('content'):
-                raise ValueError("必须提供 'file_key' 或 'content' 中的至少一个。")
-            if values.get('file_key') and values.get('content'):
-                 raise ValueError("不能同时提供 'file_key' 和 'content'。")
-            return values
-        
-        json_schema_extra = {
-            "examples": [
-                {
-                    "file_key": "path/to/your/document.pdf"
-                },
-                {
-                    "content": "This is a sample document content about Chemistry."
-                }
-            ]
-        }
 
 # --- 元数据提取 API ---
 @router.post("/extract_metadata", response_model=DocumentMetadata, summary="从文档或文本中提取元数据")
@@ -45,7 +18,8 @@ async def extract_metadata_endpoint(request: ExtractionRequest):
     try:
         metadata = await ai_extraction_service.extract_document_metadata(
             file_key=request.file_key, 
-            text_content=request.content
+            text_content=request.content,
+            is_public=request.is_public
         )
         return metadata
     except ValueError as e:
@@ -62,7 +36,8 @@ async def extract_flashcards_endpoint(request: ExtractionRequest):
     try:
         flashcards = await ai_extraction_service.extract_knowledge_flashcards(
             file_key=request.file_key, 
-            text_content=request.content
+            text_content=request.content,
+            is_public=request.is_public
         )
         return flashcards
     except ValueError as e:

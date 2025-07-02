@@ -14,6 +14,7 @@ from services.oss_service import oss_service
 from services.query_service import query_service  
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) 
 
 class DocumentOssService:
     def __init__(self):
