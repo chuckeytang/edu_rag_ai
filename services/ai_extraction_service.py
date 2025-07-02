@@ -120,24 +120,28 @@ class AIExtractionService:
         doc_types_str = ", ".join(self.DOCUMENT_TYPE_OPTIONS)
 
         prompt_template = f"""
-        您是一个专业的教育内容分析助手。请从以下文档内容中提取其元数据。
-        请确保您的输出严格遵守以下JSON格式，并从提供的选项中选择最匹配的值。
-        如果某个字段在文档中找不到对应信息，或者无法匹配到提供的选项，请将其设为 null 或空列表。
+        You are an expert assistant for analyzing educational content. Please extract metadata from the document content provided below.
+        Ensure your output strictly follows the specified JSON format and select the most suitable values from the given options.
+        If a field's information is not found in the document or doesn't match any of the provided options, set it to null or an empty list.
 
-        可选项列表：
-        - 课程体系 (clazz): [{clazz_str}]
-        - 考试局 (exam): [{exam_boards_str}]
-        - 标签 (labelList): [{labels_str}]
-        - 等级 (levelList): [{levels_str}]
-        - 学科 (subject): [{subjects_str}]
-        - 资料类型 (type): [{doc_types_str}]
+        Available Options:
+        - Curriculum System (clazz): [{clazz_str}]
+        - Exam Board (exam): [{exam_boards_str}]
+        - Level (levelList): [{levels_str}]
+        - Subject (subject): [{subjects_str}]
+        - Document Type (type): [{doc_types_str}]
 
-        文档内容：
+        Special Instructions for 'labelList':
+        - For 'labelList', please identify 3 to 6 keywords or short phrases from the document that best represent its main topics or categories.
+        - These labels should be single words or short phrases, acting as descriptive tags.
+        - Do NOT select from a predefined list for 'labelList'; generate them based on the document's content.
+
+        Document Content:
         ---
         {doc_content}
         ---
 
-        请提供JSON格式的元数据：
+        Please provide the metadata in JSON format:
         """
 
         parser = PydanticOutputParser(output_cls=ExtractedDocumentMetadata) # 使用更新后的模型名
@@ -149,6 +153,7 @@ class AIExtractionService:
         )
 
         try:
+            logger.info(f"准备提取元数据： {doc_content[:100]}...") 
             metadata = await program.acall(document_content=doc_content)
             logger.info(f"成功提取元数据：{metadata.model_dump_json(indent=2)}") # 使用 model_dump_json，并可选地设置 indent 使输出更易读
             return metadata
