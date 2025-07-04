@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from services.query_service import query_service
-from models.schemas import QueryRequest, QueryResponse, QueryResponseNode, StreamChunk, StreamingResponseWrapper
+from models.schemas import ChatQueryRequest, QueryRequest, QueryResponse, QueryResponseNode, StreamChunk, StreamingResponseWrapper
 from fastapi.responses import StreamingResponse
 import logging
 
@@ -184,3 +184,18 @@ async def query_with_files(
         media_type="text/event-stream"
     )
 
+@router.post("/rag-query-with-context")
+async def rag_query_with_context_api(request: ChatQueryRequest):
+    """
+    统一的流式 RAG 查询接口，支持：
+    - 聊天历史上下文的语义检索
+    - 指定文件 (material_id) 范围内的 RAG
+    - 额外的元数据过滤 (filters)
+    """
+    try:
+        return query_service.rag_query_with_context(request)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Unhandled error in /rag_query_with_context: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error during RAG processing.")

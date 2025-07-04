@@ -5,6 +5,7 @@ import shutil
 from llama_cloud import TextNode
 
 from core.metadata_utils import prepare_metadata_for_storage
+from services import chat_history_service
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -27,7 +28,7 @@ from chromadb.config import Settings
 # from llama_index.cura import CURARetriever
 # print(CURARetriever)
 from core.config import settings
-from models.schemas import StreamChunk
+from models.schemas import ChatQueryRequest, StreamChunk
 from services.document_service import document_service
 from services.oss_service import oss_service
 from typing import List, Dict
@@ -561,4 +562,88 @@ class QueryService:
             logger.error(message, exc_info=True)
             return {"status": "error", "message": message}
         
+    async def rag_query_with_context(
+        self,
+        request: ChatQueryRequest # 直接接收 ChatQueryRequest 对象
+    ) -> AsyncGenerator[str, None]:
+        
+        logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
+        
+        # --- 1. 语义检索历史聊天上下文 ---
+        chat_history_context_string = ""
+        try:
+            chat_history_context_nodes = chat_history_service.retrieve_chat_history_context(
+                session_id=request.session_id,
+                account_id=request.account_id,
+                query_text=request.context_retrieval_query,
+                top_k=request.similarity_top_k or 5 # 使用请求中的top_k或默认值
+            )
+            if chat_history_context_nodes:
+                chat_history_context_string = "以下是与您当前问题相关的历史对话片段：\n" + \
+                                              "\n".join([f"[{node.metadata.get('role', '未知')}]: {node.text}" for node in chat_history_context_nodes]) + \
+                                              "\n---\n"
+            logger.info(f"Chat history context: \n{chat_history_context_string}")
+        except Exception as e:
+            logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
+            chat_history_context_string = ""
+
+        # --- 2. 主 RAG 查询 ---
+        rag_index = self._get_or_load_index(request.collection_name)
+        if not rag_index:
+            logger.error(f"RAG collection '{request.collection_name}' does not exist or could not be loaded.")
+            yield StreamChunk(content="抱歉，知识库未准备好，请稍后再试。", is_last=True).json() + "\n"
+            return
+
+        combined_rag_filters = request.filters if request.filters else {}
+        if request.target_file_ids and len(request.target_file_ids) > 0:
+            try:
+                material_ids = [int(mid) for mid in request.target_file_ids]
+                if "material_id" in combined_rag_filters and isinstance(combined_rag_filters["material_id"], dict) and "$in" in combined_rag_filters["material_id"]:
+                    current_material_ids = combined_rag_filters["material_id"]["$in"]
+                    # 确保不重复添加
+                    combined_rag_filters["material_id"]["$in"] = list(set(current_material_ids + material_ids))
+                else:
+                    combined_rag_filters["material_id"] = {"$in": material_ids}
+            except ValueError:
+                logger.warning("Invalid material_id in target_file_ids. Ignoring file filter.")
+        
+        chroma_where_clause = self._build_chroma_where_clause(combined_rag_filters)
+        logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
+
+        # 组合最终的LLM提示词
+        # 确保 default_qa_prompt 有 {chat_history_context} 占位符
+        final_qa_prompt_template = self._create_qa_prompt(request.prompt) # 获取或创建 PromptTemplate
+        final_qa_prompt = final_qa_prompt_template.partial_format(chat_history_context=chat_history_context_string)
+
+        query_engine = rag_index.as_query_engine(
+            llm=self.llm,
+            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+            similarity_top_k=request.similarity_top_k or 5,
+            streaming=True,
+            text_qa_template=final_qa_prompt
+        )
+        
+        response = await query_engine.aquery(request.question)
+        
+        rag_sources_info = []
+        if response.source_nodes:
+            for node in response.source_nodes:
+                rag_sources_info.append({
+                    "text_excerpt": node.get_content().strip()[:200] + "...",
+                    "file_name": node.metadata.get("file_name", "未知文件"),
+                    "page_number": node.metadata.get("page_label", "未知页"),
+                    "material_id": node.metadata.get("material_id")
+                })
+        
+        full_response_content = ""
+        if hasattr(response, 'response_gen'):
+            async for chunk_text in response.response_gen:
+                full_response_content += chunk_text
+                yield StreamChunk(content=chunk_text, is_last=False).json() + "\n"
+        
+        yield StreamChunk(
+            content="",
+            is_last=True,
+            metadata={"rag_sources": rag_sources_info}
+        ).json() + "\n"
 query_service = QueryService()

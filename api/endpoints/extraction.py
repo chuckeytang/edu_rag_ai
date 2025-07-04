@@ -4,13 +4,13 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
 
-from models.schemas import ExtractionRequest
-from services.ai_extraction_service import ai_extraction_service, DocumentMetadata, Flashcard # 导入新服务和模型
+from models.schemas import ExtractedDocumentMetadata, ExtractionRequest, Flashcard
+from services.ai_extraction_service import ai_extraction_service
 
 router = APIRouter()
 
 # --- 元数据提取 API ---
-@router.post("/extract_metadata", response_model=DocumentMetadata, summary="从文档或文本中提取元数据")
+@router.post("/extract_metadata", response_model=ExtractedDocumentMetadata, summary="从文档或文本中提取元数据")
 async def extract_metadata_endpoint(request: ExtractionRequest):
     """
     接收一个 OSS 文件键或直接的文本内容，并使用 AI 提取文档的元数据。

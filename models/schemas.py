@@ -85,6 +85,7 @@ class ExtractedDocumentMetadata(BaseModel): # 新的、更具体的元数据模�
     levelList: List[str] = Field([], description="等级名称，如：[\"AS\",\"A2\",...]，匹配等级集合中的0-多个")
     subject: Optional[str] = Field(None, description="学科，如：Chemistry、Business、Computer Science，匹配学科选项集合中的一个")
     type: Optional[str] = Field(None, description="资料类型，如：Handout、Paper1、IA...，匹配资料类型选项集合中的一个")
+    description: Optional[str] = Field(None, max_length=1024, description="文档摘要，对文档内容的简洁描述，最大长度1024字符。") 
 
 # 用于知识点（记忆卡）提炼
 class Flashcard(BaseModel):
@@ -139,3 +140,31 @@ class DocumentChunkResponse(BaseModel):
     page_label: str
     text_snippet: str
     metadata: RAGMetadata
+
+class Flashcard(BaseModel):
+    term: str = Field(..., description="知识点或术语，例如：光合作用, 二氧化碳固定")
+    explanation: str = Field(..., description="对术语的简洁解释，一小段话。")
+
+class FlashcardList(BaseModel): # 用于解析JSON数组
+    flashcards: List[Flashcard] = Field(..., description="提取到的记忆卡列表。")
+
+
+class AddChatMessageRequest(BaseModel):
+    id: str # Unique ID for ChromaDB, e.g., "mysql_chat_id_123"
+    session_id: str
+    account_id: int
+    role: str # "user" or "assistant"
+    content: str
+    metadata: Optional[Dict[str, Any]] = {} # 这里使用 Dict[str, Any] 来兼容 JsonNode 传递过来的数据
+    timestamp: str # ISO formatted string
+
+class ChatQueryRequest(BaseModel):
+    question: str
+    session_id: str
+    account_id: int
+    context_retrieval_query: str
+    collection_name: str
+    target_file_ids: Optional[List[str]] = None
+    filters: Optional[Dict[str, Any]] = None
+    similarity_top_k: Optional[int] = 5
+    prompt: Optional[str] = None

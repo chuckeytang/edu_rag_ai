@@ -15,27 +15,11 @@ from llama_index.core.output_parsers import PydanticOutputParser
 from llama_index.core import SimpleDirectoryReader
 
 from core.config import settings # 假设settings包含DeepSeek配置
-from models.schemas import ExtractedDocumentMetadata
+from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList
 from services.oss_service import oss_service # 用于从OSS下载文件
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
-
-# --- Pydantic 模型定义 ---
-class DocumentMetadata(BaseModel):
-    clazz: Optional[str] = Field(None, description="课程体系名称，如：IB、IGCSE、AP")
-    exam: Optional[str] = Field(None, description="考试局名称，如：CAIE、Edexcel、AQA")
-    labelList: List[str] = Field([], description="标签名称列表，如：Znotes, Definitions, Paper 5, Book")
-    levelList: List[str] = Field([], description="等级名称，如：AS, A2")
-    subject: Optional[str] = Field(None, description="学科，如：Chemistry, Business, Computer Science")
-    type: Optional[str] = Field(None, description="资料类型，如：Handout, Paper1, IA")
-
-class Flashcard(BaseModel):
-    term: str = Field(..., description="知识点或术语，例如：光合作用, 二氧化碳固定")
-    explanation: str = Field(..., description="对术语的简洁解释，一小段话。")
-
-class FlashcardList(BaseModel): # 用于解析JSON数组
-    flashcards: List[Flashcard] = Field(..., description="提取到的记忆卡列表。")
 
 class AIExtractionService:
     def __init__(self):
@@ -48,12 +32,18 @@ class AIExtractionService:
             api_base=self.deepseek_api_base,
             api_key=self.deepseek_api_key,
             temperature=0.0, # 提取结构化数据时建议温度设低
+            kwargs={
+                'response_format': {'type': 'json_object'} 
+            }
         )
         self.llm_flashcard = OpenAILike(
             model="deepseek-chat", # 知识点提取也可用chat模型
             api_base=self.deepseek_api_base,
             api_key=self.deepseek_api_key,
             temperature=0.3, # 提取知识点可以稍微提高温度
+            kwargs={
+                'response_format': {'type': 'json_object'} 
+            }
         )
 
         # 预定义的选项集合 (这些应该从Spring后端获取，或从数据库加载)
@@ -120,11 +110,10 @@ class AIExtractionService:
         doc_types_str = ", ".join(self.DOCUMENT_TYPE_OPTIONS)
 
         prompt_template = f"""
-        You are an expert assistant for analyzing educational content. Please extract metadata from the document content provided below.
-        Ensure your output strictly follows the specified JSON format and select the most suitable values from the given options.
-        If a field's information is not found in the document or doesn't match any of the provided options, set it to null or an empty list.
+        You are an expert assistant for analyzing educational content. Please extract metadata and generate a concise summary (description) from the document content provided below.
+        Ensure your output strictly follows the specified JSON format.
 
-        Available Options:
+        Available Options for Matching:
         - Curriculum System (clazz): [{clazz_str}]
         - Exam Board (exam): [{exam_boards_str}]
         - Level (levelList): [{levels_str}]
@@ -132,16 +121,31 @@ class AIExtractionService:
         - Document Type (type): [{doc_types_str}]
 
         Special Instructions for 'labelList':
-        - For 'labelList', please identify 3 to 6 keywords or short phrases from the document that best represent its main topics or categories.
+        - For 'labelList', identify 3 to 6 keywords or short phrases from the document that best represent its main topics or categories.
         - These labels should be single words or short phrases, acting as descriptive tags.
         - Do NOT select from a predefined list for 'labelList'; generate them based on the document's content.
+
+        Special Instruction for 'description':
+        - Generate a concise, objective summary of the document's content.
+        - The description should be a maximum of 1024 characters.
 
         Document Content:
         ---
         {doc_content}
         ---
 
-        Please provide the metadata in JSON format:
+        Please provide the metadata and description in JSON format. Here is an example of the desired JSON structure:
+
+        EXAMPLE JSON OUTPUT:
+        {{
+            "clazz": "IB",
+            "exam": "CAIE",
+            "labelList": ["Photosynthesis", "Carbon Cycle", "Plant Biology"],
+            "levelList": ["HL"],
+            "subject": "Biology",
+            "type": "Handout",
+            "description": "This document provides a detailed overview of the photosynthesis process, including light-dependent and light-independent reactions, and its role in the global carbon cycle, suitable for advanced biology students. The summary is concise and covers the main topics without excessive detail. It ensures all key aspects are highlighted for quick understanding, adhering to the character limit."
+        }}
         """
 
         parser = PydanticOutputParser(output_cls=ExtractedDocumentMetadata) # 使用更新后的模型名
@@ -153,39 +157,49 @@ class AIExtractionService:
         )
 
         try:
-            logger.info(f"准备提取元数据： {doc_content[:100]}...") 
+            logger.info(f"Preparing to extract metadata: {doc_content[:100]}...") 
             metadata = await program.acall(document_content=doc_content)
-            logger.info(f"成功提取元数据：{metadata.model_dump_json(indent=2)}") # 使用 model_dump_json，并可选地设置 indent 使输出更易读
+            logger.info(f"Successfully extracted metadata: {metadata.model_dump_json(indent=2)}")
             return metadata
         except Exception as e:
-            logger.error(f"提取元数据时发生错误: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"元数据提取过程中AI服务出错: {e}") # 明确是AI服务错误
+            logger.error(f"Error during metadata extraction: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"AI service error during metadata extraction: {e}") 
 
-    async def extract_knowledge_flashcards(self, file_key: Optional[str] = None, text_content: Optional[str] = None, is_public: bool = True) -> List[Flashcard]: # 新增 is_public
+    async def extract_knowledge_flashcards(self, file_key: Optional[str] = None, text_content: Optional[str] = None, is_public: bool = False) -> List[Flashcard]:
         """
-        使用DeepSeek模型从文档内容中提炼知识点，形成记忆卡。
-        支持从OSS下载文件或直接提供文本内容，并根据 is_public 决定桶。
+        Extracts knowledge points (flashcards) from the document content using the DeepSeek model.
+        Supports content from OSS or direct text, and determines the bucket based on is_public.
         """
-        doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public) # 传递 is_public
+        doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public)
 
-        # ... (提示词构建逻辑不变) ...
-        prompt_template = """
-        您是一个教育专家，请仔细阅读以下文档内容，并从中提炼出重要的知识点。
-        每个知识点应该被表示为一张“记忆卡”，包含一个“术语”和一个“解释”。
+        prompt_template = f"""
+        You are an educational expert. Please carefully read the following document content and extract important knowledge points from it.
+        Each knowledge point should be represented as a "flashcard", consisting of a "term" and an "explanation".
         
-        请遵循以下要求：
-        1.  **术语 (term)**: 应该是一个简洁的词或词组，代表一个核心概念或专有名词。
-        2.  **解释 (explanation)**: 应该是一小段话，清晰、准确地解释对应的术语。
-        3.  请以JSON数组的形式返回所有记忆卡，每个元素包含 "term" 和 "explanation" 两个键。
-        4.  只提取文档中明确提及的知识点，不要进行推断或引入外部信息。
-        5.  如果文档内容较少或没有明显的知识点，可以返回空列表。
-
-        文档内容：
+        EXAMPLE JSON OUTPUT:
+        [
+            {{
+                "term": "Photosynthesis",
+                "explanation": "The process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water."
+            }},
+            {{
+                "term": "Calvin Cycle",
+                "explanation": "The set of chemical reactions that take place in chloroplasts during photosynthesis. The cycle is light-independent."
+            }}
+        ]
+        
+        Please follow these requirements:
+        1.  **Term**: Should be a concise word or phrase representing a core concept or technical term.
+        2.  **Explanation**: Should be a brief paragraph, clearly and accurately explaining the corresponding term.
+        3.  Extract only knowledge points explicitly mentioned in the document; do not infer or introduce external information.
+        4.  If the document content is minimal or contains no clear knowledge points, return an empty list.
+        
+        Document Content:
         ---
         {doc_content}
         ---
-
-        请提供JSON格式的记忆卡列表：
+        
+        Please provide the list of flashcards in JSON format:
         """
 
         parser = PydanticOutputParser(output_cls=FlashcardList)
@@ -198,11 +212,12 @@ class AIExtractionService:
 
         try:
             flashcard_list_obj = await program.acall(document_content=doc_content)
-            logger.info(f"成功提取记忆卡，数量：{len(flashcard_list_obj.flashcards)}")
+            logger.info(f"Successfully extracted flashcards, count: {len(flashcard_list_obj.flashcards)}")
             return flashcard_list_obj.flashcards
         except Exception as e:
-            logger.error(f"提取记忆卡时发生错误: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"记忆卡提取过程中AI服务出错: {e}") # 明确是AI服务错误
+            logger.error(f"Error during flashcard extraction: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"AI service error during flashcard extraction: {e}")
+
 
 # 创建一个单例实例
 ai_extraction_service = AIExtractionService()

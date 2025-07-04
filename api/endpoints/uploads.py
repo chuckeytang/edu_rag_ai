@@ -5,7 +5,7 @@ from services.document_service import document_service
 from services.document_oss_service import document_oss_service
 from services.oss_service import oss_service
 from services.query_service import query_service
-from models.schemas import DeleteByMetadataRequest, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
+from models.schemas import AddChatMessageRequest, DeleteByMetadataRequest, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
 import shutil
 router = APIRouter()
 
@@ -256,3 +256,19 @@ def delete_by_metadata(request: DeleteByMetadataRequest):
     except Exception as e:
         logger.error(f"Deletion request failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during deletion: {str(e)}")
+
+
+@router.post("/add-chat-message")
+async def add_chat_message_api(request: AddChatMessageRequest):
+    """
+    将聊天消息同步到 ChromaDB 的聊天历史Collection。
+    由 Spring 后端调用。
+    """
+    try:
+        from services.chat_history_service import chat_history_service # 导入服务实例
+        chat_history_service.add_chat_message_to_chroma(request.dict())
+        return {"status": "success", "message": "Chat message added to ChromaDB."}
+    except Exception as e:
+        logger.error(f"Error adding chat message to ChromaDB: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to add chat message to ChromaDB.")
+
