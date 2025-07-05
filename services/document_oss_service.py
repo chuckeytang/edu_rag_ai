@@ -12,6 +12,7 @@ from core.config import settings
 from models.schemas import RAGMetadata
 from services.oss_service import oss_service
 from services.query_service import query_service  
+from services.task_manager_service import task_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -48,43 +49,41 @@ class DocumentOssService:
             for key, filename in self.processed_files.items():
                 f.write(f"{key}:{filename}\n")
 
-    def process_new_oss_file(self, request: UploadFromOssRequest) -> dict:
+    def process_new_oss_file(self, request: UploadFromOssRequest, task_id: str) -> dict:
         """
         一个完整的、自包含的OSS文件处理流程。
-        返回一个包含最终状态的字典。
+        它不返回任何东西，而是通过task_manager更新任务进度。
         """
         local_file_path = None
-        task_status = "error"
-        message = "An unexpected error occurred."
-        pages_loaded = 0
-        total_pages = 0
-        
         file_key = request.file_key
-
-        # 从请求中获取原始元数据字典
+        display_file_name = request.metadata.file_name or "unknown_file"
         collection_name = request.collection_name or "public_collection"
          
+        # 1. 去重检查
         if file_key in self.processed_files:
-            return {
+            logger.warning(f"[TASK_ID: {task_id}] Duplicate file key detected: {file_key}")
+            # --- [最终状态] 发现重复文件 ---
+            result_payload = {
                 "message": f"This OSS file has already been processed (Original Filename: {self.processed_files[file_key]}).",
-                "status": "duplicate"
+                "file_key": file_key
             }
+            task_manager.finish_task(task_id, "duplicate", result=result_payload)
+            return
         
         try:
-            # --- 1. 使用 Pydantic 的 model_dump() 自动处理别名和命名转换 ---
-            # model_dump() 不带参数，会生成一个以字段名(snake_case)为键的字典
-            base_metadata = request.metadata.model_dump()
+            # --- [进度汇报] 开始下载 ---
+            task_manager.update_progress(task_id, 10, "Downloading file from OSS...")
             
+            # 2. 决定存储桶并下载文件
+            accessible_to_list = request.metadata.accessible_to or []
             # 将顶层的 file_key 也添加到元数据中
+            base_metadata = request.metadata.model_dump()
             base_metadata['file_key'] = file_key
             base_metadata.pop('accessible_to', None)
             base_metadata.pop('level_list', None) 
             base_metadata = {k: v for k, v in base_metadata.items() if v is not None}
-            logger.info(f"Constructed base metadata for duplication: {base_metadata}")
-
-            # --- 2. 决定存储桶并下载文件 (逻辑不变) ---
+            logger.info(f"Constructed base metadata: {base_metadata}")
             display_file_name = base_metadata.get("file_name", "unknown_file")
-            accessible_to_list = request.metadata.accessible_to or []
             if "public" in accessible_to_list:
                 target_bucket = settings.OSS_PUBLIC_BUCKET_NAME
             else:
@@ -93,16 +92,15 @@ class DocumentOssService:
                 object_key=file_key, 
                 bucket_name=target_bucket
             )
-
-            # --- 3. 加载原始文档区块 (逻辑不变) ---
+            # --- [进度汇报] 下载完成 ---
+            task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
+            
+            # --- 3. 加载原始文档区块 ---
             logger.info(f"Loading documents from temporary file: '{local_file_path}'")
             all_docs = SimpleDirectoryReader(input_files=[local_file_path]).load_data()
             total_pages = len(all_docs)
             
-            # --- 4. 核心修改：根据权限列表，创建节点副本 ---
             logger.info("Applying node duplication strategy based on ACLs...")
-            final_nodes_to_index = []
-
             # 如果权限列表为空，为了防止文档丢失，默认将其归属给作者
             if not accessible_to_list and 'author_id' in base_metadata:
                 acl_tag = str(base_metadata['author_id'])
@@ -110,6 +108,7 @@ class DocumentOssService:
                 logger.warning(f"ACL list was empty. Defaulting to author_id: {acl_tag}")
 
             # 为每一个权限标签，创建一套完整的文档节点副本
+            final_nodes_to_index = []
             for acl_tag in accessible_to_list:
                 for doc in all_docs:
                     # 复制基础元数据
@@ -128,11 +127,12 @@ class DocumentOssService:
             
             pages_loaded = len(final_nodes_to_index)
             logger.info(f"Generated a total of {pages_loaded} nodes for indexing.")
-            
-            # 5. 索引所有生成的节点
+            # --- [进度汇报] 文档处理完成 ---
+            task_manager.update_progress(task_id, 75, f"Processing complete. Found {pages_loaded} nodes to index.")
+
+            # 4. 索引所有生成的节点
             if not final_nodes_to_index:
-                message = "No valid content found or no nodes generated for indexing."
-                task_status = "error"
+                task_manager.finish_task(task_id, "error", result={"message": "No valid content or nodes generated for indexing."})
             else:
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
                 query_service.update_index(final_nodes_to_index, collection_name=collection_name)
@@ -140,13 +140,17 @@ class DocumentOssService:
                 self.processed_files[file_key] = display_file_name
                 self._save_processed_keys()
                 
-                message = "File from OSS has been processed and indexed successfully."
-                task_status = "success"
+                success_result = {
+                    "message": "File from OSS has been processed and indexed successfully.",
+                    "pages_loaded": pages_loaded,
+                    "total_pages": total_pages,
+                    "file_key": file_key
+                }
+                task_manager.finish_task(task_id, "success", result=success_result)
 
         except Exception as e:
             logger.error(f"Error during processing of OSS key '{file_key}': {e}", exc_info=True)
-            message = f"An error occurred: {str(e)}"
-            task_status = "error"
+            task_manager.finish_task(task_id, "error", result={"message": str(e)})
         finally:
             # 清理临时文件
             if local_file_path:
@@ -155,12 +159,7 @@ class DocumentOssService:
                     shutil.rmtree(temp_dir)
                     logger.info(f"Cleaned up temporary directory: '{temp_dir}'")
         
-        return {
-            "message": message,
-            "status": task_status,
-            "pages_loaded": pages_loaded,
-            "total_pages": total_pages
-        }
+        return 
 
     def _filter_documents(self, documents: List[LlamaDocument]) -> Tuple[List[LlamaDocument], dict]:
         """Filters out blank or empty pages from a list of documents."""

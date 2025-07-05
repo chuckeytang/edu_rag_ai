@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Any, Optional, List, Dict
+from datetime import datetime, timezone
 class DocumentMetadata(BaseModel):
     file_name: str
     page_label: str
@@ -22,14 +23,28 @@ class QueryResponse(BaseModel):
     response: str
     nodes: List[QueryResponseNode]
 class UploadResponse(BaseModel):
+    task_id: Optional[str] = 0
     message: str
     file_name: str
-    pages_loaded: int
-    total_pages: int
     status: str  
-    file_hash: str 
-    task_id: Optional[str] = 0
-    existing_file: Optional[str] = None
+    pages_loaded: Optional[int] = None
+    total_pages: Optional[int] = None
+    file_hash: Optional[str] = None # 在OSS流程中，我们用它来存 file_key
+    existing_file: Optional[Dict] = None
+    
+class TaskStatus(BaseModel):
+    """一个通用的后台任务状态模型"""
+    task_id: str
+    task_type: str # 例如 'document_indexing', 'report_generation'
+    status: str # e.g., 'pending', 'running', 'success', 'error', 'duplicate'
+    progress: int = Field(0, ge=0, le=100)
+    message: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # 一个灵活的字段，用于存放任务的最终结果
+    result: Optional[Dict[str, Any]] = None 
+
 class StreamingResponseWrapper:
     def __init__(self, async_generator):
         self.async_generator = async_generator

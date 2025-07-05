@@ -1,12 +1,13 @@
 import os
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
-from typing import List
+from typing import Dict, List, Optional
 from services.document_service import document_service
 from services.document_oss_service import document_oss_service
 from services.oss_service import oss_service
 from services.query_service import query_service
-from models.schemas import AddChatMessageRequest, DeleteByMetadataRequest, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
+from models.schemas import AddChatMessageRequest, DeleteByMetadataRequest, TaskStatus, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
 import shutil
+from services.task_manager_service import task_manager
 router = APIRouter()
 
 import logging
@@ -124,52 +125,45 @@ async def _handle_single_file(
         status="new"
     )
 
-def process_and_index_task(request: UploadFromOssRequest):
+def process_task_wrapper(request: UploadFromOssRequest, task_id: str):
     """
-    一个简洁的后台任务调度器。
-    它调用 DocumentOssService 来执行所有复杂的业务逻辑，
-    然后用返回的结果更新全局的任务状态。
+    这个函数现在是一个纯粹的包装器/调度器。
+    它的唯一职责就是调用业务服务层的方法，并把 task_id 传过去。
+    所有的业务逻辑、流程控制、进度汇报和最终状态设置，都由被调用的服务自己完成。
     """
-    task_id = str(request.metadata.material_id) if request.metadata.material_id else "N/A"
-    logger.info(f"[TASK_ID: {task_id}] Background task started. Delegating to DocumentOssService...")
-    
-    # 调用服务执行完整流程，并获取最终状态
-    final_status = document_oss_service.process_new_oss_file(request)
+    logger.info(f"[TASK_ID: {task_id}] Background task wrapper started. Delegating all logic to DocumentOssService...")
+    try:
+        # 直接调用，不关心返回值。所有状态更新都在 process_new_oss_file 内部完成。
+        document_oss_service.process_new_oss_file(request, task_id)
+    except Exception as e:
+        # 添加一个最终的保障性异常捕获。
+        # 正常情况下，process_new_oss_file 内部有自己的try-except，这里不应该被触发。
+        # 但为了系统健壮性，我们在这里捕获任何未被捕获的致命错误。
+        logger.error(f"[TASK_ID: {task_id}] A critical unhandled exception escaped the service layer: {e}", exc_info=True)
+        # 尝试将任务标记为失败
+        task_manager.finish_task(task_id, "error", result={"message": "A critical and unexpected error occurred in the service layer."})
 
-    # 用服务返回的结果更新全局任务字典
-    processing_task_results[task_id] = UploadResponse(
-        message=final_status["message"],
-        file_name=request.metadata.file_name,
-        pages_loaded=final_status.get("pages_loaded", 0),
-        total_pages=final_status.get("total_pages", 0), 
-        file_hash=request.file_key,
-        status=final_status["status"],
-        # 如果是 "duplicate"，可以考虑从final_status中获取更多信息
-        existing_file=request.file_key if final_status["status"] == "duplicate" else None
-    )
-    logger.info(f"[TASK_ID: {task_id}] Background task finished. Final status: '{final_status['status']}'")
-
-
-@router.post("/upload-from-oss", response_model=UploadResponse, status_code=202)
+@router.post("/upload-from-oss", response_model=TaskStatus, status_code=202)
 async def upload_from_oss(request: UploadFromOssRequest, background_tasks: BackgroundTasks):
-    """
-    Schedules the OSS file processing and indexing as a background task.
-    """
-    task_id = str(request.metadata.material_id) if request.metadata.material_id else "N/A"
+        
+    # 准备要存入任务初始状态的上下文数据
+    initial_data = {
+        "file_name": request.metadata.file_name,
+        "file_key": request.file_key
+    }
+
+    # --- 使用TaskManager创建任务，并立即获取task_id ---
+    initial_status = task_manager.create_task(
+        task_type="document_indexing",
+        initial_message=f"Task scheduled for file '{request.metadata.file_name}'.",
+        initial_data=initial_data
+    )
+    task_id = initial_status.task_id
     logger.info(f"Received request to upload from OSS for file: '{request.metadata.file_name}'. Assigning Task ID: {task_id}.")
 
-    background_tasks.add_task(process_and_index_task, request)
-    logger.info(f"Task ID {task_id} has been successfully scheduled to run in the background.")
-
-    return UploadResponse(
-        message="Accepted: File processing and indexing has been scheduled.",
-        file_name=request.metadata.file_name,
-        pages_loaded=0,
-        total_pages=0,
-        file_hash="", 
-        task_id=task_id,
-        status="processing"
-    )
+    background_tasks.add_task(process_task_wrapper, request, task_id)
+    logger.info(f"Task {task_id} successfully scheduled.")
+    return initial_status
 
 def update_metadata_task(request: UpdateMetadataRequest):
     """
@@ -217,22 +211,6 @@ async def update_metadata(request: UpdateMetadataRequest, background_tasks: Back
         status="scheduled"
     )
 
-# --- Polling Endpoint (New) ---
-@router.get("/status/{task_id}", response_model=UploadResponse)
-async def get_task_status(task_id: str):
-    """
-    Polls for the status and result of a background processing task.
-    """
-    logger.info(f"Received status poll request for Task ID: '{task_id}'.")
-    result = processing_task_results.get(task_id)
-    
-    if result is None:
-        logger.warning(f"Task ID '{task_id}' not found in processing results. Returning 404.")
-        raise HTTPException(status_code=404, detail=f"Task with ID '{task_id}' not found. It may not have been scheduled or has expired.")
-    
-    logger.info(f"Found status for Task ID '{task_id}'. Current status: '{result.status}'. Returning result to client.")
-    return result
-
 
 @router.post("/delete-by-metadata", summary="[同步操作] 根据元数据删除文档")
 def delete_by_metadata(request: DeleteByMetadataRequest):
@@ -272,3 +250,14 @@ async def add_chat_message_api(request: AddChatMessageRequest):
         logger.error(f"Error adding chat message to ChromaDB: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to add chat message to ChromaDB.")
 
+
+# --- Polling Endpoint (New) ---
+@router.get("/status/{task_id}", response_model=TaskStatus, summary="查询后台任务的状态")
+async def get_task_status(task_id: str):
+    """
+    Polls for the status and result of a background processing task.
+    """
+    status = task_manager.get_status(task_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"Task with ID '{task_id}' not found.")
+    return status
