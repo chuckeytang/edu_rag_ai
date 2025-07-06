@@ -238,16 +238,76 @@ class QueryService:
         logger.info(f"Found {len(nodes)} nodes matching the filters.")
         return nodes
 
+    # --- 通用的元数据更新方法 ---
+    def update_existing_nodes_metadata(self, collection_name: str, material_id: int, metadata_update_payload: dict):
+        """
+        根据 material_id 找到所有相关节点，并更新它们的元数据。
+        这是一个“合并更新”，而不是完全替换。
+        """
+        logger.info(f"Performing generic metadata update for material_id: {material_id} with payload: {metadata_update_payload}")
+        
+        # payload 不应该包含任何需要“抢救”的字段，但为安全起见我们仍以它为基础
+        if metadata_update_payload is None:
+            logger.warning("Update payload is None, skipping update.")
+            return
+
+        collection = self.chroma_client.get_collection(name=collection_name)
+        
+        # 1. 找到所有需要更新的节点
+        nodes_to_update = collection.get(where={"material_id": material_id}, include=["metadatas"])
+        if not nodes_to_update or not nodes_to_update['ids']:
+            logger.warning(f"No nodes found for material_id {material_id} during generic update. Nothing to do.")
+            return
+
+        # 2. 准备更新数据：以新数据为基础，嫁接回不可变的核心数据
+        updated_metadatas = []
+        # 定义一个不应被本次更新覆盖的核心字段集合
+        preserved_keys = {"material_id", "author_id", "file_key", "file_name", "file_size"}
+
+        for old_meta in nodes_to_update['metadatas']:
+            # a. 以传入的新数据为基础，这是一个干净的起点
+            new_meta = metadata_update_payload.copy()
+            
+            # b. 从旧元数据中“抢救”回那些必须保留的核心字段
+            for key in preserved_keys:
+                if key in old_meta:
+                    new_meta[key] = old_meta[key]
+            
+            # c. 这样，最终的 new_meta 就实现了“替换”效果：
+            #    - 包含了所有新传入的字段。
+            #    - 不包含新数据中没有、但旧数据中有的字段（如 exam）。
+            #    - 确保了核心字段（如 material_id, accessible_to）被保留。
+            updated_metadatas.append(new_meta)
+        
+        # 3. 执行批量更新
+        collection.update(
+            ids=nodes_to_update['ids'],
+            metadatas=updated_metadatas
+        )
+        logger.info(f"Successfully updated metadata for {len(nodes_to_update['ids'])} nodes of material_id {material_id}.")
+
     def add_public_acl_to_material(self, material_id: int, collection_name: str) -> dict:
         """
         为已存在的私有文档添加公共权限。
-        此方法通过创建并插入新的、带有 "public" 权限的节点副本来实现。
+        增加了幂等性检查，如果已存在公共节点，则直接返回成功。
         """
         task_status = "error"
         message = f"An unexpected error occurred while publishing material {material_id}."
         
         try:
             collection = self.chroma_client.get_collection(name=collection_name)
+
+            # --- 增加幂等性检查 ---
+            logger.info(f"Checking for existing public nodes for material_id: {material_id}")
+            existing_public_nodes = collection.get(
+                where={"$and": [{"material_id": material_id}, {"accessible_to": "public"}]},
+                limit=1 # 我们只需要知道是否存在，所以 limit=1 效率最高
+            )
+            if existing_public_nodes and existing_public_nodes['ids']:
+                message = f"Material {material_id} has already been published. Operation is idempotent."
+                task_status = "duplicate" # 使用 "duplicate" 或 "success" 均可
+                logger.warning(message)
+                return {"message": message, "status": task_status}
 
             # 1. 找到该 material_id 对应的所有节点（它们应该是私有的）
             logger.info(f"Finding existing nodes for material_id: {material_id} to publish.")

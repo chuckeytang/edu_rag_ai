@@ -171,20 +171,54 @@ def update_metadata_task(request: UpdateMetadataRequest):
     It calls DocumentOssService to perform the logic and updates the global task status.
     """
     task_id = str(request.material_id)
+    material_id = request.material_id
+    collection_name = request.collection_name
     logger.info(f"[TASK_ID: {task_id}] Metadata update task started. Delegating to DocumentOssService...")
     
-    # Call the new service method to execute the update flow
-    final_status = query_service.add_public_acl_to_material(request.material_id, request.collection_name)
+    final_status = {"status": "error", "message": "Task failed unexpectedly."}
 
-    # Update the global task results dictionary with the outcome
-    # We use the UpdateMetadataResponse schema for consistency
+    try:
+        # --- 步骤 A：执行通用的元数据更新 ---
+        # 1. 准备用于通用更新的 payload，需要移除权限字段
+        update_payload = request.metadata.model_dump(exclude_unset=True)
+        update_payload.pop('accessible_to', None) # 移除权限字段，因为它将被单独处理
+
+        # 2. 调用通用更新方法
+        query_service.update_existing_nodes_metadata(
+            collection_name=collection_name,
+            material_id=material_id,
+            metadata_update_payload=update_payload
+        )
+        logger.info(f"[TASK_ID: {task_id}] Step A: Generic metadata update completed.")
+        
+        # --- 步骤 B：检查并执行条件性发布 ---
+        # 1. 检查原始请求中是否包含 "public" 权限
+        if request.metadata.accessible_to and "public" in request.metadata.accessible_to:
+            logger.info(f"[TASK_ID: {task_id}] Step B: Publish condition met. Triggering public ACL addition.")
+            # 2. 调用发布（新增公共节点）的方法
+            publish_status = query_service.add_public_acl_to_material(
+                material_id=material_id,
+                collection_name=collection_name
+            )
+            # 将发布操作的结果作为最终结果
+            final_status = publish_status
+        else:
+            logger.info(f"[TASK_ID: {task_id}] Step B: No publish condition. Task finished after metadata update.")
+            final_status = {"status": "success", "message": "Metadata updated successfully without publishing."}
+
+    except Exception as e:
+        logger.error(f"[TASK_ID: {task_id}] An error occurred in the update/publish task: {e}", exc_info=True)
+        final_status = {"status": "error", "message": str(e)}
+
+    # 更新全局任务状态字典
     processing_task_results[task_id] = UpdateMetadataResponse(
         message=final_status["message"],
-        material_id=request.material_id,
+        material_id=material_id,
         task_id=task_id,
         status=final_status["status"]
     )
-    logger.info(f"[TASK_ID: {task_id}] Metadata update task finished. Final status: '{final_status['status']}'")
+    logger.info(f"[TASK_ID: {task_id}] Metadata update/publish task finished. Final status: '{final_status['status']}'")
+
 
 @router.post(
     "/update-metadata", 
