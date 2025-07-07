@@ -1,5 +1,7 @@
 import logging
 
+from api.dependencies import get_query_service
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
 if not logger.handlers:
@@ -8,11 +10,11 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from models.schemas import QueryRequest
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from services.query_service import query_service  
+from services.query_service import QueryService  
 
 router = APIRouter()
 @router.get("/indexed", summary="列出索引中的节点（chunk）")
@@ -22,7 +24,8 @@ def list_indexed(
     file_name: Optional[str] = Query(
         None, description="按 metadata.file_name 关键字模糊过滤（不区分大小写）"
     ),
-):
+    query_service: QueryService = Depends(get_query_service)
+) -> List[Dict[str, Any]]:
     """
     从指定的ChromaDB Collection中直接“窥视”数据，用于调试。
     """
@@ -69,7 +72,8 @@ def list_indexed(
 
 @router.get("/indexed/{chroma_id}", summary="查看单个节点的完整内容与元数据")
 def get_node(chroma_id: str,
-            collection_name: str = Query(..., description="该节点所在的Collection名称")):
+            collection_name: str = Query(..., description="该节点所在的Collection名称"),
+            query_service: QueryService = Depends(get_query_service)):
     """
     从指定的ChromaDB Collection中，按ID获取单个节点的详细信息。
     """
@@ -96,7 +100,8 @@ def get_node(chroma_id: str,
     }
 
 @router.post("/retrieve-with-filters", summary="[DEBUG] 测试带过滤的节点召回")
-def debug_retrieve_with_filters(request: QueryRequest):
+def debug_retrieve_with_filters(request: QueryRequest,
+                                query_service: QueryService = Depends(get_query_service)):
     """
     一个用于调试的端点。
     它只执行召回步骤，并返回召回的节点列表及其元数据，

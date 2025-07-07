@@ -5,22 +5,26 @@ import shutil
 import logging
 from typing import List, Optional, Tuple
 
+from fastapi import Depends
+
+from api.dependencies import get_query_service
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.schema import Document as LlamaDocument
 from models.schemas import UploadResponse, UploadFromOssRequest, UpdateMetadataRequest
 from core.config import settings
 from models.schemas import RAGMetadata
 from services.oss_service import oss_service
-from services.query_service import query_service  
+from services.query_service import QueryService
 from services.task_manager_service import task_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
 
 class DocumentOssService:
-    def __init__(self):
+    def __init__(self, query_service: QueryService):
         self.data_dir = settings.DATA_DIR
         self.data_config_dir = settings.DATA_CONFIG_DIR
+        self.query_service = query_service
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.data_config_dir, exist_ok=True)
         # This dictionary tracks processed files by their unique OSS file_key
@@ -135,7 +139,7 @@ class DocumentOssService:
                 task_manager.finish_task(task_id, "error", result={"message": "No valid content or nodes generated for indexing."})
             else:
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
-                query_service.update_index(final_nodes_to_index, collection_name=collection_name)
+                self.query_service.update_index(final_nodes_to_index, collection_name=collection_name)
                 
                 self.processed_files[file_key] = display_file_name
                 self._save_processed_keys()
@@ -177,4 +181,4 @@ class DocumentOssService:
 
         
 # Create a singleton instance for the application to use
-document_oss_service = DocumentOssService()
+document_oss_service = DocumentOssService(Depends(get_query_service))

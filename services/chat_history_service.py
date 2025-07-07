@@ -1,9 +1,10 @@
 # api/services/chat_history_service.py
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from llama_index.core.schema import Document as LlamaDocument, TextNode
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core import VectorStoreIndex, Settings
+from llama_index.core.embeddings import BaseEmbedding
 
 import chromadb
 
@@ -13,17 +14,20 @@ from core.metadata_utils import prepare_metadata_for_storage # 假设你的这�
 logger = logging.getLogger(__name__)
 
 class ChatHistoryService:
-    def __init__(self):
+    def __init__(self, 
+                 chroma_client: chromadb.PersistentClient,
+                 embedding_model: Optional[BaseEmbedding] = None):
         self.chroma_path = settings.CHROMA_PATH
-        self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
+        self.chroma_client = chroma_client
+        self._embedding_model = embedding_model 
         self.chat_history_collection_name = "chat_history_collection"
         self._initialize_chat_history_collection()
 
-        # 确保嵌入模型是可用的，例如从 QueryService 共享或重新初始化
-        # 假设 QueryService 已经实例化了 embedding_model
-        from services.query_service import query_service # 导入 QueryService 的实例
-        self.embedding_model = query_service.embedding_model
-        if self.embedding_model is None:
+        logger.info("ChatHistoryService initialized with provided embedding model.")
+
+        # 如果传入了 embedding_model，则使用它；否则，暂时设为 None
+        # 它会在需要时（如在 FastAPI 依赖注入时）被设置
+        if self._embedding_model is None:
              logger.error("Embedding model not initialized in QueryService. Please check.")
              # Fallback or raise error
              raise Exception("Embedding model not available in QueryService.")
@@ -83,12 +87,14 @@ class ChatHistoryService:
             chat_history_vector_store = ChromaVectorStore(chroma_collection=chat_history_collection)
             chat_history_index = VectorStoreIndex.from_vector_store(
                 vector_store=chat_history_vector_store,
-                embed_model=self.embedding_model # 使用共享的嵌入模型
+                embed_model=self._embedding_model
             )
 
             chat_context_filters = {
-                "session_id": {"$eq": session_id}, # 明确使用 $eq 避免歧义
-                "account_id": {"$eq": account_id}
+                "$and": [
+                    {"session_id": {"$eq": session_id}},
+                    {"account_id": {"$eq": account_id}}
+                ]
             }
             logger.info(f"Retrieving chat history context with filters: {chat_context_filters}")
             
@@ -104,5 +110,4 @@ class ChatHistoryService:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
             return []
 
-# 实例化服务
-chat_history_service = ChatHistoryService()
+# chat_history_service = ChatHistoryService()

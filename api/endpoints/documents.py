@@ -1,11 +1,13 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional
-from services.query_service import query_service
+from api.dependencies import get_query_service
 from services.document_service import document_service
 from models.schemas import Document, DocumentMetadata, DebugRequest, DocumentChunkResponse, RAGMetadata
 from services.document_oss_service import document_oss_service
 import os
 import logging
+
+from services.query_service import QueryService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -93,7 +95,8 @@ async def list_oss_documents(keyword: str = Query(None, description="关键词�
     summary="[ChromaDB查询] 按OSS Key获取文档的元数据和内容片段"
 )
 async def get_oss_document_metadata(
-    file_key: str = Query(..., description="目标文档的 OSS file_key")
+    file_key: str = Query(..., description="目标文档的 OSS file_key"),
+    query_service: QueryService = Depends(get_query_service)
 ):
     """
     根据 OSS file_key 从 ChromaDB 中直接获取已索引的文档的

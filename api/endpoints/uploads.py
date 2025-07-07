@@ -1,13 +1,14 @@
 import os
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional
+from services.chat_history_service import ChatHistoryService
 from services.document_service import document_service
 from services.document_oss_service import document_oss_service
 from services.oss_service import oss_service
-from services.query_service import query_service
 from models.schemas import AddChatMessageRequest, DeleteByMetadataRequest, TaskStatus, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
-import shutil
+from services.query_service import QueryService
 from services.task_manager_service import task_manager
+from api.dependencies import get_chat_history_service, get_query_service
 router = APIRouter()
 
 import logging
@@ -75,7 +76,8 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
 # ---- 把核心业务提炼成内部函数，供单/多文件复用 ----
 async def _handle_single_file(
     file: UploadFile,
-    precomputed_hash: str | None = None
+    precomputed_hash: str | None = None,
+    query_service: QueryService = Depends(get_query_service)
 ) -> UploadResponse:
     """
     真正执行: 去重 -> 保存 -> 解析 -> 过滤 -> 向量索引
@@ -165,7 +167,8 @@ async def upload_from_oss(request: UploadFromOssRequest, background_tasks: Backg
     logger.info(f"Task {task_id} successfully scheduled.")
     return initial_status
 
-def update_metadata_task(request: UpdateMetadataRequest):
+def update_metadata_task(request: UpdateMetadataRequest,
+                         query_service: QueryService = Depends(get_query_service)):
     """
     A thin background task dispatcher for metadata updates.
     It calls DocumentOssService to perform the logic and updates the global task status.
@@ -247,7 +250,8 @@ async def update_metadata(request: UpdateMetadataRequest, background_tasks: Back
 
 
 @router.post("/delete-by-metadata", summary="[同步操作] 根据元数据删除文档")
-def delete_by_metadata(request: DeleteByMetadataRequest):
+def delete_by_metadata(request: DeleteByMetadataRequest,
+                       query_service: QueryService = Depends(get_query_service)):
     """
     接收来自后端的指令，根据元数据过滤器删除ChromaDB中的文档。
     这是一个同步操作，因为删除通常很快。
@@ -271,13 +275,13 @@ def delete_by_metadata(request: DeleteByMetadataRequest):
 
 
 @router.post("/add-chat-message")
-async def add_chat_message_api(request: AddChatMessageRequest):
+async def add_chat_message_api(request: AddChatMessageRequest,
+                               chat_history_service: ChatHistoryService = Depends(get_chat_history_service)):
     """
     将聊天消息同步到 ChromaDB 的聊天历史Collection。
     由 Spring 后端调用。
     """
     try:
-        from services.chat_history_service import chat_history_service # 导入服务实例
         chat_history_service.add_chat_message_to_chroma(request.dict())
         return {"status": "success", "message": "Chat message added to ChromaDB."}
     except Exception as e:

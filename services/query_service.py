@@ -5,7 +5,9 @@ import shutil
 from llama_cloud import TextNode
 
 from core.metadata_utils import prepare_metadata_for_storage
-from services import chat_history_service
+from typing import TYPE_CHECKING, Optional
+if TYPE_CHECKING:
+    from services.chat_history_service import ChatHistoryService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -22,50 +24,42 @@ from llama_index.core import VectorStoreIndex, PromptTemplate, StorageContext, l
 from llama_index.llms.dashscope import DashScope, DashScopeGenerationModels
 from llama_index.embeddings.dashscope import DashScopeEmbedding, DashScopeTextEmbeddingModels
 from llama_index.vector_stores.chroma import ChromaVectorStore
-import chromadb
-from chromadb.config import Settings
+from llama_index.core.llms import LLM
+from llama_index.core.embeddings import BaseEmbedding
 
 # from llama_index.cura import CURARetriever
 # print(CURARetriever)
-from core.config import settings
+from core.config import Settings, settings
 from models.schemas import ChatQueryRequest, StreamChunk
 from services.document_service import document_service
 from services.oss_service import oss_service
 from typing import List, Dict
+import chromadb
 
 PERSIST_DIR = settings.INDEX_PATH
 class QueryService:
-    def __init__(self):
+    def __init__(self, 
+                 chroma_client: chromadb.PersistentClient,
+                 embedding_model: BaseEmbedding,
+                 llm: LLM, 
+                 chat_history_service: Optional['ChatHistoryService'] = None):
         """
         构造函数 - 实现“按需加载”策略
         启动时只初始化客户端和空的索引缓存，不加载任何实际的索引数据。
         """
-        self.chroma_path = settings.CHROMA_PATH
-        
-        self.chroma_client = chromadb.PersistentClient(
-            path=self.chroma_path, # This path is now a local cache directory
-            settings=Settings(
-                is_persistent=True, # This MUST be True to enable persistence
-            )
-        )
-
-        self.embedding_model = DashScopeEmbedding(
-            model_name=DashScopeTextEmbeddingModels.TEXT_EMBEDDING_V2,
-            text_type="document"
-        )
-        self.llm = DashScope(
-            model_name=DashScopeGenerationModels.QWEN_PLUS,
-            api_key=settings.DASHSCOPE_API_KEY,
-            max_tokens=4096,
-            temperature=0.5,  
-            similarity_cutoff=0.5  
-        )
+        self.chroma_path = settings.CHROMA_PATH # 路径配置仍然保留
+        self.chroma_client = chroma_client       # 使用传入的客户端
+        self.embedding_model = embedding_model   # 使用传入的 embedding model
+        self.llm = llm                           # 使用传入的 LLM
         
         self.indices: Dict[str, VectorStoreIndex] = {}
         # 一个内存字典，用于缓存“按需加载”的索引对象
         # 键是 collection_name，值是 LlamaIndex 的 index 对象
         self.qa_prompt = self._create_qa_prompt()
         logger.info("QueryService initialized for on-demand index loading. No indices loaded at startup.")
+
+        # 保存 chat_history_service 实例
+        self._chat_history_service = chat_history_service
         
     def _get_or_load_index(self, collection_name: str) -> VectorStoreIndex:
         """
@@ -419,20 +413,31 @@ class QueryService:
     def _build_chroma_where_clause(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
         为 ChromaDB 构建原生 where 子句。
-        此版本只使用 ChromaDB 明确支持的操作符，如 $in 和 $eq。
+        此版本根据值的类型，自动使用 $in 或 $eq。
+        它能处理复杂过滤器（如 {"field": {"$in": [val1, val2]}}）或简单过滤器（如 {"field": val}）。
         """
         if not filters:
             return {}
 
         chroma_filters = []
-        
+
         for key, value in filters.items():
-            # 对 accessible_to 字段，直接使用 $in 操作符
-            if key == "accessible_to" and isinstance(value, list) and value:
-                chroma_filters.append({"accessible_to": {"$in": value}})
-            # 其他所有字段，使用 $eq (等于) 操作符
-            elif key != "accessible_to":
-                chroma_filters.append({key: {"$eq": value}})
+            # 情况 1: 值本身是一个字典，并且包含 ChromaDB 支持的操作符 (如 "$in")
+            # 这表示调用方已经提供了复杂的过滤条件，直接使用即可。
+            if isinstance(value, dict) and any(op in value for op in ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin"]):
+                chroma_filters.append({key: value})
+            # 情况 2: 值是一个列表，我们应使用 "$in" 操作符
+            elif isinstance(value, list):
+                # 检查列表是否为空，避免生成 {"key": {"$in": []}} 这种可能导致问题的情况
+                if value:
+                    chroma_filters.append({key: {"$in": value}})
+                else:
+                    # 如果列表为空，则该条件不会匹配任何文档，可以忽略或根据业务逻辑处理
+                    logger.warning(f"Empty list provided for filter key '{key}'. This condition will be ignored.")
+            # 情况 3: 其他所有简单类型的值 (str, int, float)，使用默认的相等比较
+            # ChromaDB 对于 {"key": value} 形式，默认就是相等比较，不需要显式写 "$eq"
+            else:
+                chroma_filters.append({key: value})
 
         if not chroma_filters:
             return {}
@@ -624,25 +629,29 @@ class QueryService:
         
     async def rag_query_with_context(
         self,
-        request: ChatQueryRequest # 直接接收 ChatQueryRequest 对象
-    ) -> AsyncGenerator[str, None]:
+        request: ChatQueryRequest 
+    ) -> AsyncGenerator[bytes, None]:
         
         logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
         
         # --- 1. 语义检索历史聊天上下文 ---
         chat_history_context_string = ""
         try:
-            chat_history_context_nodes = chat_history_service.retrieve_chat_history_context(
-                session_id=request.session_id,
-                account_id=request.account_id,
-                query_text=request.context_retrieval_query,
-                top_k=request.similarity_top_k or 5 # 使用请求中的top_k或默认值
-            )
-            if chat_history_context_nodes:
-                chat_history_context_string = "以下是与您当前问题相关的历史对话片段：\n" + \
-                                              "\n".join([f"[{node.metadata.get('role', '未知')}]: {node.text}" for node in chat_history_context_nodes]) + \
-                                              "\n---\n"
-            logger.info(f"Chat history context: \n{chat_history_context_string}")
+            if self._chat_history_service: 
+                chat_history_context_nodes = self._chat_history_service.retrieve_chat_history_context( 
+                    session_id=request.session_id,
+                    account_id=request.account_id,
+                    query_text=request.context_retrieval_query,
+                    top_k=request.similarity_top_k or 5
+                )
+                if chat_history_context_nodes:
+                    chat_history_context_string = "以下是与您当前问题相关的历史对话片段：\n" + \
+                                                  "\n".join([f"[{node.metadata.get('role', '未知')}]: {node.text}" for node in chat_history_context_nodes]) + \
+                                                  "\n---\n"
+                logger.info(f"Chat history context: \n{chat_history_context_string}")
+            else:
+                logger.warning("ChatHistoryService instance not available in QueryService. Skipping chat history retrieval.")
+
         except Exception as e:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
             chat_history_context_string = ""
@@ -651,7 +660,8 @@ class QueryService:
         rag_index = self._get_or_load_index(request.collection_name)
         if not rag_index:
             logger.error(f"RAG collection '{request.collection_name}' does not exist or could not be loaded.")
-            yield StreamChunk(content="抱歉，知识库未准备好，请稍后再试。", is_last=True).json() + "\n"
+            error_chunk_json = StreamChunk(content="抱歉，知识库未准备好，请稍后再试。", is_last=True).json()
+            yield f"data: {error_chunk_json}\n\n".encode("utf-8") # <--- 直接返回完整 SSE 格式的 bytes
             return
 
         combined_rag_filters = request.filters if request.filters else {}
@@ -684,7 +694,7 @@ class QueryService:
         )
         
         response = await query_engine.aquery(request.question)
-        
+
         rag_sources_info = []
         if response.source_nodes:
             for node in response.source_nodes:
@@ -699,11 +709,18 @@ class QueryService:
         if hasattr(response, 'response_gen'):
             async for chunk_text in response.response_gen:
                 full_response_content += chunk_text
-                yield StreamChunk(content=chunk_text, is_last=False).json() + "\n"
+                sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
+                logger.debug(f"Yielding raw JSON chunk: {sse_event_json}")
+                yield f"data: {sse_event_json}\n\n".encode("utf-8") # <--- 直接返回完整 SSE 格式的 bytes
         
-        yield StreamChunk(
+        # Python 只生成最终的 JSON 字符串，不加 "data: " 和 "\n\n"
+        final_sse_event_json = StreamChunk(
             content="",
             is_last=True,
             metadata={"rag_sources": rag_sources_info}
-        ).json() + "\n"
-query_service = QueryService()
+        ).json()
+        logger.debug(f"Yielding final raw JSON chunk: {final_sse_event_json}")
+        yield final_sse_event_json.encode("utf-8")
+
+# 不再在这里实例化全局变量
+# query_service = QueryService()
