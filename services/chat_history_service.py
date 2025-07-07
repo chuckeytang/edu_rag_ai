@@ -9,28 +9,24 @@ from llama_index.core.embeddings import BaseEmbedding
 import chromadb
 
 from core.config import settings
-from core.metadata_utils import prepare_metadata_for_storage # 假设你的这个工具函数存在
+from core.metadata_utils import prepare_metadata_for_storage
+from services.indexer_service import IndexerService # 假设你的这个工具函数存在
 
 logger = logging.getLogger(__name__)
 
 class ChatHistoryService:
     def __init__(self, 
                  chroma_client: chromadb.PersistentClient,
-                 embedding_model: Optional[BaseEmbedding] = None):
+                 embedding_model: Optional[BaseEmbedding],
+                 indexer_service: IndexerService):
         self.chroma_path = settings.CHROMA_PATH
         self.chroma_client = chroma_client
         self._embedding_model = embedding_model 
         self.chat_history_collection_name = "chat_history_collection"
+        self._indexer_service = indexer_service
         self._initialize_chat_history_collection()
 
         logger.info("ChatHistoryService initialized with provided embedding model.")
-
-        # 如果传入了 embedding_model，则使用它；否则，暂时设为 None
-        # 它会在需要时（如在 FastAPI 依赖注入时）被设置
-        if self._embedding_model is None:
-             logger.error("Embedding model not initialized in QueryService. Please check.")
-             # Fallback or raise error
-             raise Exception("Embedding model not available in QueryService.")
 
     def _initialize_chat_history_collection(self):
         """确保聊天历史的 ChromaDB Collection 存在"""
@@ -66,29 +62,23 @@ class ChatHistoryService:
         )
         
         try:
-            # 使用 ChromaDB 原生方法更直接，LlamaIndex 的 insert 在此处可能不必要
-            # ChromaDB 的 add 会自动处理重复 id (覆盖)
-            collection.add(
-                documents=[doc.text],
-                metadatas=[doc.metadata],
-                ids=[doc.id_]
+            self._indexer_service.add_documents_to_index(
+                documents=[doc],
+                collection_name=self.chat_history_collection_name
             )
-            logger.info(f"Successfully added chat message '{doc.id_}' to ChromaDB chat history collection.")
+            logger.info(f"Successfully added chat message '{doc.id_}' to ChromaDB chat history collection via IndexerService.")
         except Exception as e:
-            logger.error(f"Failed to add chat message '{doc.id_}' to ChromaDB: {e}", exc_info=True)
-            # 根据需求决定是否重新抛出异常
+            logger.error(f"Failed to add chat message '{doc.id_}' to ChromaDB via IndexerService: {e}", exc_info=True)
 
     def retrieve_chat_history_context(self, session_id: str, account_id: int, query_text: str, top_k: int = 5) -> List[TextNode]:
         """
         从聊天历史Collection中语义检索相关上下文。
         """
         try:
-            chat_history_collection = self.chroma_client.get_collection(name=self.chat_history_collection_name)
-            chat_history_vector_store = ChromaVectorStore(chroma_collection=chat_history_collection)
-            chat_history_index = VectorStoreIndex.from_vector_store(
-                vector_store=chat_history_vector_store,
-                embed_model=self._embedding_model
-            )
+            chat_history_index = self._indexer_service._get_or_load_index(self.chat_history_collection_name)
+            if not chat_history_index:
+                logger.error(f"Chat history index for collection '{self.chat_history_collection_name}' could not be loaded.")
+                return [] # 无法加载索引，返回空列表
 
             chat_context_filters = {
                 "$and": [

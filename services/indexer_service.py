@@ -4,13 +4,15 @@ import os
 import shutil
 from typing import Dict, List, Optional
 
-from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage
+from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage, PromptTemplate
 from llama_index.core.schema import Document as LlamaDocument
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.core.embeddings import BaseEmbedding # 导入 LlamaIndex 的 BaseEmbedding 类型
+from llama_index.core.embeddings import BaseEmbedding
+from llama_cloud import TextNode
+from llama_index.core.llms import LLM
 
 import chromadb
-from chromadb.config import Settings # 导入 ChromaDB 的 Settings，用于 PersistentClient
+from chromadb.config import Settings
 
 from core.config import settings
 
@@ -43,15 +45,8 @@ class IndexerService:
 
         try:
             logger.info(f"Checking for collection '{collection_name}' in ChromaDB...")
-            # 注意: get_or_create_collection 可以在这里使用，因为它不会改变已存在 collection 的维度
             collection = self.chroma_client.get_or_create_collection(name=collection_name)
-            
-            # 在这里检查 collection 的维度是否与 embedding_model 匹配会更稳健
-            # 但 LlamaIndex 和 ChromaDB 的内部校验通常足够
-
             vector_store = ChromaVectorStore(chroma_collection=collection)
-            # persist_dir 用于 LlamaIndex 自身的文档存储（docstore, graph store等）
-            # 它与 ChromaDB 的向量存储是分开的
             storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
             logger.info(f"Collection '{collection_name}' found/created in ChromaDB.")
 
@@ -59,9 +54,7 @@ class IndexerService:
             logger.warning(f"Failed to get or create collection '{collection_name}' in ChromaDB: {e}", exc_info=True)
             return None # 无法获取 Collection 则无法创建 Index
 
-        # 尝试从本地持久化文件加载 LlamaIndex 的元数据
         try:
-            # load_index_from_storage 会尝试加载 docstore, graph store 等
             index = load_index_from_storage(storage_context=storage_context, embed_model=self.embedding_model)
             logger.info(f"Successfully loaded index metadata for collection '{collection_name}' from '{PERSIST_DIR}'.")
         except Exception as e:
@@ -91,8 +84,6 @@ class IndexerService:
 
         if index is None:
             logger.info(f"Index for '{collection_name}' not found/loadable. Initializing a new one.")
-            # 如果是新索引，LlamaIndex 会在 from_documents 中创建 collection
-            # 并在内部进行 embedding
             collection = self.chroma_client.get_or_create_collection(name=collection_name)
             vector_store = ChromaVectorStore(chroma_collection=collection)
             storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
@@ -158,27 +149,139 @@ class IndexerService:
         这不是相似度搜索，而是精确的数据拉取。
         """
         logger.info(f"Directly fetching nodes from '{collection_name}' with filters: {filters}")
-        collection = self.chroma_client.get_collection(name=collection_name)
-        
-        results = collection.get(
-            where=filters,
-            include=["metadatas", "documents"]
-        )
-        
-        if not results or not results['ids']:
-            logger.info(f"No nodes found for filters: {filters}")
-            return []
+        try:
+            collection = self.chroma_client.get_collection(name=collection_name)
             
-        nodes = []
-        for i in range(len(results['ids'])):
-            node = TextNode(
-                id_=results['ids'][i],
-                text=results['documents'][i],
-                extra_info=results['metadatas'][i] or {}
+            results = collection.get(
+                where=filters,
+                include=["metadatas", "documents"]
             )
-            nodes.append(node)
             
-        logger.info(f"Found {len(nodes)} nodes matching the filters.")
-        return nodes
+            if not results or not results['ids']:
+                logger.info(f"No nodes found for filters: {filters}")
+                return []
+                
+            nodes = []
+            for i in range(len(results['ids'])):
+                node = TextNode(
+                    id_=results['ids'][i],
+                    text=results['documents'][i],
+                    extra_info=results['metadatas'][i] or {}
+                )
+                nodes.append(node)
+                
+            logger.info(f"Found {len(nodes)} nodes matching the filters.")
+            return nodes
+        except Exception as e:
+            logger.error(f"Error fetching nodes from ChromaDB for collection '{collection_name}' with filters {filters}: {e}", exc_info=True)
+            raise
 
-# 不在这里实例化，由 dependencies.py 统一管理
+    def update_existing_nodes_metadata(self, collection_name: str, material_id: int, metadata_update_payload: dict):
+        """
+        根据 material_id 找到所有相关节点，并更新它们的元数据。
+        这是一个“合并更新”，而不是完全替换。
+        """
+        logger.info(f"Performing generic metadata update for material_id: {material_id} with payload: {metadata_update_payload}")
+        
+        if metadata_update_payload is None:
+            logger.warning("Update payload is None, skipping update.")
+            return
+
+        try:
+            collection = self.chroma_client.get_collection(name=collection_name)
+            
+            nodes_to_update = collection.get(where={"material_id": material_id}, include=["metadatas"])
+            if not nodes_to_update or not nodes_to_update['ids']:
+                logger.warning(f"No nodes found for material_id {material_id} during generic update. Nothing to do.")
+                return
+
+            updated_metadatas = []
+            preserved_keys = {"material_id", "author_id", "file_key", "file_name", "file_size"} # 保持这些关键字段
+            
+            for old_meta in nodes_to_update['metadatas']:
+                new_meta = metadata_update_payload.copy()
+                for key in preserved_keys:
+                    if key in old_meta:
+                        new_meta[key] = old_meta[key]
+                updated_metadatas.append(new_meta)
+            
+            collection.update(
+                ids=nodes_to_update['ids'],
+                metadatas=updated_metadatas
+            )
+            logger.info(f"Successfully updated metadata for {len(nodes_to_update['ids'])} nodes of material_id {material_id}.")
+        except Exception as e:
+            logger.error(f"Error during generic metadata update for material_id '{material_id}': {e}", exc_info=True)
+            raise # 重新抛出异常
+
+    def add_public_acl_to_material(self, material_id: int, collection_name: str) -> dict:
+        """
+        为已存在的私有文档添加公共权限（通过创建副本）。
+        """
+        task_status = "error"
+        message = f"An unexpected error occurred while publishing material {material_id}."
+        
+        try:
+            collection = self.chroma_client.get_collection(name=collection_name)
+
+            # --- 增加幂等性检查 ---
+            logger.info(f"Checking for existing public nodes for material_id: {material_id}")
+            existing_public_nodes = collection.get(
+                where={"$and": [{"material_id": material_id}, {"accessible_to": "public"}]},
+                limit=1
+            )
+            if existing_public_nodes and existing_public_nodes['ids']:
+                message = f"Material {material_id} has already been published. Operation is idempotent."
+                task_status = "duplicate"
+                logger.warning(message)
+                return {"message": message, "status": task_status}
+
+            logger.info(f"Finding existing nodes for material_id: {material_id} to publish.")
+            results = collection.get(
+                where={"material_id": material_id},
+                include=["metadatas", "documents"]
+            )
+            
+            if not results or not results['ids']:
+                message = f"No existing nodes found for material_id {material_id} to publish."
+                task_status = "not_found"
+                logger.warning(message)
+                return {"message": message, "status": task_status}
+
+            public_nodes_to_add = []
+            for i in range(len(results['ids'])):
+                metadata_copy = results['metadatas'][i].copy() if results['metadatas'][i] else {}
+                if metadata_copy.get('accessible_to') == 'public':
+                    logger.warning(f"Node {results['ids'][i]} for material_id {material_id} is already public. Skipping.")
+                    continue
+                
+                metadata_copy['accessible_to'] = 'public'
+                # 创建新的 LlamaDocument 对象 (LlamaDocument 内部会自动生成 ID，但为了和旧ID区分，可以考虑前缀)
+                new_public_node = LlamaDocument(
+                    text=results['documents'][i],
+                    metadata=metadata_copy,
+                    # id_=f"public_{results['ids'][i]}" # 可以考虑给公共副本一个不同的ID
+                )
+                public_nodes_to_add.append(new_public_node)
+            
+            if public_nodes_to_add:
+                logger.info(f"Adding {len(public_nodes_to_add)} new public nodes for material_id {material_id}.")
+                # 调用自身的 add_documents_to_index 方法来执行插入
+                self.add_documents_to_index(public_nodes_to_add, collection_name) # <-- 使用通用的 add_documents_to_index
+            else:
+                logger.info(f"No new public nodes needed for material_id {material_id}, it might have been published already.")
+
+            message = f"Successfully published material {material_id} by adding/verifying public nodes."
+            task_status = "success"
+            logger.info(message)
+
+        except Exception as e:
+            logger.error(f"Error during publishing of material_id '{material_id}': {e}", exc_info=True)
+            message = str(e)
+            task_status = "error"
+        
+        return {
+            "message": message,
+            "status": task_status,
+        }
+    

@@ -85,5 +85,3 @@ class OssService:
         except Exception as e:
             logger.error(f"Generic exception downloading '{object_key}': {str(e)}", exc_info=True)
             raise HTTPException(status_code=503, detail=f"Could not connect to OSS endpoint or another error occurred. Original error: {str(e)}")
-
-oss_service = OssService()

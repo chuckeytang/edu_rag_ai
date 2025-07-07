@@ -2,13 +2,20 @@ import os
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional
 from services.chat_history_service import ChatHistoryService
-from services.document_service import document_service
-from services.document_oss_service import document_oss_service
-from services.oss_service import oss_service
+from services.document_service import DocumentService
+from services.document_oss_service import DocumentOssService
 from models.schemas import AddChatMessageRequest, DeleteByMetadataRequest, TaskStatus, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
 from services.query_service import QueryService
-from services.task_manager_service import task_manager
-from api.dependencies import get_chat_history_service, get_query_service
+from services.indexer_service import IndexerService 
+from api.dependencies import (
+    get_indexer_service, 
+    get_chat_history_service, 
+    get_document_oss_service,
+    get_task_manager_service,
+    get_oss_service, 
+    get_document_service
+)
+from services.task_manager_service import TaskManagerService
 router = APIRouter()
 
 import logging
@@ -21,23 +28,24 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-processing_task_results = {}
-
 # ---- 单文件上传保持你刚改好的版本 ----
 @router.post("/upload", response_model=UploadResponse)
-async def upload_file(file: UploadFile = File(...)):
-    return await _handle_single_file(file)
+async def upload_file(file: UploadFile = File(...),
+    document_service: DocumentService = Depends(get_document_service), 
+    indexer_service: IndexerService = Depends(get_indexer_service)):
+    return await _handle_single_file(file, document_service=document_service, indexer_service=indexer_service)
 
 # ---- 批量上传：调用同一套业务逻辑 _handle_single_file ----
 @router.post("/upload-multiple", response_model=List[UploadResponse])
-async def upload_multiple_files(files: List[UploadFile] = File(...)):
+async def upload_multiple_files(files: List[UploadFile] = File(...),
+                                document_service: DocumentService = Depends(get_document_service),
+                                indexer_service: IndexerService = Depends(get_indexer_service)):
     responses: List[UploadResponse] = []
     seen_hashes: set[str] = set()  # 本批次内已处理的文件 Hash
 
     for file in files:
         try:
-            # ⭐ 先预计算 Hash，避免一个请求里两份相同文件入库
-            file_hash = await document_service._calculate_file_hash(file)
+            file_hash = await document_service._calculate_upload_file_hash(file)
             await file.seek(0)  # 重要：复位指针，后续还能读取
 
             if file_hash in seen_hashes:
@@ -56,7 +64,8 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
             seen_hashes.add(file_hash)
 
             # 交给统一处理函数
-            response = await _handle_single_file(file, precomputed_hash=file_hash)
+            response = await _handle_single_file(file, precomputed_hash=file_hash, 
+                                                  document_service=document_service, indexer_service=indexer_service)
             responses.append(response)
 
         except HTTPException as e:
@@ -77,14 +86,14 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
 async def _handle_single_file(
     file: UploadFile,
     precomputed_hash: str | None = None,
-    query_service: QueryService = Depends(get_query_service)
+    document_service: DocumentService = Depends(get_document_service),
+    indexer_service: IndexerService = Depends(get_indexer_service) 
 ) -> UploadResponse:
     """
     真正执行: 去重 -> 保存 -> 解析 -> 过滤 -> 向量索引
-    参数 precomputed_hash: 在批量接口里已算好的 Hash 可传入；单文件上传则现场计算
     """
     # 1. 计算 Hash
-    file_hash = precomputed_hash or await document_service._calculate_file_hash(file)
+    file_hash = precomputed_hash or await document_service._calculate_upload_file_hash(file)
     await file.seek(0)  # 保证后续操作可重新读取
 
     # 2. 先查重
@@ -115,7 +124,7 @@ async def _handle_single_file(
         logger.debug(f"Item {i} in filtered_docs has type: {type(item)}")
         
     # 5. 更新向量索引
-    query_service.update_index(filtered_docs)
+    indexer_service.add_documents_to_index(filtered_docs, collection_name="public_collection") 
 
     # 6. 返回
     return UploadResponse(
@@ -127,7 +136,9 @@ async def _handle_single_file(
         status="new"
     )
 
-def process_task_wrapper(request: UploadFromOssRequest, task_id: str):
+def process_task_wrapper(request: UploadFromOssRequest, 
+                         task_id: str,
+                         document_oss_service: DocumentOssService = Depends(get_document_oss_service)):
     """
     这个函数现在是一个纯粹的包装器/调度器。
     它的唯一职责就是调用业务服务层的方法，并把 task_id 传过去。
@@ -138,15 +149,15 @@ def process_task_wrapper(request: UploadFromOssRequest, task_id: str):
         # 直接调用，不关心返回值。所有状态更新都在 process_new_oss_file 内部完成。
         document_oss_service.process_new_oss_file(request, task_id)
     except Exception as e:
-        # 添加一个最终的保障性异常捕获。
-        # 正常情况下，process_new_oss_file 内部有自己的try-except，这里不应该被触发。
-        # 但为了系统健壮性，我们在这里捕获任何未被捕获的致命错误。
         logger.error(f"[TASK_ID: {task_id}] A critical unhandled exception escaped the service layer: {e}", exc_info=True)
-        # 尝试将任务标记为失败
-        task_manager.finish_task(task_id, "error", result={"message": "A critical and unexpected error occurred in the service layer."})
+        task_manager_service_instance: TaskManagerService = get_task_manager_service()
+        task_manager_service_instance.finish_task(task_id, "error", result={"message": "A critical and unexpected error occurred in the service layer."})
+
 
 @router.post("/upload-from-oss", response_model=TaskStatus, status_code=202)
-async def upload_from_oss(request: UploadFromOssRequest, background_tasks: BackgroundTasks):
+async def upload_from_oss(request: UploadFromOssRequest, 
+                          background_tasks: BackgroundTasks,
+                          task_manager_service: TaskManagerService = Depends(get_task_manager_service)):
         
     # 准备要存入任务初始状态的上下文数据
     initial_data = {
@@ -154,8 +165,7 @@ async def upload_from_oss(request: UploadFromOssRequest, background_tasks: Backg
         "file_key": request.file_key
     }
 
-    # --- 使用TaskManager创建任务，并立即获取task_id ---
-    initial_status = task_manager.create_task(
+    initial_status = task_manager_service.create_task(
         task_type="document_indexing",
         initial_message=f"Task scheduled for file '{request.metadata.file_name}'.",
         initial_data=initial_data
@@ -168,7 +178,8 @@ async def upload_from_oss(request: UploadFromOssRequest, background_tasks: Backg
     return initial_status
 
 def update_metadata_task(request: UpdateMetadataRequest,
-                         query_service: QueryService = Depends(get_query_service)):
+                         indexer_service: IndexerService = Depends(get_indexer_service),
+                         task_manager_service: TaskManagerService = Depends(get_task_manager_service)):
     """
     A thin background task dispatcher for metadata updates.
     It calls DocumentOssService to perform the logic and updates the global task status.
@@ -178,7 +189,7 @@ def update_metadata_task(request: UpdateMetadataRequest,
     collection_name = request.collection_name
     logger.info(f"[TASK_ID: {task_id}] Metadata update task started. Delegating to DocumentOssService...")
     
-    final_status = {"status": "error", "message": "Task failed unexpectedly."}
+    final_status_dict = {"status": "error", "message": "Task failed unexpectedly."}
 
     try:
         # --- 步骤 A：执行通用的元数据更新 ---
@@ -187,7 +198,7 @@ def update_metadata_task(request: UpdateMetadataRequest,
         update_payload.pop('accessible_to', None) # 移除权限字段，因为它将被单独处理
 
         # 2. 调用通用更新方法
-        query_service.update_existing_nodes_metadata(
+        indexer_service.update_existing_nodes_metadata(
             collection_name=collection_name,
             material_id=material_id,
             metadata_update_payload=update_payload
@@ -199,28 +210,27 @@ def update_metadata_task(request: UpdateMetadataRequest,
         if request.metadata.accessible_to and "public" in request.metadata.accessible_to:
             logger.info(f"[TASK_ID: {task_id}] Step B: Publish condition met. Triggering public ACL addition.")
             # 2. 调用发布（新增公共节点）的方法
-            publish_status = query_service.add_public_acl_to_material(
+            publish_status = indexer_service.add_public_acl_to_material(
                 material_id=material_id,
                 collection_name=collection_name
             )
             # 将发布操作的结果作为最终结果
-            final_status = publish_status
+            final_status_dict = publish_status
         else:
             logger.info(f"[TASK_ID: {task_id}] Step B: No publish condition. Task finished after metadata update.")
-            final_status = {"status": "success", "message": "Metadata updated successfully without publishing."}
+            final_status_dict = {"status": "success", "message": "Metadata updated successfully without publishing."}
 
     except Exception as e:
         logger.error(f"[TASK_ID: {task_id}] An error occurred in the update/publish task: {e}", exc_info=True)
-        final_status = {"status": "error", "message": str(e)}
+        final_status_dict = {"status": "error", "message": str(e)}
 
-    # 更新全局任务状态字典
-    processing_task_results[task_id] = UpdateMetadataResponse(
-        message=final_status["message"],
-        material_id=material_id,
-        task_id=task_id,
-        status=final_status["status"]
-    )
-    logger.info(f"[TASK_ID: {task_id}] Metadata update/publish task finished. Final status: '{final_status['status']}'")
+    task_manager_service.finish_task(task_id, final_status_dict["status"], result={
+        "message": final_status_dict["message"],
+        "material_id": material_id,
+        "task_id": task_id,
+        "status": final_status_dict["status"]
+    })
+    logger.info(f"[TASK_ID: {task_id}] Metadata update/publish task finished. Final status: '{final_status_dict['status']}'")
 
 
 @router.post(
@@ -251,14 +261,14 @@ async def update_metadata(request: UpdateMetadataRequest, background_tasks: Back
 
 @router.post("/delete-by-metadata", summary="[同步操作] 根据元数据删除文档")
 def delete_by_metadata(request: DeleteByMetadataRequest,
-                       query_service: QueryService = Depends(get_query_service)):
+                       indexer_service: IndexerService = Depends(get_indexer_service)):
     """
     接收来自后端的指令，根据元数据过滤器删除ChromaDB中的文档。
     这是一个同步操作，因为删除通常很快。
     """
     logger.info(f"Received request to delete documents with filters: {request.filters}")
     try:
-        result = query_service.delete_nodes_by_metadata(
+        result = indexer_service.delete_nodes_by_metadata(
             collection_name=request.collection_name,
             filters=request.filters
         )
@@ -291,11 +301,12 @@ async def add_chat_message_api(request: AddChatMessageRequest,
 
 # --- Polling Endpoint (New) ---
 @router.get("/status/{task_id}", response_model=TaskStatus, summary="查询后台任务的状态")
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str,
+                          task_manager_service: TaskManagerService = Depends(get_task_manager_service)):
     """
     Polls for the status and result of a background processing task.
     """
-    status = task_manager.get_status(task_id)
+    status = task_manager_service.get_status(task_id)
     if status is None:
         raise HTTPException(status_code=404, detail=f"Task with ID '{task_id}' not found.")
     return status

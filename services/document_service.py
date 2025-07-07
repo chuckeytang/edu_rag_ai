@@ -26,6 +26,7 @@ class DocumentService:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.data_config_dir, exist_ok=True)
         self.file_hashes = self._load_existing_hashes()
+        logger.info("DocumentService initialized.")
     
     @property
     def hash_file(self):
@@ -48,7 +49,7 @@ class DocumentService:
                 f.write(f"{file_hash}:{file_path}\n")
 
     @staticmethod
-    def _calculate_file_hash(file_path: str) -> str:
+    def calculate_file_hash_from_path(file_path: str) -> str:
         """Calculates SHA256 hash for a file given its local path."""
         hash_obj = hashlib.sha256()
         with open(file_path, "rb") as f:
@@ -67,22 +68,24 @@ class DocumentService:
             f for f in os.listdir(self.data_dir)
             if os.path.isfile(os.path.join(self.data_dir, f))
         ]
-
-    @staticmethod
-    async def _calculate_file_hash(file: UploadFile) -> str:
-        file.file.seek(0)
+    
+    async def _calculate_upload_file_hash(self, file: UploadFile) -> str:
+        """Calculates SHA256 hash for an UploadFile content without saving."""
+        # 必须先seek(0)，因为file.file可能在前面被读取过
+        await file.seek(0) 
         hash_obj = hashlib.sha256()
         while chunk := await file.read(8192):
             hash_obj.update(chunk)
-        await file.seek(0)
+        # 再次seek(0)，以便文件内容可以再次被读取（例如被保存）
+        await file.seek(0) 
         return hash_obj.hexdigest()
 
     async def is_duplicate_file(self, file: UploadFile) -> bool:
-        file_hash = await self._calculate_file_hash(file)
+        file_hash = await self._calculate_upload_file_hash(file)
         return file_hash in self.file_hashes
 
     async def save_uploaded_file(self, file: UploadFile) -> str:
-        file_hash = await self._calculate_file_hash(file)
+        file_hash = await self._calculate_upload_file_hash(file)
         if file_hash in self.file_hashes:
             existing_file = self.file_hashes[file_hash]
             if os.path.exists(existing_file):
@@ -205,4 +208,3 @@ class DocumentService:
             "tested_formats": results,
             "raw_text_sample": doc.text[:200] + "..."
         }
-document_service = DocumentService()

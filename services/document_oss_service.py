@@ -7,27 +7,27 @@ from typing import List, Optional, Tuple
 
 from fastapi import Depends
 
-from api.dependencies import get_query_service
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.schema import Document as LlamaDocument
-from models.schemas import UploadResponse, UploadFromOssRequest, UpdateMetadataRequest
+from models.schemas import UploadFromOssRequest
 from core.config import settings
-from models.schemas import RAGMetadata
-from services.oss_service import oss_service
-from services.query_service import QueryService
-from services.task_manager_service import task_manager
+from services.indexer_service import IndexerService
+from services.oss_service import OssService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
 
 class DocumentOssService:
-    def __init__(self, query_service: QueryService):
+    def __init__(self, 
+                 indexer_service: IndexerService,
+                 oss_service_instance: OssService):
         self.data_dir = settings.DATA_DIR
         self.data_config_dir = settings.DATA_CONFIG_DIR
-        self.query_service = query_service
+        self.indexer_service = indexer_service
+        self.oss_service = oss_service_instance
+
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.data_config_dir, exist_ok=True)
-        # This dictionary tracks processed files by their unique OSS file_key
         self.processed_files = self._load_processed_keys()
 
     @property
@@ -92,11 +92,11 @@ class DocumentOssService:
                 target_bucket = settings.OSS_PUBLIC_BUCKET_NAME
             else:
                 target_bucket = settings.OSS_PRIVATE_BUCKET_NAME
+
             local_file_path = oss_service.download_file_to_temp(
                 object_key=file_key, 
                 bucket_name=target_bucket
             )
-            # --- [进度汇报] 下载完成 ---
             task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
             
             # --- 3. 加载原始文档区块 ---
@@ -139,7 +139,7 @@ class DocumentOssService:
                 task_manager.finish_task(task_id, "error", result={"message": "No valid content or nodes generated for indexing."})
             else:
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
-                self.query_service.update_index(final_nodes_to_index, collection_name=collection_name)
+                self.indexer_service.add_documents_to_index(final_nodes_to_index, collection_name=collection_name)
                 
                 self.processed_files[file_key] = display_file_name
                 self._save_processed_keys()
@@ -151,10 +151,12 @@ class DocumentOssService:
                     "file_key": file_key
                 }
                 task_manager.finish_task(task_id, "success", result=success_result)
+                return {"status": "success", "message": success_result["message"]} # 明确返回
 
         except Exception as e:
             logger.error(f"Error during processing of OSS key '{file_key}': {e}", exc_info=True)
             task_manager.finish_task(task_id, "error", result={"message": str(e)})
+            return {"status": "error", "message": str(e)}
         finally:
             # 清理临时文件
             if local_file_path:
@@ -162,8 +164,6 @@ class DocumentOssService:
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir)
                     logger.info(f"Cleaned up temporary directory: '{temp_dir}'")
-        
-        return 
 
     def _filter_documents(self, documents: List[LlamaDocument]) -> Tuple[List[LlamaDocument], dict]:
         """Filters out blank or empty pages from a list of documents."""
@@ -178,7 +178,3 @@ class DocumentOssService:
                     page_info[fname] = set()
                 page_info[fname].add(doc.metadata.get("page_label", "unknown"))
         return filtered_docs, page_info
-
-        
-# Create a singleton instance for the application to use
-document_oss_service = DocumentOssService(Depends(get_query_service))

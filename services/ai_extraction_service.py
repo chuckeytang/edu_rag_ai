@@ -16,7 +16,7 @@ from llama_index.core import SimpleDirectoryReader
 
 from core.config import settings # 假设settings包含DeepSeek配置
 from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList
-from services.oss_service import oss_service # 用于从OSS下载文件
+from services.oss_service import OssService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -58,7 +58,8 @@ class AIExtractionService:
     async def _get_content_from_oss_or_text(self, 
                                             file_key: Optional[str] = None, 
                                             text_content: Optional[str] = None,
-                                            is_public: bool = False # 新增参数
+                                            is_public: bool = False,
+                                            oss_service: OssService = None
                                             ) -> str:
         """
         根据 file_key 从 OSS 下载文件并提取内容，或直接使用提供的文本内容。
@@ -217,7 +218,3 @@ class AIExtractionService:
         except Exception as e:
             logger.error(f"Error during flashcard extraction: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"AI service error during flashcard extraction: {e}")
-
-
-# 创建一个单例实例
-ai_extraction_service = AIExtractionService()

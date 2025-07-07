@@ -1,12 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional
-from api.dependencies import get_query_service
-from services.document_service import document_service
+from api.dependencies import get_document_service, get_query_service
 from models.schemas import Document, DocumentMetadata, DebugRequest, DocumentChunkResponse, RAGMetadata
-from services.document_oss_service import document_oss_service
 import os
 import logging
 
+from services.document_service import DocumentService
 from services.query_service import QueryService
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,8 @@ router = APIRouter()
 from fastapi import Query
 
 @router.get("/documents", response_model=List[dict])
-async def list_documents(keyword: str = Query(None, description="关键词过滤文件名（忽略大小写）")):
+async def list_documents(keyword: str = Query(None, description="关键词过滤文件名（忽略大小写）"),
+                         document_service: DocumentService = Depends(get_document_service)):
     try:
         # 加载 hash -> path 映射
         hashes = document_service.file_hashes  # dict[str, str]
@@ -43,7 +43,8 @@ async def list_documents(keyword: str = Query(None, description="关键词过滤
 
 @router.get("/doc-metadata", response_model=List[Document])
 async def get_document_metadata(
-    file_hash: str = Query(..., description="目标文档的 hash 值")
+    file_hash: str = Query(..., description="目标文档的 hash 值"),
+    document_service: DocumentService = Depends(get_document_service)
 ):
     try:
         file_path = document_service.file_hashes.get(file_hash)
