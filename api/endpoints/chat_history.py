@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-@router.post("/add_message")
+@router.post("/add-chat-message")
 async def add_chat_message_to_chroma_api(request: AddChatMessageRequest,
                                          chat_history_service: ChatHistoryService = Depends(get_chat_history_service)):
     """

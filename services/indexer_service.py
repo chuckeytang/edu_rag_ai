@@ -1,4 +1,5 @@
 # api/services/indexer_service.py
+import json
 import logging
 import os
 import shutil
@@ -180,6 +181,7 @@ class IndexerService:
         """
         根据 material_id 找到所有相关节点，并更新它们的元数据。
         这是一个“合并更新”，而不是完全替换。
+        更新策略：将 payload 中的所有列表字段转换为 JSON 字符串。
         """
         logger.info(f"Performing generic metadata update for material_id: {material_id} with payload: {metadata_update_payload}")
         
@@ -199,11 +201,31 @@ class IndexerService:
             preserved_keys = {"material_id", "author_id", "file_key", "file_name", "file_size"} # 保持这些关键字段
             
             for old_meta in nodes_to_update['metadatas']:
-                new_meta = metadata_update_payload.copy()
+                current_new_meta = metadata_update_payload.copy()
+
+                processed_update_payload = {}
+                for key, value in current_new_meta.items():
+                    if isinstance(value, list):
+                        # 如果是列表，将其序列化为 JSON 字符串
+                        # 确保空列表 [] 也被序列化为 "[]"，而不是 None
+                        processed_update_payload[key] = json.dumps(value) 
+                    elif value is None:
+                        # 如果是 None，ChromaDB 接受 None。
+                        processed_update_payload[key] = None 
+                    else:
+                        processed_update_payload[key] = value
+
+                # 现在，将处理后的 payload 合并到最终的 new_meta 中
+                # 以 old_meta 为基础，合并 processed_update_payload
+                new_meta_for_db = old_meta.copy() # 以旧元数据为起点
+                new_meta_for_db.update(processed_update_payload) # 用处理后的新数据更新旧数据
+
+                # 从旧元数据中“抢救”回那些必须保留的核心字段，确保它们不会被错误覆盖
                 for key in preserved_keys:
-                    if key in old_meta:
-                        new_meta[key] = old_meta[key]
-                updated_metadatas.append(new_meta)
+                    if key in old_meta and key not in processed_update_payload: # 只有当新payload没有明确提供时才保留
+                        new_meta_for_db[key] = old_meta[key]
+                
+                updated_metadatas.append(new_meta_for_db)
             
             collection.update(
                 ids=nodes_to_update['ids'],

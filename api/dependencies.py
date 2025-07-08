@@ -127,10 +127,9 @@ def get_ai_extraction_service() -> AIExtractionService:
     if _ai_extraction_service is None:
         logger.info("Initializing AIExtractionService...")
         _ai_extraction_service = AIExtractionService(
-            llm_metadata_model=get_deepseek_llm_metadata(), # <-- 注入 DeepSeek LLM for metadata
-            llm_flashcard_model=get_deepseek_llm_flashcard() # <-- 注入 DeepSeek LLM for flashcard
-            # 如果 oss_service 也要被注入，这里也要传入
-            # oss_service_instance=get_oss_service() 
+            llm_metadata_model=get_deepseek_llm_metadata(),
+            llm_flashcard_model=get_deepseek_llm_flashcard(),
+            oss_service_instance=get_oss_service() 
         )
     return _ai_extraction_service
 

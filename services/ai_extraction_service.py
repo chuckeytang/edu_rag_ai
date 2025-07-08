@@ -22,29 +22,14 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
 
 class AIExtractionService:
-    def __init__(self):
-        # 从您的 settings 中获取 DeepSeek 配置
-        self.deepseek_api_base = settings.DEEPSEEK_API_BASE
-        self.deepseek_api_key = settings.DEEPSEEK_API_KEY
-        
-        self.llm_metadata = OpenAILike(
-            model="deepseek-chat", # 或者 "deepseek-coder", 提取元数据可能更适合chat模型
-            api_base=self.deepseek_api_base,
-            api_key=self.deepseek_api_key,
-            temperature=0.0, # 提取结构化数据时建议温度设低
-            kwargs={
-                'response_format': {'type': 'json_object'} 
-            }
-        )
-        self.llm_flashcard = OpenAILike(
-            model="deepseek-chat", # 知识点提取也可用chat模型
-            api_base=self.deepseek_api_base,
-            api_key=self.deepseek_api_key,
-            temperature=0.3, # 提取知识点可以稍微提高温度
-            kwargs={
-                'response_format': {'type': 'json_object'} 
-            }
-        )
+    def __init__(self,
+                 llm_metadata_model: OpenAILike,
+                 llm_flashcard_model: OpenAILike,
+                 oss_service_instance: OssService = None
+                 ):
+        self.llm_metadata = llm_metadata_model
+        self.llm_flashcard = llm_flashcard_model
+        self.oss_service = oss_service_instance
 
         # 预定义的选项集合 (这些应该从Spring后端获取，或从数据库加载)
         # 实际应用中，这些可能通过构造函数参数传入，或通过单独的服务获取
@@ -58,8 +43,7 @@ class AIExtractionService:
     async def _get_content_from_oss_or_text(self, 
                                             file_key: Optional[str] = None, 
                                             text_content: Optional[str] = None,
-                                            is_public: bool = False,
-                                            oss_service: OssService = None
+                                            is_public: bool = False
                                             ) -> str:
         """
         根据 file_key 从 OSS 下载文件并提取内容，或直接使用提供的文本内容。
@@ -72,7 +56,7 @@ class AIExtractionService:
                 target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if is_public else settings.OSS_PRIVATE_BUCKET_NAME
                 logger.info(f"Attempting to download '{file_key}' from bucket: '{target_bucket}'")
 
-                local_file_path = oss_service.download_file_to_temp(
+                local_file_path = self.oss_service.download_file_to_temp(
                     object_key=file_key, 
                     bucket_name=target_bucket
                 )
@@ -161,6 +145,23 @@ class AIExtractionService:
             logger.info(f"Preparing to extract metadata: {doc_content[:100]}...") 
             metadata = await program.acall(document_content=doc_content)
             logger.info(f"Successfully extracted metadata: {metadata.model_dump_json(indent=2)}")
+            
+            if metadata.type is None or metadata.type.strip() == "":
+                logger.warning(f"Extracted metadata 'type' is null or empty. Setting to default 'Book'. Original: {metadata.type}")
+                metadata.type = "Book" # 设置默认值
+
+            if metadata.clazz is None or metadata.clazz.strip() == "":
+                logger.warning(f"Extracted metadata 'clazz' is null or empty. Original: {metadata.clazz}")
+                metadata.clazz = "None"
+
+            if metadata.subject is None or metadata.subject.strip() == "":
+                logger.warning(f"Extracted metadata 'subject' is null or empty. Original: {metadata.subject}")
+                metadata.subject = "None" 
+
+            if metadata.exam is None or metadata.exam.strip() == "":
+                logger.warning(f"Extracted metadata 'exam' is null or empty. Original: {metadata.exam}")
+                metadata.exam = "None" 
+
             return metadata
         except Exception as e:
             logger.error(f"Error during metadata extraction: {e}", exc_info=True)

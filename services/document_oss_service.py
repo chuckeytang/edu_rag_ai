@@ -13,6 +13,7 @@ from models.schemas import UploadFromOssRequest
 from core.config import settings
 from services.indexer_service import IndexerService
 from services.oss_service import OssService
+from services.task_manager_service import TaskManagerService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -20,11 +21,13 @@ logger.setLevel(logging.DEBUG)
 class DocumentOssService:
     def __init__(self, 
                  indexer_service: IndexerService,
-                 oss_service_instance: OssService):
+                 oss_service_instance: OssService,
+                 task_manager_service: TaskManagerService):
         self.data_dir = settings.DATA_DIR
         self.data_config_dir = settings.DATA_CONFIG_DIR
         self.indexer_service = indexer_service
         self.oss_service = oss_service_instance
+        self.task_manager = task_manager_service
 
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.data_config_dir, exist_ok=True)
@@ -71,12 +74,12 @@ class DocumentOssService:
                 "message": f"This OSS file has already been processed (Original Filename: {self.processed_files[file_key]}).",
                 "file_key": file_key
             }
-            task_manager.finish_task(task_id, "duplicate", result=result_payload)
+            self.task_manager.finish_task(task_id, "duplicate", result=result_payload)
             return
         
         try:
             # --- [进度汇报] 开始下载 ---
-            task_manager.update_progress(task_id, 10, "Downloading file from OSS...")
+            self.task_manager.update_progress(task_id, 10, "Downloading file from OSS...")
             
             # 2. 决定存储桶并下载文件
             accessible_to_list = request.metadata.accessible_to or []
@@ -93,11 +96,11 @@ class DocumentOssService:
             else:
                 target_bucket = settings.OSS_PRIVATE_BUCKET_NAME
 
-            local_file_path = oss_service.download_file_to_temp(
+            local_file_path = self.oss_service.download_file_to_temp(
                 object_key=file_key, 
                 bucket_name=target_bucket
             )
-            task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
+            self.task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
             
             # --- 3. 加载原始文档区块 ---
             logger.info(f"Loading documents from temporary file: '{local_file_path}'")
@@ -132,11 +135,11 @@ class DocumentOssService:
             pages_loaded = len(final_nodes_to_index)
             logger.info(f"Generated a total of {pages_loaded} nodes for indexing.")
             # --- [进度汇报] 文档处理完成 ---
-            task_manager.update_progress(task_id, 75, f"Processing complete. Found {pages_loaded} nodes to index.")
+            self.task_manager.update_progress(task_id, 75, f"Processing complete. Found {pages_loaded} nodes to index.")
 
             # 4. 索引所有生成的节点
             if not final_nodes_to_index:
-                task_manager.finish_task(task_id, "error", result={"message": "No valid content or nodes generated for indexing."})
+                self.task_manager.finish_task(task_id, "error", result={"message": "No valid content or nodes generated for indexing."})
             else:
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
                 self.indexer_service.add_documents_to_index(final_nodes_to_index, collection_name=collection_name)
@@ -150,12 +153,12 @@ class DocumentOssService:
                     "total_pages": total_pages,
                     "file_key": file_key
                 }
-                task_manager.finish_task(task_id, "success", result=success_result)
+                self.task_manager.finish_task(task_id, "success", result=success_result)
                 return {"status": "success", "message": success_result["message"]} # 明确返回
 
         except Exception as e:
             logger.error(f"Error during processing of OSS key '{file_key}': {e}", exc_info=True)
-            task_manager.finish_task(task_id, "error", result={"message": str(e)})
+            self.task_manager.finish_task(task_id, "error", result={"message": str(e)})
             return {"status": "error", "message": str(e)}
         finally:
             # 清理临时文件

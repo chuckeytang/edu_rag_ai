@@ -65,32 +65,6 @@ class QueryService:
         重定向到 IndexerService 的按需加载方法。
         """
         return self._indexer_service._get_or_load_index(collection_name)
-    
-    def query_with_filters(self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5, prompt: str = None):
-        """
-        对指定的collection执行带元数据过滤的查询。
-        """
-        logger.info(f"Querying collection '{collection_name}' with text: '{question}' and filters: {filters}")
-        index = self._get_or_load_index(collection_name)
-
-        if not index:
-            logger.error(f"Query failed because collection '{collection_name}' does not exist.")
-            raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
-
-        chroma_where_clause = self._build_chroma_where_clause(filters)
-        logger.info(f"Constructed ChromaDB `where` clause: {chroma_where_clause}")
-        
-        query_engine = index.as_query_engine(
-            llm=self.llm,
-            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=similarity_top_k,
-            text_qa_template=self._create_qa_prompt(prompt)
-        )
-
-        logger.info(f"Querying with text: '{question}' and filters: {filters}")
-        response = query_engine.query(question)
-        return response
-
 
     def retrieve_with_filters(self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5):
         """
@@ -103,6 +77,7 @@ class QueryService:
             raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
 
         chroma_where_clause = self._build_chroma_where_clause(filters)
+        logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
 
         # 1. 创建一个Retriever，配置和查询时完全一样
         retriever = index.as_retriever(
@@ -145,7 +120,7 @@ class QueryService:
             # 情况 3: 其他所有简单类型的值 (str, int, float)，使用默认的相等比较
             # ChromaDB 对于 {"key": value} 形式，默认就是相等比较，不需要显式写 "$eq"
             else:
-                chroma_filters.append({key: value})
+                chroma_filters.append({key: {"$eq": value}})
 
         if not chroma_filters:
             return {}
@@ -156,37 +131,6 @@ class QueryService:
         
         # 只有一个条件，直接返回
         return chroma_filters[0]
-
-    # You can also create an async version for streaming if needed
-    async def stream_query_with_filters(
-        self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5, prompt: str = None
-    ) -> AsyncGenerator[str, None]:
-        """
-        对指定的collection执行带元数据过滤的流式查询。
-        """
-        logger.info(f"Streaming query on collection '{collection_name}' with text: '{question}' and filters: {filters}")
-
-        index = self._get_or_load_index(collection_name)
-        if not index:
-            logger.error(f"Stream query failed because collection '{collection_name}' does not exist.")
-            raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
-
-        chroma_where_clause = self._build_chroma_where_clause(filters)
-        logger.info(f"Constructed ChromaDB `where` clause: {chroma_where_clause}")
-        
-        query_engine = index.as_query_engine(
-            llm=self.llm,
-            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=similarity_top_k,
-            streaming=True,
-            text_qa_template=self._create_qa_prompt(prompt)
-        )
-        
-        response = await query_engine.aquery(question)
-        if hasattr(response, 'response_gen'):
-            async for chunk in response.response_gen:
-                yield StreamChunk(content=chunk).json() + "\n"
-        yield StreamChunk(content="", is_last=True).json() + "\n"
             
     def _create_qa_prompt(self, prompt: str = None) -> PromptTemplate:
         if prompt:
@@ -197,6 +141,7 @@ class QueryService:
     @property
     def default_qa_prompt(self) -> PromptTemplate:
         return PromptTemplate(
+            "{chat_history_context}"
             "You have documents including exam papers and syllabuses. "
             "The user asks about a specific question from the exam paper, formatted as 'X(Y)(Z)' (e.g., '6(b)(ii)'), "
             "where X is the main question number, Y is the subsection, and Z is the sub-subsection. "
@@ -207,95 +152,6 @@ class QueryService:
             "Document content: {context_str}\n"
             "Query: {query_str}"
         )
-        
-    def query(self, question: str, collection_name: str, similarity_top_k: int = 10, prompt: str = None):
-        """
-        对指定collection执行普通查询（无元数据过滤）。
-        此方法现在调用功能更全的 query_with_filters 方法。
-        """
-        # 核心修改：调用带有filter功能的方法，并传递一个空的filters字典
-        return self.query_with_filters(
-            question=question,
-            collection_name=collection_name,
-            filters={}, # 传递空字典表示不过滤
-            similarity_top_k=similarity_top_k,
-            prompt=prompt
-        )
-
-    async def stream_query(self, question: str, collection_name: str, similarity_top_k: int = 10, prompt: str = None) -> AsyncGenerator[str, None]:
-        """
-        对指定collection执行流式查询（无元数据过滤）。
-        此方法现在调用功能更全的 stream_query_with_filters 方法。
-        """
-        # 核心修改：调用带有filter功能的异步方法，并传递一个空的filters字典
-        async for chunk in self.stream_query_with_filters(
-            question=question,
-            filters={}, # 传递空字典表示不过滤
-            collection_name=collection_name,
-            similarity_top_k=similarity_top_k,
-            prompt=prompt
-        ):
-            yield chunk
-            
-    async def query_with_files(
-            self,
-            question: str,
-            file_identifiers: List[str],
-            similarity_top_k: int = 10,
-            prompt: str = None
-    ) -> Union[str, AsyncGenerator[str, None]]:
-        
-        logger.info(f"Executing query within specific files (material_ids): {file_identifiers}")
-
-        # --- 1. 输入校验与准备 ---
-        if not file_identifiers:
-            raise ValueError("file_identifiers list cannot be empty for a file-specific query.")
-
-        try:
-            material_ids_as_int = [int(mid) for mid in file_identifiers]
-        except ValueError:
-            raise TypeError("All file_identifiers must be valid integers (material_id).")
-
-        # --- 2. 直接构建最终、正确的 ChromaDB `where` 子句 ---
-        # 这是整个方案的核心，确保我们只使用被明确支持的 $in 操作符
-        chroma_where_clause = {
-            "material_id": {
-                "$in": material_ids_as_int
-            }
-        }
-        logger.info(f"Constructed a direct and final ChromaDB `where` clause: {chroma_where_clause}")
-
-        # --- 3. 获取索引对象 (复用现有逻辑) ---
-        # 假设所有文档都在 'public_collection'，如果不是，这里需要动态传入
-        collection_name = "public_collection" 
-        index = self._get_or_load_index(collection_name)
-        if not index:
-            error_message = f"Query failed because collection '{collection_name}' does not exist."
-            logger.error(error_message)
-            raise ValueError(error_message)
-
-        # --- 4. 直接构建查询引擎，不再调用其他方法 ---
-        # 将我们手动构建的、100%正确的 where 子句通过 vector_store_kwargs 传递
-        query_engine = index.as_query_engine(
-            llm=self.llm,
-            vector_store_kwargs={"where": chroma_where_clause},
-            similarity_top_k=similarity_top_k,
-            streaming=True,
-            text_qa_template=self._create_qa_prompt(prompt)
-        )
-        
-        # --- 5. 执行查询并流式返回结果 (逻辑不变) ---
-        response = await query_engine.aquery(question)
-        
-        if hasattr(response, 'response_gen'):
-            async for chunk in response.response_gen:
-                yield chunk
-        # 在 LlamaIndex 的某些版本中，非流式结果也可能需要这样处理
-        elif hasattr(response, 'response'):
-             yield response.response
-        else:
-             logger.warning("Response object has no 'response_gen' or 'response' attribute.")
-             yield ""
             
     async def rag_query_with_context(
         self,
@@ -381,7 +237,7 @@ class QueryService:
                 full_response_content += chunk_text
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
                 logger.debug(f"Yielding raw JSON chunk: {sse_event_json}")
-                yield f"data: {sse_event_json}\n\n".encode("utf-8") # <--- 直接返回完整 SSE 格式的 bytes
+                yield f"data: {sse_event_json}\n\n".encode("utf-8") 
         
         # Python 只生成最终的 JSON 字符串，不加 "data: " 和 "\n\n"
         final_sse_event_json = StreamChunk(
@@ -390,4 +246,4 @@ class QueryService:
             metadata={"rag_sources": rag_sources_info}
         ).json()
         logger.debug(f"Yielding final raw JSON chunk: {final_sse_event_json}")
-        yield final_sse_event_json.encode("utf-8")
+        yield f"data: {final_sse_event_json}\n\n".encode("utf-8")

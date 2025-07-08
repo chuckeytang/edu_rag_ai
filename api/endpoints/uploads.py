@@ -85,9 +85,9 @@ async def upload_multiple_files(files: List[UploadFile] = File(...),
 # ---- 把核心业务提炼成内部函数，供单/多文件复用 ----
 async def _handle_single_file(
     file: UploadFile,
-    precomputed_hash: str | None = None,
-    document_service: DocumentService = Depends(get_document_service),
-    indexer_service: IndexerService = Depends(get_indexer_service) 
+    document_service: DocumentService,
+    indexer_service: IndexerService,
+    precomputed_hash: str | None = None
 ) -> UploadResponse:
     """
     真正执行: 去重 -> 保存 -> 解析 -> 过滤 -> 向量索引
@@ -138,7 +138,8 @@ async def _handle_single_file(
 
 def process_task_wrapper(request: UploadFromOssRequest, 
                          task_id: str,
-                         document_oss_service: DocumentOssService = Depends(get_document_oss_service)):
+                         document_oss_service: DocumentOssService,
+                         task_manager_service: TaskManagerService):
     """
     这个函数现在是一个纯粹的包装器/调度器。
     它的唯一职责就是调用业务服务层的方法，并把 task_id 传过去。
@@ -150,13 +151,13 @@ def process_task_wrapper(request: UploadFromOssRequest,
         document_oss_service.process_new_oss_file(request, task_id)
     except Exception as e:
         logger.error(f"[TASK_ID: {task_id}] A critical unhandled exception escaped the service layer: {e}", exc_info=True)
-        task_manager_service_instance: TaskManagerService = get_task_manager_service()
-        task_manager_service_instance.finish_task(task_id, "error", result={"message": "A critical and unexpected error occurred in the service layer."})
+        task_manager_service.finish_task(task_id, "error", result={"message": "A critical and unexpected error occurred in the service layer."})
 
 
 @router.post("/upload-from-oss", response_model=TaskStatus, status_code=202)
 async def upload_from_oss(request: UploadFromOssRequest, 
                           background_tasks: BackgroundTasks,
+                          document_oss_service: DocumentOssService = Depends(get_document_oss_service),
                           task_manager_service: TaskManagerService = Depends(get_task_manager_service)):
         
     # 准备要存入任务初始状态的上下文数据
@@ -173,13 +174,17 @@ async def upload_from_oss(request: UploadFromOssRequest,
     task_id = initial_status.task_id
     logger.info(f"Received request to upload from OSS for file: '{request.metadata.file_name}'. Assigning Task ID: {task_id}.")
 
-    background_tasks.add_task(process_task_wrapper, request, task_id)
+    background_tasks.add_task(process_task_wrapper, 
+                              request, 
+                              task_id,
+                              document_oss_service,
+                              task_manager_service)
     logger.info(f"Task {task_id} successfully scheduled.")
     return initial_status
 
 def update_metadata_task(request: UpdateMetadataRequest,
-                         indexer_service: IndexerService = Depends(get_indexer_service),
-                         task_manager_service: TaskManagerService = Depends(get_task_manager_service)):
+                         indexer_service: IndexerService,
+                         task_manager_service: TaskManagerService):
     """
     A thin background task dispatcher for metadata updates.
     It calls DocumentOssService to perform the logic and updates the global task status.
@@ -238,7 +243,11 @@ def update_metadata_task(request: UpdateMetadataRequest,
     response_model=UpdateMetadataResponse, 
     status_code=202
 )
-async def update_metadata(request: UpdateMetadataRequest, background_tasks: BackgroundTasks):
+async def update_metadata(request: UpdateMetadataRequest, 
+                          background_tasks: BackgroundTasks,
+                          indexer_service: IndexerService = Depends(get_indexer_service),
+                          task_manager_service: TaskManagerService = Depends(get_task_manager_service) 
+                          ):
     """
     Schedules the metadata update for an existing document as a background task.
     """
@@ -246,7 +255,11 @@ async def update_metadata(request: UpdateMetadataRequest, background_tasks: Back
     logger.info(f"Received request to update metadata for material_id: {request.material_id}. Assigning Task ID: {task_id}.")
 
     # Schedule the new, thin task dispatcher
-    background_tasks.add_task(update_metadata_task, request)
+    background_tasks.add_task(update_metadata_task, 
+                              request,
+                              indexer_service, 
+                              task_manager_service 
+                              )
     
     logger.info(f"Task ID {task_id} for metadata update has been successfully scheduled.")
 
@@ -282,22 +295,6 @@ def delete_by_metadata(request: DeleteByMetadataRequest,
     except Exception as e:
         logger.error(f"Deletion request failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during deletion: {str(e)}")
-
-
-@router.post("/add-chat-message")
-async def add_chat_message_api(request: AddChatMessageRequest,
-                               chat_history_service: ChatHistoryService = Depends(get_chat_history_service)):
-    """
-    将聊天消息同步到 ChromaDB 的聊天历史Collection。
-    由 Spring 后端调用。
-    """
-    try:
-        chat_history_service.add_chat_message_to_chroma(request.dict())
-        return {"status": "success", "message": "Chat message added to ChromaDB."}
-    except Exception as e:
-        logger.error(f"Error adding chat message to ChromaDB: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to add chat message to ChromaDB.")
-
 
 # --- Polling Endpoint (New) ---
 @router.get("/status/{task_id}", response_model=TaskStatus, summary="查询后台任务的状态")

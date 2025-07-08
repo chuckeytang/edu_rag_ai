@@ -99,5 +99,3 @@ class ChatHistoryService:
         except Exception as e:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
             return []
-
-# chat_history_service = ChatHistoryService()
