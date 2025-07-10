@@ -79,23 +79,22 @@ class AIExtractionService:
         else:
             raise ValueError("必须提供 'file_key' 或 'text_content' 中的至少一个。")
 
-    async def extract_document_metadata(self, file_key: Optional[str] = None, text_content: Optional[str] = None, is_public: bool = True) -> ExtractedDocumentMetadata: # 新增 is_public
+    async def extract_document_metadata(self, file_key: Optional[str] = None, text_content: Optional[str] = None, is_public: bool = True) -> ExtractedDocumentMetadata: 
         """
-        使用DeepSeek模型从文档内容中提取元数据。
-        支持从OSS下载文件或直接提供文本内容，并根据 is_public 决定桶。
+        Extracts document metadata using the DeepSeek model.
+        Supports content from OSS or direct text, and determines the bucket based on is_public.
         """
-        doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public) # 传递 is_public
+        doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public)
 
-        # ... (提示词构建逻辑不变) ...
         clazz_str = ", ".join(self.CLAZZ_OPTIONS)
         exam_boards_str = ", ".join(self.EXAM_BOARD_OPTIONS)
-        labels_str = ", ".join(self.LABEL_OPTIONS)
         levels_str = ", ".join(self.LEVEL_OPTIONS)
         subjects_str = ", ".join(self.SUBJECT_OPTIONS)
         doc_types_str = ", ".join(self.DOCUMENT_TYPE_OPTIONS)
 
+        # !!! 核心改动: 移除 description 相关的提示词和 JSON 示例中的 description 字段 !!!
         prompt_template = f"""
-        You are an expert assistant for analyzing educational content. Please extract metadata and generate a concise summary (description) from the document content provided below.
+        You are an expert assistant for analyzing educational content. Please extract metadata from the document content provided below.
         Ensure your output strictly follows the specified JSON format.
 
         Available Options for Matching:
@@ -110,16 +109,12 @@ class AIExtractionService:
         - These labels should be single words or short phrases, acting as descriptive tags.
         - Do NOT select from a predefined list for 'labelList'; generate them based on the document's content.
 
-        Special Instruction for 'description':
-        - Generate a concise, objective summary of the document's content.
-        - The description should be a maximum of 1024 characters.
-
         Document Content:
         ---
         {doc_content}
         ---
 
-        Please provide the metadata and description in JSON format. Here is an example of the desired JSON structure:
+        Please provide the metadata in JSON format. Here is an example of the desired JSON structure:
 
         EXAMPLE JSON OUTPUT:
         {{
@@ -128,12 +123,12 @@ class AIExtractionService:
             "labelList": ["Photosynthesis", "Carbon Cycle", "Plant Biology"],
             "levelList": ["HL"],
             "subject": "Biology",
-            "type": "Handout",
-            "description": "This document provides a detailed overview of the photosynthesis process, including light-dependent and light-independent reactions, and its role in the global carbon cycle, suitable for advanced biology students. The summary is concise and covers the main topics without excessive detail. It ensures all key aspects are highlighted for quick understanding, adhering to the character limit."
+            "type": "Handout"
+            // "description" 字段已移除
         }}
         """
 
-        parser = PydanticOutputParser(output_cls=ExtractedDocumentMetadata) # 使用更新后的模型名
+        parser = PydanticOutputParser(output_cls=ExtractedDocumentMetadata) 
         program = LLMTextCompletionProgram.from_defaults(
             output_parser=parser,
             prompt_template_str=prompt_template,
@@ -146,22 +141,28 @@ class AIExtractionService:
             metadata = await program.acall(document_content=doc_content)
             logger.info(f"Successfully extracted metadata: {metadata.model_dump_json(indent=2)}")
             
+            # --- 保持对其他字段的默认值设置，确保它们不会是 None，如果模型没有返回有效值 ---
             if metadata.type is None or metadata.type.strip() == "":
                 logger.warning(f"Extracted metadata 'type' is null or empty. Setting to default 'Book'. Original: {metadata.type}")
-                metadata.type = "Book" # 设置默认值
+                metadata.type = "Book"
 
             if metadata.clazz is None or metadata.clazz.strip() == "":
-                logger.warning(f"Extracted metadata 'clazz' is null or empty. Original: {metadata.clazz}")
+                logger.warning(f"Extracted metadata 'clazz' is null or empty. Setting to 'None'. Original: {metadata.clazz}")
                 metadata.clazz = "None"
 
             if metadata.subject is None or metadata.subject.strip() == "":
-                logger.warning(f"Extracted metadata 'subject' is null or empty. Original: {metadata.subject}")
+                logger.warning(f"Extracted metadata 'subject' is null or empty. Setting to 'None'. Original: {metadata.subject}")
                 metadata.subject = "None" 
 
             if metadata.exam is None or metadata.exam.strip() == "":
-                logger.warning(f"Extracted metadata 'exam' is null or empty. Original: {metadata.exam}")
+                logger.warning(f"Extracted metadata 'exam' is null or empty. Setting to 'None'. Original: {metadata.exam}")
                 metadata.exam = "None" 
 
+            # 由于 description 不再由模型生成，它将保持为 None (根据 Pydantic 模型定义)
+            # 如果需要在这里明确设置为空字符串，可以添加：
+            if metadata.description is None:
+                metadata.description = ""
+            
             return metadata
         except Exception as e:
             logger.error(f"Error during metadata extraction: {e}", exc_info=True)

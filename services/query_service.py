@@ -139,6 +139,22 @@ class QueryService:
             return self.default_qa_prompt
 
     @property
+    def title_generation_prompt(self) -> PromptTemplate:
+        """
+        用于从用户查询和相关文档中生成简短会话标题的提示词。
+        """
+        return PromptTemplate(
+            "你是一个会话标题生成器。请根据以下用户查询和相关文档内容，"
+            "为本次会话生成一个简短、概括性的标题。标题应在几个单词（中文短句）以内，"
+            "能够反映会话的核心主题。\n"
+            "不要包含任何其他信息，只返回标题本身。\n"
+            "---------------------\n"
+            "相关文档内容: {context_str}\n" # LLM Query Engine 会自动填充
+            "用户查询: {query_str}\n"      # LLM Query Engine 会自动填充
+            "会话标题:" # 引导LLM直接输出标题
+        )
+    
+    @property
     def default_qa_prompt(self) -> PromptTemplate:
         return PromptTemplate(
             # === 将聊天历史上下文放在最前面 ===
