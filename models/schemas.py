@@ -54,6 +54,8 @@ class StreamingResponseWrapper:
 class StreamChunk(BaseModel):
     content: str
     is_last: bool = False
+    metadata: Optional[Dict[str, Any]] = None 
+
 class DebugRequest(BaseModel):
     filename: str
     question: str
@@ -183,3 +185,4 @@ class ChatQueryRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     similarity_top_k: Optional[int] = 5
     prompt: Optional[str] = None
+    is_first_query: bool = False

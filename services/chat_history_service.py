@@ -99,3 +99,27 @@ class ChatHistoryService:
         except Exception as e:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
             return []
+
+    def get_session_message_count(self, session_id: str, account_id: int) -> int:
+        """
+        获取指定会话ID和用户ID下的聊天消息总数。
+        这会直接查询ChromaDB，不进行语义检索。
+        """
+        try:
+            # 使用 where 过滤 session_id 和 account_id
+            # include=[] 表示我们只关心数量，不需要返回实际的数据
+            results = self._collection.get(
+                where={
+                    "$and": [
+                        {"session_id": {"$eq": session_id}},
+                        {"account_id": {"$eq": account_id}}
+                    ]
+                },
+                include=[] # 只获取ID，用于计数
+            )
+            count = len(results.get('ids', []))
+            logger.debug(f"Retrieved {count} chat messages for session {session_id}, account {account_id}.")
+            return count
+        except Exception as e:
+            logger.error(f"Failed to get chat message count for session {session_id}: {e}", exc_info=True)
+            return 0 # 发生错误时返回0，确保不阻塞主流程

@@ -144,14 +144,14 @@ class QueryService:
         用于从用户查询和相关文档中生成简短会话标题的提示词。
         """
         return PromptTemplate(
-            "你是一个会话标题生成器。请根据以下用户查询和相关文档内容，"
-            "为本次会话生成一个简短、概括性的标题。标题应在几个单词（中文短句）以内，"
-            "能够反映会话的核心主题。\n"
-            "不要包含任何其他信息，只返回标题本身。\n"
+            "You are a session title generator. Based on the user query and the relevant document content provided below, "
+            "generate a concise, descriptive title for this conversation. The title should be within a few words (or a short English phrase) "
+            "and should reflect the core topic of the session.\n"
+            "Do not include any other information; only return the title itself.\n"
             "---------------------\n"
-            "相关文档内容: {context_str}\n" # LLM Query Engine 会自动填充
-            "用户查询: {query_str}\n"      # LLM Query Engine 会自动填充
-            "会话标题:" # 引导LLM直接输出标题
+            "Relevant document content: {context_str}\n" # LLM Query Engine will automatically fill this
+            "User query: {query_str}\n"      # LLM Query Engine will automatically fill this
+            "Session Title:" # Guides the LLM to output only the title
         )
     
     @property
@@ -205,7 +205,7 @@ class QueryService:
         
         logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
         
-        # --- 1. 语义检索历史聊天上下文 ---
+        # --- 语义检索历史聊天上下文 ---
         chat_history_context_string = ""
         try:
             if self._chat_history_service: 
@@ -227,7 +227,6 @@ class QueryService:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
             chat_history_context_string = ""
 
-        # --- 2. 主 RAG 查询 ---
         rag_index = self._get_or_load_index(request.collection_name)
         if not rag_index:
             logger.error(f"RAG collection '{request.collection_name}' does not exist or could not be loaded.")
@@ -236,22 +235,52 @@ class QueryService:
             return
 
         combined_rag_filters = request.filters if request.filters else {}
+        # Initialize the list to store the material_ids that were actually requested by the user
+        final_referenced_material_ids = [] 
+
         if request.target_file_ids and len(request.target_file_ids) > 0:
             try:
-                material_ids = [int(mid) for mid in request.target_file_ids]
+                material_ids_int = [int(mid) for mid in request.target_file_ids]
+                # Store the original string IDs for the metadata
+                final_referenced_material_ids = request.target_file_ids # <--- Collect the string IDs here
+                
                 if "material_id" in combined_rag_filters and isinstance(combined_rag_filters["material_id"], dict) and "$in" in combined_rag_filters["material_id"]:
                     current_material_ids = combined_rag_filters["material_id"]["$in"]
                     # 确保不重复添加
-                    combined_rag_filters["material_id"]["$in"] = list(set(current_material_ids + material_ids))
+                    combined_rag_filters["material_id"]["$in"] = list(set(current_material_ids + material_ids_int))
                 else:
-                    combined_rag_filters["material_id"] = {"$in": material_ids}
+                    combined_rag_filters["material_id"] = {"$in": material_ids_int}
             except ValueError:
                 logger.warning("Invalid material_id in target_file_ids. Ignoring file filter.")
         
         chroma_where_clause = self._build_chroma_where_clause(combined_rag_filters)
         logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
 
-        # 组合最终的LLM提示词
+
+        # --- 根据 Java 侧指示，生成会话标题 ---
+        generated_title = ""
+        # 直接使用 Java 侧传递的 is_first_query 字段来判断是否生成标题
+        if request.is_first_query: # <--- 字段名修改为 is_first_query
+            logger.info("Attempting to generate session title as requested by Java side (is_first_query is True).")
+            try:
+                # ... (标题生成逻辑保持不变)
+                title_query_engine = rag_index.as_query_engine(
+                    llm=self.llm,
+                    vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+                    similarity_top_k=2,
+                    text_qa_template=self.title_generation_prompt
+                )
+                title_response = await title_query_engine.aquery(request.question)
+                generated_title = title_response.response.strip()
+                logger.info(f"Generated session title: '{generated_title}'")
+                logger.debug(f"DEBUG: Raw title response from LLM: '{title_response.response}'")
+            except Exception as e:
+                logger.error(f"Failed to generate session title: {e}", exc_info=True)
+                generated_title = ""
+        else:
+            logger.info("Skipping session title generation as not requested by Java side (is_first_query is False).") # <--- 日志信息更新
+
+        # --- 主 RAG 查询 ---
         # 确保 default_qa_prompt 有 {chat_history_context} 占位符
         final_qa_prompt_template = self._create_qa_prompt(request.prompt) # 获取或创建 PromptTemplate
         final_qa_prompt = final_qa_prompt_template.partial_format(chat_history_context=chat_history_context_string)
@@ -270,7 +299,6 @@ class QueryService:
         if response.source_nodes:
             for node in response.source_nodes:
                 rag_sources_info.append({
-                    "text_excerpt": node.get_content().strip()[:200] + "...",
                     "file_name": node.metadata.get("file_name", "未知文件"),
                     "page_number": node.metadata.get("page_label", "未知页"),
                     "material_id": node.metadata.get("material_id")
@@ -281,14 +309,33 @@ class QueryService:
             async for chunk_text in response.response_gen:
                 full_response_content += chunk_text
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
-                logger.debug(f"Yielding raw JSON chunk: {sse_event_json}")
+                # logger.debug(f"Yielding raw JSON chunk: {sse_event_json}")
                 yield f"data: {sse_event_json}\n\n".encode("utf-8") 
         
-        # Python 只生成最终的 JSON 字符串，不加 "data: " 和 "\n\n"
+        # --- 构建最终的 metadata ---
+        final_metadata = {}
+        
+        # 添加 rag_sources_info (详细的源节点信息)
+        final_metadata["rag_sources"] = rag_sources_info
+
+        # --- Add the new 'referenced_docs' list ---
+        # Use the collected final_referenced_material_ids
+        if final_referenced_material_ids: # 只有当有实际引用的文档时才添加
+            final_metadata["referenced_docs"] = final_referenced_material_ids
+
+        # Add title to metadata if generated
+        if generated_title:
+            final_metadata["session_title"] = generated_title
+        
+        logger.debug(f"DEBUG: Final metadata before StreamChunk creation: {final_metadata}")
+
         final_sse_event_json = StreamChunk(
             content="",
             is_last=True,
-            metadata={"rag_sources": rag_sources_info}
+            metadata=final_metadata # 使用包含标题的元数据
         ).json()
+        temp_stream_chunk = StreamChunk(content="", is_last=True, metadata=final_metadata)
+        logger.debug(f"DEBUG: Final StreamChunk object's dict (pre-json): {temp_stream_chunk.__dict__}")
+
         logger.debug(f"Yielding final raw JSON chunk: {final_sse_event_json}")
         yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
