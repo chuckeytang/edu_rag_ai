@@ -144,13 +144,18 @@ class QueryService:
         用于从用户查询和相关文档中生成简短会话标题的提示词。
         """
         return PromptTemplate(
-            "You are a session title generator. Based on the user query and the relevant document content provided below, "
-            "generate a concise, descriptive title for this conversation. The title should be within a few words (or a short English phrase) "
-            "and should reflect the core topic of the session.\n"
-            "Do not include any other information; only return the title itself.\n"
+            "You are a title generator assistant working in an educational AI consultation system. "
+            "Based on the user's initial question or message, generate a short, clear, and meaningful title that summarizes the core academic intent of the query.\n\n"
+            "Requirements:\n"
+            "- Title must be concise (ideally 5–12 words)\n"
+            "- Use academic, study-friendly tone (not too casual)\n"
+            "- Format in English Title Case (capitalize major words)\n"
+            "- Do not include emojis or decorative elements\n"
+            "- If the user writes in another language (e.g. Chinese), you may include short bilingual elements or mix languages naturally — but the main title should still be understandable in English\n"
+            "- Focus on accuracy: represent the actual intent or topic of the user's question\n"
             "---------------------\n"
-            "Relevant document content: {context_str}\n" # LLM Query Engine will automatically fill this
             "User query: {query_str}\n"      # LLM Query Engine will automatically fill this
+            "Relevant document content: {context_str}\n" # LLM Query Engine will automatically fill this
             "Session Title:" # Guides the LLM to output only the title
         )
     

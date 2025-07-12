@@ -15,7 +15,7 @@ from llama_index.core.output_parsers import PydanticOutputParser
 from llama_index.core import SimpleDirectoryReader
 
 from core.config import settings # 假设settings包含DeepSeek配置
-from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList
+from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList, WxMineCollectSubjectList
 from services.oss_service import OssService
 
 logger = logging.getLogger(__name__)
@@ -79,10 +79,20 @@ class AIExtractionService:
         else:
             raise ValueError("必须提供 'file_key' 或 'text_content' 中的至少一个。")
 
-    async def extract_document_metadata(self, file_key: Optional[str] = None, text_content: Optional[str] = None, is_public: bool = True) -> ExtractedDocumentMetadata: 
+    async def extract_document_metadata(self, 
+                                        file_key: Optional[str] = None, 
+                                        text_content: Optional[str] = None, 
+                                        is_public: bool = True,
+                                        user_provided_clazz: Optional[str] = None,
+                                        user_provided_subject: Optional[str] = None,
+                                        user_provided_exam: Optional[str] = None,
+                                        user_provided_level: List[str] = [], 
+                                        subscribed_subjects: List[WxMineCollectSubjectList] = [] 
+                                        ) -> ExtractedDocumentMetadata: 
         """
         Extracts document metadata using the DeepSeek model.
         Supports content from OSS or direct text, and determines the bucket based on is_public.
+        Considers user-provided preferences and subscribed subjects for better extraction.
         """
         doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public)
 
@@ -92,7 +102,35 @@ class AIExtractionService:
         subjects_str = ", ".join(self.SUBJECT_OPTIONS)
         doc_types_str = ", ".join(self.DOCUMENT_TYPE_OPTIONS)
 
-        # !!! 核心改动: 移除 description 相关的提示词和 JSON 示例中的 description 字段 !!!
+        # --- 构建用户上下文信息字符串，以供提示词使用 ---
+        user_context_info = []
+        if user_provided_clazz:
+            user_context_info.append(f"User's Preferred Curriculum System: '{user_provided_clazz}'")
+        if user_provided_exam:
+            user_context_info.append(f"User's Preferred Exam Board: '{user_provided_exam}'")
+        if user_provided_subject:
+            user_context_info.append(f"User's Preferred Subject: '{user_provided_subject}'")
+        if user_provided_level:
+            user_context_info.append(f"User's Preferred Levels: '{', '.join(user_provided_level)}'") 
+
+        if subscribed_subjects:
+            subscribed_str_list = []
+            for sub_item in subscribed_subjects:
+                sub_info = f"Subject: '{sub_item.subject}'"
+                if sub_item.clazz:
+                    sub_info += f", Class: '{sub_item.clazz}'"
+                if sub_item.exam:
+                    sub_info += f", Exam: '{sub_item.exam}'"
+                subscribed_str_list.append(sub_info)
+            user_context_info.append("User is subscribed to:\n" + "\n".join([f"  - {s}" for s in subscribed_str_list]))
+
+        user_context_str = ""
+        if user_context_info:
+            user_context_str = "\nUser Context Information:\n" + "\n".join(user_context_info) + "\n"
+            user_context_str += "When the document content is ambiguous or needs alignment with user intent, consider these hints. Prioritize direct evidence from the document itself.\n"
+        else:
+            user_context_str = "\nNo specific user context information provided.\n"
+
         prompt_template = f"""
         You are an expert assistant for analyzing educational content. Please extract metadata from the document content provided below.
         Ensure your output strictly follows the specified JSON format.
@@ -109,6 +147,8 @@ class AIExtractionService:
         - These labels should be single words or short phrases, acting as descriptive tags.
         - Do NOT select from a predefined list for 'labelList'; generate them based on the document's content.
 
+        {user_context_str}
+
         Document Content:
         ---
         {doc_content}
@@ -124,9 +164,10 @@ class AIExtractionService:
             "levelList": ["HL"],
             "subject": "Biology",
             "type": "Handout"
-            // "description" 字段已移除
         }}
         """
+
+        logger.info(f"Final prompt for metadata extraction: {prompt_template}")
 
         parser = PydanticOutputParser(output_cls=ExtractedDocumentMetadata) 
         program = LLMTextCompletionProgram.from_defaults(
@@ -141,7 +182,7 @@ class AIExtractionService:
             metadata = await program.acall(document_content=doc_content)
             logger.info(f"Successfully extracted metadata: {metadata.model_dump_json(indent=2)}")
             
-            # --- 保持对其他字段的默认值设置，确保它们不会是 None，如果模型没有返回有效值 ---
+            # --- 后处理和默认值设置 ---
             if metadata.type is None or metadata.type.strip() == "":
                 logger.warning(f"Extracted metadata 'type' is null or empty. Setting to default 'Book'. Original: {metadata.type}")
                 metadata.type = "Book"
@@ -158,10 +199,7 @@ class AIExtractionService:
                 logger.warning(f"Extracted metadata 'exam' is null or empty. Setting to 'None'. Original: {metadata.exam}")
                 metadata.exam = "None" 
 
-            # 由于 description 不再由模型生成，它将保持为 None (根据 Pydantic 模型定义)
-            # 如果需要在这里明确设置为空字符串，可以添加：
-            if metadata.description is None:
-                metadata.description = ""
+            metadata.description = ""
             
             return metadata
         except Exception as e:

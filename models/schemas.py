@@ -60,16 +60,29 @@ class DebugRequest(BaseModel):
     filename: str
     question: str
 
-# 请求体模型，用于接收文本内容或 OSS file_key
+class WxMineCollectSubjectList(BaseModel):
+    subject: str
+    clazz: Optional[str] = None # Optional 因为Java端可能为null
+    exam: Optional[str] = None   # Optional 因为Java端可能为null
+
+# 请求体模型，用于接收文本内容或 OSS file_key，并新增用户上下文信息
 class ExtractionRequest(BaseModel):
     file_key: Optional[str] = None # OSS 文件键
     content: Optional[str] = None  # 直接的文本内容
     is_public: Optional[bool] = True
 
-    # 确保至少提供一个
+    # --- 用户提供的元数据预设 (现在 level 是 List[str]) ---
+    user_provided_clazz: Optional[str] = Field(None, description="用户提供的课程体系预设，如：IB、IGCSE、AP")
+    user_provided_subject: Optional[str] = Field(None, description="用户提供的学科预设，如：Chemistry、Business")
+    user_provided_exam: Optional[str] = Field(None, description="用户提供的考试局预设，如：CAIE、Edexcel")
+    # !!! 修改 1: user_provided_level 变为 List[str] !!!
+    user_provided_level: List[str] = Field([], description="用户提供的等级预设，如：['AS', 'HL']") 
+
+    # !!! 修改 2: subscribed_subjects 变为 List[WxMineCollectSubjectList] !!!
+    subscribed_subjects: List[WxMineCollectSubjectList] = Field([], description="用户订阅的学科列表，包含学科、体系、考试局信息")
+
     class Config:
         extra = "forbid"
-        # 验证器：确保 file_key 或 content 至少有一个被提供
         @classmethod
         def validate_at_least_one(cls, values):
             if not values.get('file_key') and not values.get('content'):
@@ -82,14 +95,18 @@ class ExtractionRequest(BaseModel):
             "examples": [
                 {
                     "file_key": "path/to/your/document.pdf",
-                    "is_public": True
+                    "is_public": True,
+                    "user_provided_subject": "Mathematics",
+                    "user_provided_level": ["AS"], # 示例更新
+                    "subscribed_subjects": [ # 示例更新
+                        {"subject": "Mathematics", "clazz": "A-Level", "exam": "CAIE"},
+                        {"subject": "Physics", "clazz": "IB", "exam": "Edexcel"}
+                    ]
                 },
                 {
-                    "file_key": "path/to/your/private_document.docx",
-                    "is_public": False
-                },
-                {
-                    "content": "This is a sample document content about Chemistry."
+                    "content": "This is a sample document about IB Chemistry, focusing on redox reactions.",
+                    "user_provided_clazz": "IB",
+                    "subscribed_subjects": [{"subject": "Chemistry", "clazz": "IB", "exam": ""}] # 示例更新
                 }
             ]
         }
