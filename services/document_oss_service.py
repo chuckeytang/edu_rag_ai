@@ -1,5 +1,6 @@
 # In services/document_oss_service.py
 
+import datetime
 import os
 import shutil
 import logging
@@ -78,23 +79,15 @@ class DocumentOssService:
             return
         
         try:
-            # --- [进度汇报] 开始下载 ---
+            # 根据文件类型决定加载方式
+            loaded_original_docs: List[LlamaDocument] = []
+
+            # 从 OSS 下载文件
             self.task_manager.update_progress(task_id, 10, "Downloading file from OSS...")
             
-            # 2. 决定存储桶并下载文件
+            # 确定存储桶
             accessible_to_list = request.metadata.accessible_to or []
-            # 将顶层的 file_key 也添加到元数据中
-            base_metadata = request.metadata.model_dump()
-            base_metadata['file_key'] = file_key
-            base_metadata.pop('accessible_to', None)
-            base_metadata.pop('level_list', None) 
-            base_metadata = {k: v for k, v in base_metadata.items() if v is not None}
-            logger.info(f"Constructed base metadata: {base_metadata}")
-            display_file_name = base_metadata.get("file_name", "unknown_file")
-            if "public" in accessible_to_list:
-                target_bucket = settings.OSS_PUBLIC_BUCKET_NAME
-            else:
-                target_bucket = settings.OSS_PRIVATE_BUCKET_NAME
+            target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if "public" in accessible_to_list else settings.OSS_PRIVATE_BUCKET_NAME
 
             local_file_path = self.oss_service.download_file_to_temp(
                 object_key=file_key, 
@@ -102,24 +95,64 @@ class DocumentOssService:
             )
             self.task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
             
-            # --- 3. 加载原始文档区块 ---
-            logger.info(f"Loading documents from temporary file: '{local_file_path}'")
-            all_docs = SimpleDirectoryReader(input_files=[local_file_path]).load_data()
-            total_pages = len(all_docs)
+            # --- 2. 加载原始 LlamaDocument ---
+            # SimpleDirectoryReader 可以处理多种文件类型 (PDF, DOCX等)
+            # preserve_metadata=True 会保留加载器提供的元数据 (如 page_label, file_path)
+            reader = SimpleDirectoryReader(input_files=[local_file_path], recursive=True, preserve_metadata=True)
+            loaded_original_docs = reader.load_data()
+            
+            if not loaded_original_docs:
+                raise ValueError("Could not load any documents from the provided file.")
+
+            total_pages = len(loaded_original_docs)
+
+            # --- 3. 准备基础元数据并附加到每个 LlamaDocument 上 ---
+            # 将顶层的 file_key 也添加到元数据中
+            base_metadata_payload = request.metadata.model_dump()
+            base_metadata_payload['file_key'] = file_key
+
+            base_metadata_payload.pop('accessible_to', None)
+            base_metadata_payload.pop('level_list', None) 
+
+            # 添加文件类型和时间戳
+            file_extension = os.path.splitext(file_key)[1].lower()
+            if file_extension == '.pdf':
+                base_metadata_payload['document_type'] = 'PDF'
+            elif file_extension in ('.doc', '.docx'):
+                base_metadata_payload['document_type'] = 'Word'
+            # 您可以根据需要添加更多文件类型判断
+            else:
+                base_metadata_payload['document_type'] = 'Unknown'
+
+            base_metadata_payload['creation_date'] = datetime.now().isoformat()
+            
+            base_metadata_payload = {k: v for k, v in base_metadata_payload.items() if v is not None}
+            logger.info(f"Constructed base metadata: {base_metadata_payload}")
+            display_file_name = base_metadata_payload.get("file_name", "unknown_file")
             
             logger.info("Applying node duplication strategy based on ACLs...")
             # 如果权限列表为空，为了防止文档丢失，默认将其归属给作者
-            if not accessible_to_list and 'author_id' in base_metadata:
-                acl_tag = str(base_metadata['author_id'])
+            if not accessible_to_list and 'author_id' in base_metadata_payload:
+                acl_tag = str(base_metadata_payload['author_id'])
                 accessible_to_list.append(acl_tag)
                 logger.warning(f"ACL list was empty. Defaulting to author_id: {acl_tag}")
 
             # 为每一个权限标签，创建一套完整的文档节点副本
+            final_documents_for_indexing: List[LlamaDocument] = []
+            
+            # 如果 accessible_to_list 仍然为空 (例如，没有 author_id 也没有指定 accessible_to)
+            # 则默认使用 "private_default" 或直接跳过
+            if not accessible_to_list:
+                logger.warning(f"No specific ACL tags found for {file_key}. Document will be indexed with 'private_default' ACL.")
+                accessible_to_list.append("private_default") # 默认一个私有标签
+            
+            # 为每一个权限标签，创建一套完整的文档节点副本
             final_nodes_to_index = []
             for acl_tag in accessible_to_list:
-                for doc in all_docs:
+                for doc in loaded_original_docs:
                     # 复制基础元数据
-                    metadata_copy = base_metadata.copy()
+                    ##################################################chuckeytang
+                    metadata_copy = base_metadata_payload.copy()
                     # 为这个副本设置单一的、字符串类型的访问标签
                     metadata_copy['accessible_to'] = str(acl_tag)
                     # 保留原始的页码信息

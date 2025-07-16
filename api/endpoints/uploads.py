@@ -271,7 +271,6 @@ async def update_metadata(request: UpdateMetadataRequest,
         status="scheduled"
     )
 
-
 @router.post("/delete-by-metadata", summary="[同步操作] 根据元数据删除文档")
 def delete_by_metadata(request: DeleteByMetadataRequest,
                        indexer_service: IndexerService = Depends(get_indexer_service)):

@@ -203,3 +203,24 @@ class ChatQueryRequest(BaseModel):
     similarity_top_k: Optional[int] = 5
     prompt: Optional[str] = None
     is_first_query: bool = False
+
+
+class UpdateChatMessageRequest(BaseModel):
+    """
+    更新 ChromaDB 中聊天消息的请求 DTO。
+    目前ChatHistoryService不支持更新，此DTO主要为删除后重新添加或将来扩展使用。
+    """
+    id: str = Field(..., description="聊天消息在ChromaDB中的唯一ID (通常是mysql_chat_id_X)")
+    session_id: str
+    account_id: int
+    role: str
+    content: str
+    metadata: Optional[Dict[str, Any]] = None
+    timestamp: str # 时间戳字符串，例如 "2025-07-16T10:30:00"
+
+class DeleteChatMessagesRequest(BaseModel):
+    """
+    删除 ChromaDB 中聊天消息的请求 DTO。
+    """
+    session_id: str = Field(..., description="要删除的会话ID")
+    account_id: int = Field(..., description="会话所属的用户ID")

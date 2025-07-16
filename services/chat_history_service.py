@@ -24,6 +24,7 @@ class ChatHistoryService:
         self._embedding_model = embedding_model 
         self.chat_history_collection_name = "chat_history_collection"
         self._indexer_service = indexer_service
+        self._collection = self.chroma_client.get_or_create_collection(name=self.chat_history_collection_name)
         self._initialize_chat_history_collection()
 
         logger.info("ChatHistoryService initialized with provided embedding model.")
@@ -41,8 +42,6 @@ class ChatHistoryService:
         """
         将聊天消息作为文档添加到 ChromaDB 的聊天历史Collection。
         """
-        collection = self.chroma_client.get_collection(name=self.chat_history_collection_name)
-        
         doc_id = str(message_data.get("id"))
         if not doc_id:
             # Fallback for ID, though Spring should provide a unique one
@@ -69,6 +68,29 @@ class ChatHistoryService:
             logger.info(f"Successfully added chat message '{doc.id_}' to ChromaDB chat history collection via IndexerService.")
         except Exception as e:
             logger.error(f"Failed to add chat message '{doc.id_}' to ChromaDB via IndexerService: {e}", exc_info=True)
+
+    def delete_chat_messages(self, session_id: str, account_id: int) -> Dict[str, Any]:
+        """
+        根据 session_id 和 account_id 删除 ChromaDB 中的所有聊天消息。
+        """
+        filters = {
+            "$and": [
+                {"session_id": {"$eq": session_id}},
+                {"account_id": {"$eq": account_id}}
+            ]
+        }
+        logger.info(f"Attempting to delete chat messages from ChromaDB with filters: {filters}")
+        try:
+            # Re-using indexer_service for deletion by metadata
+            result = self._indexer_service.delete_nodes_by_metadata(
+                collection_name=self.chat_history_collection_name,
+                filters=filters
+            )
+            logger.info(f"ChromaDB deletion result for session {session_id}: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to delete chat messages from ChromaDB for session {session_id}: {e}", exc_info=True)
+            raise
 
     def retrieve_chat_history_context(self, session_id: str, account_id: int, query_text: str, top_k: int = 5) -> List[TextNode]:
         """
@@ -123,3 +145,4 @@ class ChatHistoryService:
         except Exception as e:
             logger.error(f"Failed to get chat message count for session {session_id}: {e}", exc_info=True)
             return 0 # 发生错误时返回0，确保不阻塞主流程
+        

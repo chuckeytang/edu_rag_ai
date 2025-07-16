@@ -11,6 +11,7 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core.embeddings import BaseEmbedding
 from llama_cloud import TextNode
 from llama_index.core.llms import LLM
+# from llama_index.core.node_parser import RecursiveCharacterTextSplitter
 
 import chromadb
 from chromadb.config import Settings
@@ -31,6 +32,13 @@ class IndexerService:
         # 内存缓存，用于按需加载索引对象
         self.indices: Dict[str, VectorStoreIndex] = {} 
         
+        # self.node_parser = RecursiveCharacterTextSplitter(
+        #     chunk_size=512,  # 推荐 Chunk 大小
+        #     chunk_overlap=50, # 推荐重叠大小
+        #     separators=["\n\n", "\n", ".", "!", "?", "\n", " "], # 优先级：段落 -> 句子 -> 单词 -> 字符
+        #     length_function=len # 默认按字符数，也可配置为按 token 数
+        # )
+
         logger.info("IndexerService initialized.")
 
     def _get_or_load_index(self, collection_name: str) -> Optional[VectorStoreIndex]:
@@ -72,14 +80,51 @@ class IndexerService:
         self.indices[collection_name] = index
         return index
 
-    def add_documents_to_index(self, documents: List[LlamaDocument], collection_name: str) -> VectorStoreIndex:
+    def add_documents_to_index(self, 
+                               documents: List[LlamaDocument], 
+                               collection_name: str) -> VectorStoreIndex:
         """
         将文档添加到指定 collection 的索引中。
         如果索引不存在，则初始化；如果存在，则插入新文档。
         此方法会确保所有文档通过 embedding_model 向量化并入库。
         """
         logger.info(f"Adding {len(documents)} documents to index for collection: '{collection_name}'...")
-        
+        # if not documents:
+        #     logger.warning("No LlamaDocuments provided for indexing. Skipping.")
+        #     return self._get_or_load_index(collection_name) # 返回现有索引或None
+
+        # logger.info(f"Received {len(documents)} raw LlamaDocuments for collection: '{collection_name}'.")
+        # all_nodes_to_add: List[TextNode] = []
+        # for doc in documents:
+        #     # 1. 使用 NodeParser 将原始 LlamaDocument 分割成多个 TextNode
+        #     split_nodes = self.node_parser.get_nodes_from_documents([doc])
+            
+        #     # 2. 确保每个 split_node 继承并复制了父文档的元数据
+        #     # LlamaIndex 的 TextNode 会自动继承 LlamaDocument 的 metadata 到 extra_info
+        #     # 但为了明确和后续处理，我们再做一次遍历和格式检查
+        #     for node in split_nodes:
+        #         # 确保 extra_info 是可修改的字典
+        #         if not isinstance(node.extra_info, dict):
+        #             node.extra_info = {}
+                
+        #         # 合并原始文档的元数据，确保关键信息不丢失
+        #         # 注意：LlamaIndex 的 node_parser 会自动将 LlamaDocument.metadata 复制到 TextNode.extra_info
+        #         # 这里主要处理 any list-type metadata to JSON string
+                
+        #         for key, value in node.extra_info.items():
+        #             if isinstance(value, list):
+        #                 # 如果是列表，将其序列化为 JSON 字符串
+        #                 # 确保空列表 [] 也被序列化为 "[]"
+        #                 try:
+        #                     node.extra_info[key] = json.dumps(value) 
+        #                 except TypeError:
+        #                     logger.error(f"Failed to JSON serialize metadata key '{key}' with value '{value}'. Keeping original.")
+        #             # 如果是 None，ChromaDB 接受 None，无需转换
+                
+        #         all_nodes_to_add.append(node)
+
+        # logger.info(f"Original {len(documents)} documents split into {len(all_nodes_to_add)} smaller nodes for indexing.")
+
         # 尝试获取现有索引
         index = self._get_or_load_index(collection_name)
 
@@ -90,6 +135,7 @@ class IndexerService:
             storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
 
             new_index = VectorStoreIndex.from_documents(
+                # documents=all_nodes_to_add,
                 documents=documents,
                 storage_context=storage_context,
                 embed_model=self.embedding_model # 确保使用正确的 embedding model
@@ -98,6 +144,7 @@ class IndexerService:
             index = new_index
         else:
             logger.info(f"Index for '{collection_name}' already exists. Inserting new documents.")
+            # for idx, doc in enumerate(all_nodes_to_add):
             for idx, doc in enumerate(documents):
                 try:
                     index.insert(doc) # LlamaIndex insert 会使用其关联的 embed_model
@@ -125,8 +172,14 @@ class IndexerService:
         try:
             collection = self.chroma_client.get_collection(name=collection_name)
             
-            results = collection.get(where=filters, include=[])
-            count = len(results.get('ids', []))
+            chroma_filters = filters
+            if all(isinstance(k, str) and not k.startswith('$') for k in filters.keys()):
+                chroma_filters = {"$and": [{k: v} for k, v in filters.items()]}
+
+            logger.debug(f"ChromaDB delete where clause prepared: {chroma_filters}")
+            deleted_ids = collection.delete(where=chroma_filters)
+            # deleted_ids 返回的是一个列表，包含被删除的文档ID
+            count = len(deleted_ids) if deleted_ids else 0
 
             if count == 0:
                 message = f"No documents found matching the filters. Nothing to delete."
@@ -201,16 +254,11 @@ class IndexerService:
             preserved_keys = {"material_id", "author_id", "file_key", "file_name", "file_size"} # 保持这些关键字段
             
             for old_meta in nodes_to_update['metadatas']:
-                current_new_meta = metadata_update_payload.copy()
-
                 processed_update_payload = {}
-                for key, value in current_new_meta.items():
+                for key, value in metadata_update_payload.items():
                     if isinstance(value, list):
-                        # 如果是列表，将其序列化为 JSON 字符串
-                        # 确保空列表 [] 也被序列化为 "[]"，而不是 None
                         processed_update_payload[key] = json.dumps(value) 
                     elif value is None:
-                        # 如果是 None，ChromaDB 接受 None。
                         processed_update_payload[key] = None 
                     else:
                         processed_update_payload[key] = value
