@@ -27,5 +27,15 @@ app.add_middleware(
 )
 app.include_router(api_router, prefix=settings.API_V1_STR)
 if __name__ == '__main__':
+    # =================================================================
+    # 把日志配置移动到这里
+    # 这将只在直接运行时生效，为 uvicorn.run 提供日志支持
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[logging.StreamHandler()]
+    )
+
     import uvicorn
+    # uvicorn.run 会使用上面刚刚配置好的日志设置
     uvicorn.run('main:app', host="0.0.0.0", port=6006, reload=True)

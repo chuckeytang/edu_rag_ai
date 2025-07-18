@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import shutil
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage, PromptTemplate
 from llama_index.core.schema import Document as LlamaDocument
@@ -172,13 +172,42 @@ class IndexerService:
         try:
             collection = self.chroma_client.get_collection(name=collection_name)
             
-            chroma_filters = filters
-            if all(isinstance(k, str) and not k.startswith('$') for k in filters.keys()):
-                chroma_filters = {"$and": [{k: v} for k, v in filters.items()]}
+            def _prepare_delete_where_clause(input_filters: Dict[str, Any]) -> Dict[str, Any]:
+                if not input_filters:
+                    return {}
 
-            logger.debug(f"ChromaDB delete where clause prepared: {chroma_filters}")
-            deleted_ids = collection.delete(where=chroma_filters)
-            # deleted_ids 返回的是一个列表，包含被删除的文档ID
+                internal_filters = []
+                for key, value in input_filters.items():
+                    # 假设这里只处理简单键值对，或者已经预格式化的 {key: {"$op": value}}
+                    # 如果 value 是一个字典（表示已包含操作符），直接使用
+                    if isinstance(value, dict) and any(op in value for op in ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$and", "$or"]):
+                        internal_filters.append({key: value})
+                    elif isinstance(value, list): # 确保列表转换为 $in
+                         if value:
+                             internal_filters.append({key: {"$in": value}})
+                         else: # 空列表条件不匹配任何内容
+                             logger.warning(f"Empty list provided for filter key '{key}'. This condition will be ignored in delete.")
+                    else: # 简单值，转换为 $eq
+                        internal_filters.append({key: {"$eq": value}})
+
+                if not internal_filters:
+                    return {}
+                
+                # 只有当条件多于一个时才使用 $and
+                if len(internal_filters) > 1:
+                    return {"$and": internal_filters}
+                
+                # 只有一个条件，直接返回这个条件字典
+                return internal_filters[0]
+
+            # 调用辅助方法来构建最终的 where 子句
+            chroma_filters_for_delete = _prepare_delete_where_clause(filters)
+
+            logger.debug(f"ChromaDB delete where clause prepared: {chroma_filters_for_delete}")
+            
+            # 使用修正后的 filters 来调用 delete 方法
+            deleted_ids = collection.delete(where=chroma_filters_for_delete)
+            
             count = len(deleted_ids) if deleted_ids else 0
 
             if count == 0:
@@ -186,16 +215,23 @@ class IndexerService:
                 logger.warning(message)
                 return {"status": "success", "message": message}
 
-            collection.delete(where=filters)
+            # 这一行是重复的，且使用了未修正的 filters，请删除！
+            # collection.delete(where=filters) 
             
             message = f"Successfully deleted {count} document nodes matching filters: {filters}"
             logger.info(message)
             return {"status": "success", "message": message}
 
         except Exception as e:
-            message = f"An error occurred during deletion: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": "error", "message": message}
+            # 捕获 ChromaDB 抛出的 ValueError
+            if isinstance(e, ValueError) and "Expected where value for $and or $or to be a list with at least two where expressions" in str(e):
+                message = f"Deletion filter error: {e}. Please check filter format."
+                logger.error(message)
+                return {"status": "error", "message": message}
+            else:
+                message = f"An error occurred during deletion: {e}"
+                logger.error(message, exc_info=True)
+                return {"status": "error", "message": message}
 
     def get_nodes_by_metadata_filter(self, collection_name: str, filters: dict) -> List[TextNode]:
         """
