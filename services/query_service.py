@@ -44,7 +44,7 @@ try:
     # 尝试加载 Qwen 模型专用的 tokenizer，如果 DashScope SDK 提供
     # 注意：LlamaIndex 的 DashScope LLM 对象可能不直接暴露 tokenizer，
     # 考虑直接使用 dashscope 库或 tiktoken 估算
-    _tokenizer = tiktoken.encoding_for_model("cl100k_base") # Qwen-Plus 通常基于此编码
+    _tokenizer = tiktoken.get_encoding("cl100k_base") 
     logger.info("Using tiktoken 'cl100k_base' for token counting estimation.")
 except Exception as e:
     logger.warning(f"Could not load tiktoken tokenizer 'cl100k_base', token counting may be inaccurate: {e}")
@@ -68,7 +68,6 @@ class QueryService:
         self.indices: Dict[str, VectorStoreIndex] = {}
         self._indexer_service = indexer_service
         self.qa_prompt = self._create_qa_prompt()
-        logger.info("QueryService initialized for on-demand index loading. No indices loaded at startup.")
 
         # 保存 chat_history_service 实例
         self._chat_history_service = chat_history_service
@@ -90,7 +89,6 @@ class QueryService:
             raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
 
         chroma_where_clause = self._build_chroma_where_clause(filters)
-        logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
 
         # 1. 创建一个Retriever，配置和查询时完全一样
         retriever = index.as_retriever(
@@ -257,11 +255,8 @@ class QueryService:
         logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
 
 
-        # --- 根据 Java 侧指示，生成会话标题 ---
         generated_title = ""
-        # 直接使用 Java 侧传递的 is_first_query 字段来判断是否生成标题
-        if request.is_first_query: # <--- 字段名修改为 is_first_query
-            logger.info("Attempting to generate session title as requested by Java side (is_first_query is True).")
+        if request.is_first_query: 
             try:
                 # ... (标题生成逻辑保持不变)
                 title_query_engine = rag_index.as_query_engine(
@@ -273,7 +268,6 @@ class QueryService:
                 title_response = await title_query_engine.aquery(request.question)
                 generated_title = title_response.response.strip()
                 logger.info(f"Generated session title: '{generated_title}'")
-                logger.debug(f"DEBUG: Raw title response from LLM: '{title_response.response}'")
             except Exception as e:
                 logger.error(f"Failed to generate session title: {e}", exc_info=True)
                 generated_title = ""

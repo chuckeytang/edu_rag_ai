@@ -27,13 +27,10 @@ class ChatHistoryService:
         self._collection = self.chroma_client.get_or_create_collection(name=self.chat_history_collection_name)
         self._initialize_chat_history_collection()
 
-        logger.info("ChatHistoryService initialized with provided embedding model.")
-
     def _initialize_chat_history_collection(self):
         """确保聊天历史的 ChromaDB Collection 存在"""
         try:
             self.chroma_client.get_or_create_collection(name=self.chat_history_collection_name)
-            logger.info(f"ChromaDB chat history collection '{self.chat_history_collection_name}' ensured.")
         except Exception as e:
             logger.error(f"Failed to initialize chat history collection: {e}")
             raise
@@ -65,7 +62,6 @@ class ChatHistoryService:
                 documents=[doc],
                 collection_name=self.chat_history_collection_name
             )
-            logger.info(f"Successfully added chat message '{doc.id_}' to ChromaDB chat history collection via IndexerService.")
         except Exception as e:
             logger.error(f"Failed to add chat message '{doc.id_}' to ChromaDB via IndexerService: {e}", exc_info=True)
 

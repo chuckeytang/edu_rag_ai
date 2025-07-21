@@ -87,7 +87,6 @@ def get_indexer_service() -> IndexerService:
     """提供 IndexerService 的单例实例"""
     global _indexer_service
     if _indexer_service is None:
-        logger.info("Initializing IndexerService...")
         _indexer_service = IndexerService(
             chroma_client=get_chroma_client(),
             embedding_model=get_embedding_model()
@@ -98,7 +97,6 @@ def get_chat_history_service() -> ChatHistoryService:
     """提供 ChatHistoryService 的单例实例"""
     global _chat_history_service
     if _chat_history_service is None:
-        logger.info("Initializing ChatHistoryService...")
         # ChatHistoryService 现在会通过构造函数接收 embedding_model
         _chat_history_service = ChatHistoryService(
             chroma_client=get_chroma_client(),
@@ -111,7 +109,6 @@ def get_query_service() -> QueryService:
     """提供 QueryService 的单例实例"""
     global _query_service
     if _query_service is None:
-        logger.info("Initializing QueryService...")
         _query_service = QueryService(
             chroma_client=get_chroma_client(), # 传入 Chroma 客户端
             embedding_model=get_embedding_model(), # 传入 embedding model
@@ -125,7 +122,6 @@ def get_ai_extraction_service() -> AIExtractionService:
     """提供 AIExtractionService 的单例实例"""
     global _ai_extraction_service
     if _ai_extraction_service is None:
-        logger.info("Initializing AIExtractionService...")
         _ai_extraction_service = AIExtractionService(
             llm_metadata_model=get_deepseek_llm_metadata(),
             llm_flashcard_model=get_deepseek_llm_flashcard(),
@@ -138,7 +134,6 @@ def get_oss_service() -> OssService:
     """提供 OSSService 的单例实例"""
     global _oss_service
     if _oss_service is None:
-        logger.info("Initializing OSSService...")
         _oss_service = OssService()
     return _oss_service
 
@@ -146,19 +141,15 @@ def get_task_manager_service() -> TaskManagerService:
     """提供 TaskManagerService 的单例实例"""
     global _task_manager_service
     if _task_manager_service is None:
-        logger.info("Initializing TaskManagerService...")
         _task_manager_service = TaskManagerService()
     return _task_manager_service
 
-def get_document_service() -> DocumentService: # <-- 新增 DocumentService 的依赖提供者
+def get_document_service() -> DocumentService:
     """提供 DocumentService 的单例实例"""
     global _document_service
     if _document_service is None:
-        logger.info("Initializing DocumentService...")
-        _document_service = DocumentService() # <-- DocumentService 不依赖其他服务
+        _document_service = DocumentService()
     return _document_service
-
-# ... (get_indexer_service, get_chat_history_service, get_query_service, get_ai_extraction_service 保持不变) ...
 
 def get_document_oss_service() -> DocumentOssService:
     """提供 DocumentOssService 的单例实例"""

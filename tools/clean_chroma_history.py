@@ -68,4 +68,3 @@ if __name__ == "__main__":
         pass # 否则假设它会自动加载
 
     clean_chat_history_collection()
-    logger.info("ChromaDB chat history collection cleaning script finished.")
