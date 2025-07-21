@@ -127,7 +127,6 @@ def debug_retrieve_with_filters(request: QueryRequest,
                 # 再次通过 ID 查询，确认 metadata 是否最新
                 latest_meta_from_db = col.get(ids=[node_with_score.node.node_id], include=["metadatas"])['metadatas'][0]
                 # logger.info(f"DEBUG: Node ID {node_with_score.node.node_id}, LlamaIndex metadata: {current_node_metadata}, DB metadata: {latest_meta_from_db}")
-                # 替换为最新的
                 current_node_metadata = latest_meta_from_db
             except Exception as debug_e:
                 logger.error(f"DEBUG: Failed to get latest metadata from DB for {node_with_score.node.node_id}: {debug_e}")

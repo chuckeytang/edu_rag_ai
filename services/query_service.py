@@ -272,11 +272,10 @@ class QueryService:
                 logger.error(f"Failed to generate session title: {e}", exc_info=True)
                 generated_title = ""
         else:
-            logger.info("Skipping session title generation as not requested by Java side (is_first_query is False).") # <--- 日志信息更新
+            logger.info("Skipping session title generation as not requested by Java side (is_first_query is False).")
 
         # --- 主 RAG 查询 ---
-        # 确保 default_qa_prompt 有 {chat_history_context} 占位符
-        final_qa_prompt_template = self._create_qa_prompt(request.prompt) # 获取或创建 PromptTemplate
+        final_qa_prompt_template = self._create_qa_prompt(request.prompt) 
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -295,6 +294,7 @@ class QueryService:
                     similarity_top_k=request.similarity_top_k or 5
                 )
                 retrieved_nodes = await retriever.aretrieve(request.question)
+                logger.info(f"Retrieved {len(retrieved_nodes)} chunks for query: '{request.question[:50]}...'")
                 context_str = "\n\n".join([n.get_content() for n in retrieved_nodes]) # 获得召回的文档内容
 
                 # 手动渲染最终的提示词，以便计算令牌数
