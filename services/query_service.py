@@ -1,6 +1,8 @@
 import logging
 import os
 import shutil
+import tiktoken
+import asyncio
 
 from llama_cloud import TextNode
 
@@ -37,6 +39,17 @@ from typing import List, Dict
 import chromadb
 
 PERSIST_DIR = settings.INDEX_PATH
+
+try:
+    # 尝试加载 Qwen 模型专用的 tokenizer，如果 DashScope SDK 提供
+    # 注意：LlamaIndex 的 DashScope LLM 对象可能不直接暴露 tokenizer，
+    # 考虑直接使用 dashscope 库或 tiktoken 估算
+    _tokenizer = tiktoken.encoding_for_model("cl100k_base") # Qwen-Plus 通常基于此编码
+    logger.info("Using tiktoken 'cl100k_base' for token counting estimation.")
+except Exception as e:
+    logger.warning(f"Could not load tiktoken tokenizer 'cl100k_base', token counting may be inaccurate: {e}")
+    _tokenizer = None
+
 class QueryService:
     def __init__(self, 
                  chroma_client: chromadb.PersistentClient,
@@ -164,41 +177,23 @@ class QueryService:
         return PromptTemplate(
             # === 将聊天历史上下文放在最前面 ===
             "{chat_history_context}" 
-            "You are an advanced academic AI assistant working within a smart educational system. You are deeply familiar with the full content and structure of all major high school curricula, including IB, A-Level, AP, IGCSE, and others. You have comprehensive knowledge across all subjects at this level.\n"
+            "You are an advanced academic AI assistant specializing in high school curricula (IB, A-Level, AP, IGCSE, etc.). "
+            "Your task is to provide clear, elegant, and academically accurate responses based **only** on the provided context and documents.\n"
             "\n"
-            "⸻\n"
+            "--- Your Response Guidelines ---\n"
+            "1. **Accuracy & Fact-based**: Adhere strictly to the provided 'Document content'. **Never guess or invent information.**\n"
+            "   - **If the information is missing, ambiguous, or if you cannot answer based *solely* on the provided documents, state clearly: 'I cannot find enough information in the provided documents to answer this question.' Do not attempt to answer if the context is insufficient.**\n"
+            "2. **Concise & Elegant**: Use polished, academic language. Avoid verbosity or repetition.\n"
+            "3. **Formatting**: Use section headers, bullet points, or Q&A structures for clarity. Avoid dense paragraphs.\n"
+            "4. **Language**: Primarily respond in English. If the user's query includes Chinese, you may add short, clarifying Chinese phrases naturally, but keep English as the main language.\n"
+            "5. **Target Audience**: Tailor your answer for motivated high school students, prioritizing clarity and depth.\n"
             "\n"
-            "Your role:\n"
+            "--- Tone ---\n"
+            "Academic, supportive, focused, efficient.\n"
             "\n"
-            "You will receive content such as notes, exam questions, student summaries, or extracted text from images or links.\n"
-            "Your job is to generate clear, elegant, and academically accurate responses based on the provided input.\n"
+            "--- Specific Instructions ---\n"
+            "If the query is an exam question (e.g., '6(b)(ii)'): first briefly describe its content, then identify relevant syllabus knowledge from the documents, and finally provide a clear, step-by-step response.\n"
             "\n"
-            "You do not need to decide the task (e.g., whether to generate flashcards or explain a concept) — that is already defined by the context. Focus solely on executing the content generation with the highest quality.\n"
-            "\n"
-            "⸻\n"
-            "\n"
-            "Your response must:\n"
-            " 1. Be accurate, fact-based, and curriculum-aligned. Never guess or make up content.\n"
-            " • If information is missing or ambiguous, say so explicitly and suggest clarification.\n"
-            " 2. Be concise and elegant.\n"
-            " • Use polished, academic language that is easy to read. Avoid long-winded or repetitive explanations.\n"
-            " 3. Follow beautiful and clear formatting:\n"
-            " • Use section headers, bullet points, or Q&A structures depending on the context.\n"
-            " • Avoid dense paragraphs or chaotic structure.\n"
-            " 4. Respond primarily in English, but if the user includes another language (e.g., Chinese), you may provide short clarifying phrases or explanations in that language as well — mix the languages naturally.\n"
-            " • Do not switch entirely to another language; always keep English as the main medium.\n"
-            " 5. Tailor your response for motivated high school students who value clarity, depth, and efficient studying.\n"
-            "\n"
-            "⸻\n"
-            "\n"
-            "Tone:\n"
-            " • Academic but not robotic\n"
-            " • Supportive and focused\n"
-            " • Efficient and respectful of the reader’s time\n"
-            "\n"
-            
-            "Based on the provided context and documents, answer the user's query. If the query specifies a question from an exam paper (e.g., '6(b)(ii)'), first describe its content, then identify relevant syllabus knowledge, and finally provide a clear response.\n"
-            
             "Document content: {context_str}\n" # RAG 检索到的文档内容
             "Query: {query_str}" # 用户当前的问题
         )
@@ -288,17 +283,79 @@ class QueryService:
         # --- 主 RAG 查询 ---
         # 确保 default_qa_prompt 有 {chat_history_context} 占位符
         final_qa_prompt_template = self._create_qa_prompt(request.prompt) # 获取或创建 PromptTemplate
-        final_qa_prompt = final_qa_prompt_template.partial_format(chat_history_context=chat_history_context_string)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 在每次尝试前重新构建 query_engine，确保状态刷新（如果需要）
+                query_engine = rag_index.as_query_engine(
+                    llm=self.llm,
+                    vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+                    similarity_top_k=request.similarity_top_k or 5,
+                    streaming=True,
+                    text_qa_template=final_qa_prompt_template # 注意这里是模板
+                )
 
-        query_engine = rag_index.as_query_engine(
-            llm=self.llm,
-            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=request.similarity_top_k or 5,
-            streaming=True,
-            text_qa_template=final_qa_prompt
-        )
-        
-        response = await query_engine.aquery(request.question)
+                # --- 召回文档并计算令牌数 ---
+                retriever = rag_index.as_retriever(
+                    vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+                    similarity_top_k=request.similarity_top_k or 5
+                )
+                retrieved_nodes = await retriever.aretrieve(request.question)
+                context_str = "\n\n".join([n.get_content() for n in retrieved_nodes]) # 获得召回的文档内容
+
+                # 手动渲染最终的提示词，以便计算令牌数
+                final_prompt_str = final_qa_prompt_template.format(
+                    chat_history_context=chat_history_context_string,
+                    context_str=context_str,
+                    query_str=request.question
+                )
+                
+                if _tokenizer:
+                    token_count = len(_tokenizer.encode(final_prompt_str))
+                    logger.info(f"Attempt {attempt + 1}: Total input tokens for RAG query: {token_count}. Query: '{request.question[:50]}...'")
+                else:
+                    logger.warning("Tokenizer not available, skipping token count for RAG query.")
+
+                # 执行 LLM 查询
+                response = await query_engine.aquery(request.question) # LlamaIndex 会在内部处理 prompt 填充
+                
+                # 检查响应是否为空。如果 response.response_gen 没有内容，或者 response.response 是空字符串
+                if not hasattr(response, 'response_gen') and (not response.response or response.response.strip() == ""):
+                    logger.warning(f"Attempt {attempt + 1}: LLM returned an empty or nearly empty response for query: '{request.question}'. Retrying...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt) # 指数退避
+                        continue # 进入下一次重试
+                    else:
+                        logger.error(f"All {max_retries} attempts failed for query: '{request.question}', returning error to client.")
+                        # 记录完整的输入，以便调试
+                        logger.error(f"Failed query input details: \n"
+                                     f"Chat History: {chat_history_context_string}\n"
+                                     f"Document Content: {context_str}\n"
+                                     f"User Query: {request.question}\n"
+                                     f"Full Prompt (first 500 chars): {final_prompt_str[:500]}...")
+                        error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+                        yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                        return
+
+                # 如果成功，则退出重试循环
+                break 
+
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}: Error during RAG query for '{request.question}': {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt) # 指数退避
+                    continue
+                else:
+                    logger.error(f"All {max_retries} attempts failed for query: '{request.question}', returning error to client.")
+                    # 记录完整的输入，以便调试
+                    logger.error(f"Failed query input details: \n"
+                                 f"Chat History: {chat_history_context_string}\n"
+                                 f"Document Content: {context_str}\n"
+                                 f"User Query: {request.question}\n"
+                                 f"Full Prompt (first 500 chars): {final_prompt_str[:500]}...")
+                    error_chunk_json = StreamChunk(content="抱歉，查询过程中发生错误，请稍后再试。", is_last=True).json()
+                    yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                    return
 
         rag_sources_info = []
         if response.source_nodes:
@@ -310,12 +367,23 @@ class QueryService:
                 })
         
         full_response_content = ""
-        if hasattr(response, 'response_gen'):
+        if hasattr(response, 'response_gen') and response.response_gen is not None:
             async for chunk_text in response.response_gen:
                 full_response_content += chunk_text
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
                 # logger.debug(f"Yielding raw JSON chunk: {sse_event_json}")
                 yield f"data: {sse_event_json}\n\n".encode("utf-8") 
+        else: # 如果不是 streaming response，则直接使用 response.response
+            full_response_content = response.response
+            if full_response_content:
+                sse_event_json = StreamChunk(content=full_response_content, is_last=False).json()
+                yield f"data: {sse_event_json}\n\n".encode("utf-8")
+            else:
+                logger.warning(f"No stream or direct response content from LLM for query: '{request.question}'.")
+                # 如果最终还是没有内容，发送一个默认的空响应或错误信息
+                error_chunk_json = StreamChunk(content="AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+                yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                return # 提前返回，不再发送 final_sse_event_json
         
         # --- 构建最终的 metadata ---
         final_metadata = {}
