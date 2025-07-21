@@ -196,6 +196,16 @@ class QueryService:
             "Query: {query_str}" # 用户当前的问题
         )
             
+    @property
+    def general_chat_prompt(self) -> PromptTemplate:
+        # 新增一个通用聊天提示词，不依赖任何文档内容
+        return PromptTemplate(
+            "{chat_history_context}"
+            "You are a friendly and helpful AI assistant. Respond to the user's query naturally. If the query is a general greeting or does not require specific knowledge, respond in a conversational manner. If the user asks for academic information, but no relevant documents are found, you may state that you are an academic assistant but cannot find specific information on that topic. Always maintain a polite and supportive tone.\n"
+            "\n"
+            "Query: {query_str}"
+        )
+    
     async def rag_query_with_context(
         self,
         request: ChatQueryRequest 
@@ -254,7 +264,6 @@ class QueryService:
         chroma_where_clause = self._build_chroma_where_clause(combined_rag_filters)
         logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
 
-
         generated_title = ""
         if request.is_first_query: 
             try:
@@ -274,116 +283,149 @@ class QueryService:
         else:
             logger.info("Skipping session title generation as not requested by Java side (is_first_query is False).")
 
-        # --- 主 RAG 查询 ---
         final_qa_prompt_template = self._create_qa_prompt(request.prompt) 
+        # --- 主 RAG 查询 ---
         max_retries = 3
-        for attempt in range(max_retries):
+        
+        # --- 召回文档 ---
+        retriever = rag_index.as_retriever(
+            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+            similarity_top_k=request.similarity_top_k or 5
+        )
+        retrieved_nodes = await retriever.aretrieve(request.question)
+        num_retrieved_chunks = len(retrieved_nodes)
+        logger.info(f"Retrieved {num_retrieved_chunks} chunks for query: '{request.question[:50]}...'")
+
+        llm_response_obj = None 
+        # 用于存储RAG召回的源节点信息，通用聊天模式下应为空
+        final_rag_sources_info = []
+        
+        # 根据召回结果选择不同的 LLM 行为
+        if num_retrieved_chunks == 0:
+            logger.info(f"No documents retrieved for query '{request.question[:50]}...'. Switching to general chat mode.")
+            
+            # 直接使用 LLM 进行通用对话，不带上下文
+            # 使用一个更通用的 prompt，不强制要求基于文档
+            final_llm_prompt = self.general_chat_prompt.format(
+                chat_history_context=chat_history_context_string,
+                query_str=request.question
+            )
+
+            if _tokenizer:
+                token_count = len(_tokenizer.encode(final_llm_prompt))
+                logger.info(f"Total input tokens for general query (no RAG): {token_count}. Query: '{request.question[:50]}...'")
+
+            # 直接调用 LLM，不通过 QueryEngine
             try:
-                # 在每次尝试前重新构建 query_engine，确保状态刷新（如果需要）
-                query_engine = rag_index.as_query_engine(
-                    llm=self.llm,
-                    vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-                    similarity_top_k=request.similarity_top_k or 5,
-                    streaming=True,
-                    text_qa_template=final_qa_prompt_template # 注意这里是模板
-                )
-
-                # --- 召回文档并计算令牌数 ---
-                retriever = rag_index.as_retriever(
-                    vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-                    similarity_top_k=request.similarity_top_k or 5
-                )
-                retrieved_nodes = await retriever.aretrieve(request.question)
-                logger.info(f"Retrieved {len(retrieved_nodes)} chunks for query: '{request.question[:50]}...'")
-                context_str = "\n\n".join([n.get_content() for n in retrieved_nodes]) # 获得召回的文档内容
-
-                # 手动渲染最终的提示词，以便计算令牌数
-                final_prompt_str = final_qa_prompt_template.format(
-                    chat_history_context=chat_history_context_string,
-                    context_str=context_str,
-                    query_str=request.question
-                )
+                llm_response_obj = await self.llm.acomplete(final_llm_prompt) # 保存到 llm_response_obj
+                full_response_content = llm_response_obj.text 
                 
-                if _tokenizer:
-                    token_count = len(_tokenizer.encode(final_prompt_str))
-                    logger.info(f"Attempt {attempt + 1}: Total input tokens for RAG query: {token_count}. Query: '{request.question[:50]}...'")
-                else:
-                    logger.warning("Tokenizer not available, skipping token count for RAG query.")
+                if not full_response_content or full_response_content.strip() == "":
+                    logger.warning(f"General chat LLM returned an empty response for query: '{request.question}'.")
+                    error_chunk_json = StreamChunk(content="抱歉，我暂时无法回答您的问题，请稍后再试。", is_last=True).json()
+                    yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                    return
 
-                # 执行 LLM 查询
-                response = await query_engine.aquery(request.question) # LlamaIndex 会在内部处理 prompt 填充
-                
-                # 检查响应是否为空。如果 response.response_gen 没有内容，或者 response.response 是空字符串
-                if not hasattr(response, 'response_gen') and (not response.response or response.response.strip() == ""):
-                    logger.warning(f"Attempt {attempt + 1}: LLM returned an empty or nearly empty response for query: '{request.question}'. Retrying...")
+            except Exception as e:
+                logger.error(f"Error during general LLM query for '{request.question}': {e}", exc_info=True)
+                error_chunk_json = StreamChunk(content="抱歉，通用对话服务出现问题，请稍后再试。", is_last=True).json()
+                yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                return
+
+        else: # 有召回文档时，走 RAG 流程
+            context_str = "\n\n".join([n.get_content() for n in retrieved_nodes]) # 获得召回的文档内容
+            
+            # 手动渲染最终的提示词，以便计算令牌数
+            final_prompt_str = final_qa_prompt_template.format(
+                chat_history_context=chat_history_context_string,
+                context_str=context_str,
+                query_str=request.question
+            )
+            
+            if _tokenizer:
+                token_count = len(_tokenizer.encode(final_prompt_str))
+                logger.info(f"Total input tokens for RAG query: {token_count}. Query: '{request.question[:50]}...'")
+            else:
+                logger.warning("Tokenizer not available, skipping token count for RAG query.")
+
+            for attempt in range(max_retries):
+                try:
+                    query_engine = rag_index.as_query_engine(
+                        llm=self.llm,
+                        vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+                        similarity_top_k=request.similarity_top_k or 5,
+                        streaming=True,
+                        text_qa_template=final_qa_prompt_template # 注意这里是模板
+                    )
+
+                    # 执行 LLM 查询
+                    response = await query_engine.aquery(request.question) # LlamaIndex 会在内部处理 prompt 填充
+                    
+                    # 检查响应是否为空。如果 response.response_gen 没有内容，或者 response.response 是空字符串
+                    if not hasattr(response, 'response_gen') and (not response.response or response.response.strip() == ""):
+                        logger.warning(f"Attempt {attempt + 1}: LLM returned an empty or nearly empty response for query: '{request.question}'. Retrying...")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** attempt) # 指数退避
+                            continue # 进入下一次重试
+                        else:
+                            logger.error(f"All {max_retries} attempts failed for query: '{request.question}', returning error to client.")
+                            logger.error(f"Failed query input details: \n"
+                                         f"Chat History: {chat_history_context_string}\n"
+                                         f"Document Content: {context_str}\n"
+                                         f"User Query: {request.question}\n"
+                                         f"Full Prompt (first 500 chars): {final_prompt_str[:500]}...")
+                            error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+                            yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                            return
+
+                    # 如果成功，则退出重试循环
+                    break 
+
+                except Exception as e:
+                    logger.error(f"Attempt {attempt + 1}: Error during RAG query for '{request.question}': {e}", exc_info=True)
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2 ** attempt) # 指数退避
-                        continue # 进入下一次重试
+                        continue
                     else:
                         logger.error(f"All {max_retries} attempts failed for query: '{request.question}', returning error to client.")
-                        # 记录完整的输入，以便调试
                         logger.error(f"Failed query input details: \n"
                                      f"Chat History: {chat_history_context_string}\n"
                                      f"Document Content: {context_str}\n"
                                      f"User Query: {request.question}\n"
                                      f"Full Prompt (first 500 chars): {final_prompt_str[:500]}...")
-                        error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+                        error_chunk_json = StreamChunk(content="抱歉，查询过程中发生错误，请稍后再试。", is_last=True).json()
                         yield f"data: {error_chunk_json}\n\n".encode("utf-8")
                         return
 
-                # 如果成功，则退出重试循环
-                break 
-
-            except Exception as e:
-                logger.error(f"Attempt {attempt + 1}: Error during RAG query for '{request.question}': {e}", exc_info=True)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt) # 指数退避
-                    continue
-                else:
-                    logger.error(f"All {max_retries} attempts failed for query: '{request.question}', returning error to client.")
-                    # 记录完整的输入，以便调试
-                    logger.error(f"Failed query input details: \n"
-                                 f"Chat History: {chat_history_context_string}\n"
-                                 f"Document Content: {context_str}\n"
-                                 f"User Query: {request.question}\n"
-                                 f"Full Prompt (first 500 chars): {final_prompt_str[:500]}...")
-                    error_chunk_json = StreamChunk(content="抱歉，查询过程中发生错误，请稍后再试。", is_last=True).json()
-                    yield f"data: {error_chunk_json}\n\n".encode("utf-8")
-                    return
-
-        rag_sources_info = []
-        if response.source_nodes:
-            for node in response.source_nodes:
-                rag_sources_info.append({
+        if num_retrieved_chunks > 0 and llm_response_obj and hasattr(llm_response_obj, 'source_nodes') and llm_response_obj.source_nodes:
+            for node in llm_response_obj.source_nodes: 
+                final_rag_sources_info.append({
                     "file_name": node.metadata.get("file_name", "未知文件"),
                     "page_number": node.metadata.get("page_label", "未知页"),
                     "material_id": node.metadata.get("material_id")
                 })
         
         full_response_content = ""
-        if hasattr(response, 'response_gen') and response.response_gen is not None:
-            async for chunk_text in response.response_gen:
+        if llm_response_obj and hasattr(llm_response_obj, 'response_gen') and llm_response_obj.response_gen is not None:
+            async for chunk_text in llm_response_obj.response_gen: 
                 full_response_content += chunk_text
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
-                # logger.debug(f"Yielding raw JSON chunk: {sse_event_json}")
                 yield f"data: {sse_event_json}\n\n".encode("utf-8") 
-        else: # 如果不是 streaming response，则直接使用 response.response
-            full_response_content = response.response
-            if full_response_content:
-                sse_event_json = StreamChunk(content=full_response_content, is_last=False).json()
-                yield f"data: {sse_event_json}\n\n".encode("utf-8")
-            else:
-                logger.warning(f"No stream or direct response content from LLM for query: '{request.question}'.")
-                # 如果最终还是没有内容，发送一个默认的空响应或错误信息
-                error_chunk_json = StreamChunk(content="AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
-                yield f"data: {error_chunk_json}\n\n".encode("utf-8")
-                return # 提前返回，不再发送 final_sse_event_json
+        elif llm_response_obj and hasattr(llm_response_obj, 'text') and llm_response_obj.text: # 使用 .text 属性来获取非流式内容
+            full_response_content = llm_response_obj.text
+            sse_event_json = StreamChunk(content=full_response_content, is_last=False).json()
+            yield f"data: {sse_event_json}\n\n".encode("utf-8")
+        else:
+            logger.warning(f"No stream or direct response content from LLM for query: '{request.question}'. This should have been handled earlier.")
+            error_chunk_json = StreamChunk(content="AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+            yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+            return 
         
         # --- 构建最终的 metadata ---
         final_metadata = {}
         
         # 添加 rag_sources_info (详细的源节点信息)
-        final_metadata["rag_sources"] = rag_sources_info
+        final_metadata["rag_sources"] = final_rag_sources_info
 
         # --- Add the new 'referenced_docs' list ---
         # Use the collected final_referenced_material_ids
