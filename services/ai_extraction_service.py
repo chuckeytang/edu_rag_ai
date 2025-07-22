@@ -17,6 +17,7 @@ from llama_index.core import SimpleDirectoryReader
 from core.config import settings # 假设settings包含DeepSeek配置
 from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList, WxMineCollectSubjectList
 from services.oss_service import OssService
+from services.readers.camelot_pdf_reader import CamelotPDFReader
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG) 
@@ -60,10 +61,23 @@ class AIExtractionService:
                     object_key=file_key, 
                     bucket_name=target_bucket
                 )
-                
-                # 使用 SimpleDirectoryReader 来读取文件内容
-                reader = SimpleDirectoryReader(input_files=[local_file_path])
-                documents = reader.load_data()
+                file_extension_lower = os.path.splitext(local_file_path)[1].lower()
+                documents = []
+                if file_extension_lower == '.pdf':
+                    # 对于 AI 提取，通常需要整个文档的文本作为上下文
+                    # 所以 chunk_tables_by_row=False (不按行切分表格)
+                    # 并且 ensure extract_text_also=True (确保提取非表格文本)
+                    reader = CamelotPDFReader(
+                        flavor='stream', # 或 'lattice'，取决于PDF表格类型
+                        extract_text_also=True,
+                        chunk_tables_by_row=False # AI提取通常需要完整上下文，将整个表格作为一个文本块
+                    )
+                    documents = reader.load_data(file=local_file_path)
+                else:
+                    # 对于其他文件类型，继续使用 SimpleDirectoryReader
+                    # 注意：这里 SimpleDirectoryReader 不再接受 preserve_metadata
+                    reader = SimpleDirectoryReader(input_files=[local_file_path])
+                    documents = reader.load_data()
                 
                 full_content = "\n".join([doc.text for doc in documents])
                 return full_content

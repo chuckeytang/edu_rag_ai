@@ -89,42 +89,6 @@ class IndexerService:
         此方法会确保所有文档通过 embedding_model 向量化并入库。
         """
         logger.info(f"Adding {len(documents)} documents to index for collection: '{collection_name}'...")
-        # if not documents:
-        #     logger.warning("No LlamaDocuments provided for indexing. Skipping.")
-        #     return self._get_or_load_index(collection_name) # 返回现有索引或None
-
-        # logger.info(f"Received {len(documents)} raw LlamaDocuments for collection: '{collection_name}'.")
-        # all_nodes_to_add: List[TextNode] = []
-        # for doc in documents:
-        #     # 1. 使用 NodeParser 将原始 LlamaDocument 分割成多个 TextNode
-        #     split_nodes = self.node_parser.get_nodes_from_documents([doc])
-            
-        #     # 2. 确保每个 split_node 继承并复制了父文档的元数据
-        #     # LlamaIndex 的 TextNode 会自动继承 LlamaDocument 的 metadata 到 extra_info
-        #     # 但为了明确和后续处理，我们再做一次遍历和格式检查
-        #     for node in split_nodes:
-        #         # 确保 extra_info 是可修改的字典
-        #         if not isinstance(node.extra_info, dict):
-        #             node.extra_info = {}
-                
-        #         # 合并原始文档的元数据，确保关键信息不丢失
-        #         # 注意：LlamaIndex 的 node_parser 会自动将 LlamaDocument.metadata 复制到 TextNode.extra_info
-        #         # 这里主要处理 any list-type metadata to JSON string
-                
-        #         for key, value in node.extra_info.items():
-        #             if isinstance(value, list):
-        #                 # 如果是列表，将其序列化为 JSON 字符串
-        #                 # 确保空列表 [] 也被序列化为 "[]"
-        #                 try:
-        #                     node.extra_info[key] = json.dumps(value) 
-        #                 except TypeError:
-        #                     logger.error(f"Failed to JSON serialize metadata key '{key}' with value '{value}'. Keeping original.")
-        #             # 如果是 None，ChromaDB 接受 None，无需转换
-                
-        #         all_nodes_to_add.append(node)
-
-        # logger.info(f"Original {len(documents)} documents split into {len(all_nodes_to_add)} smaller nodes for indexing.")
-
         # 尝试获取现有索引
         index = self._get_or_load_index(collection_name)
 
@@ -138,7 +102,7 @@ class IndexerService:
                 # documents=all_nodes_to_add,
                 documents=documents,
                 storage_context=storage_context,
-                embed_model=self.embedding_model # 确保使用正确的 embedding model
+                embed_model=self.embedding_model
             )
             logger.info(f"New index for '{collection_name}' initialized successfully.")
             index = new_index
