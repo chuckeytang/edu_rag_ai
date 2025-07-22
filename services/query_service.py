@@ -22,7 +22,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 from typing import Any, AsyncGenerator, List, Union
-from llama_index.core.schema import Document as LlamaDocument
+from llama_index.core.schema import Document as LlamaDocument, NodeWithScore, TextNode as LlamaTextNode, QueryBundle
 
 from llama_index.core import VectorStoreIndex, PromptTemplate, StorageContext, load_index_from_storage
 from llama_index.llms.dashscope import DashScope, DashScopeGenerationModels
@@ -30,6 +30,8 @@ from llama_index.embeddings.dashscope import DashScopeEmbedding, DashScopeTextEm
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core.llms import LLM
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.query_engine import RetrieverQueryEngine # Import RetrieverQueryEngine
+from llama_index.core.retrievers import BaseRetriever
 
 # from llama_index.cura import CURARetriever
 # print(CURARetriever)
@@ -50,6 +52,28 @@ except Exception as e:
     logger.warning(f"Could not load tiktoken tokenizer 'cl100k_base', token counting may be inaccurate: {e}")
     _tokenizer = None
 
+class CustomRetriever(BaseRetriever):
+    """
+    一个自定义的 Retriever，它不执行实际的向量搜索，
+    而是直接返回初始化时传入的节点列表。
+    用于在 RAG 召回为 0 时，将虚拟节点传递给 QueryEngine。
+    """
+    def __init__(self, nodes: List[NodeWithScore]):
+        self._nodes = nodes
+    
+    async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        # 异步方法，现在接受 QueryBundle 对象
+        # logger.debug(f"CustomRetriever: _aretrieve called for query '{query_bundle.query_str[:50]}...'. Returning {len(self._nodes)} pre-set nodes.")
+        # LlamaIndex 内部会自动从 query_bundle.query_str 获取查询字符串
+        # 在这里我们只是返回预设的节点，所以 query_bundle 实际用处不大，但必须接受
+        logger.debug(f"CustomRetriever: _aretrieve called for query '{query_bundle.query_str[:50]}...'. Returning {len(self._nodes)} pre-set nodes.")
+        return self._nodes
+    
+    def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        # 同步方法，现在接受 QueryBundle 对象
+        logger.debug(f"CustomRetriever: _retrieve called for query '{query_bundle.query_str[:50]}...'. Returning {len(self._nodes)} pre-set nodes.")
+        return self._nodes
+    
 class QueryService:
     def __init__(self, 
                  chroma_client: chromadb.PersistentClient,
@@ -289,23 +313,106 @@ class QueryService:
             logger.info("Skipping session title generation as not requested by Java side (is_first_query is False).") 
 
         # --- 主 RAG 查询 ---
-        # 确保 default_qa_prompt 有 {chat_history_context} 占位符
-        final_qa_prompt_template = self._create_qa_prompt(request.prompt) # 获取或创建 PromptTemplate
-        final_qa_prompt = final_qa_prompt_template.partial_format(chat_history_context=chat_history_context_string)
-
-        query_engine = rag_index.as_query_engine(
-            llm=self.llm,
-            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=request.similarity_top_k or 5,
-            streaming=True,
-            text_qa_template=final_qa_prompt
-        )
+        max_retries = 3
         
-        response = await query_engine.aquery(request.question)
+        # --- 召回文档 ---
+        retriever = rag_index.as_retriever(
+            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+            similarity_top_k=request.similarity_top_k or 5
+        )
+        logger.info(f"RAG Retriever query clause: {chroma_where_clause}") 
+        retrieved_nodes = await retriever.aretrieve(request.question)
+        original_retrieved_nodes_count = len(retrieved_nodes) # 记录原始召回数量
+        logger.info(f"Retrieved {original_retrieved_nodes_count} chunks for query: '{request.question[:50]}...'")
+
+        # --- 核心修改：如果 0 召回，注入虚拟节点 ---
+        current_retrieved_nodes = list(retrieved_nodes) # 复制一份，确保可修改
+        
+        if original_retrieved_nodes_count == 0:
+            logger.info("No documents retrieved. Adding a virtual 'NO_RELEVANT_DOCUMENTS_FOUND' node for LLM context.")
+            virtual_node_content = "NO_RELEVANT_DOCUMENTS_FOUND"
+            virtual_node = LlamaTextNode(text=virtual_node_content, metadata={"source": "virtual_fallback", "type": "no_document_found"})
+            virtual_node_with_score = NodeWithScore(node=virtual_node, score=0.0)
+            current_retrieved_nodes.append(virtual_node_with_score) 
+        # -------------------------------------------------------------------------------------
+
+        # 构建发送给 LLM 的 context_str，它现在可能包含虚拟节点的内容
+        context_str_for_llm = "\n\n".join([n.get_content() for n in current_retrieved_nodes])
+
+        final_qa_prompt_template = self._create_qa_prompt(request.prompt) 
+        
+        llm_response_obj = None 
+        for attempt in range(max_retries):
+            try:
+                # 重新构建完整的 PromptTemplate，确保 context_str 被正确传入
+                final_prompt_for_llm = final_qa_prompt_template.format(
+                    chat_history_context=chat_history_context_string,
+                    context_str=context_str_for_llm, # 这里传入处理后的 context_str_for_llm
+                    query_str=request.question
+                )
+
+                if _tokenizer:
+                    token_count = len(_tokenizer.encode(final_prompt_for_llm))
+                    logger.info(f"Attempt {attempt + 1}: Total input tokens for LLM query: {token_count}. Query: '{request.question[:50]}...'")
+                else:
+                    logger.warning("Tokenizer not available, skipping token count for LLM query.")
+
+                query_engine = RetrieverQueryEngine.from_args(
+                    retriever=CustomRetriever(current_retrieved_nodes), # 使用我们自定义的 Retriever
+                    llm=self.llm,
+                    streaming=True,
+                    text_qa_template=PromptTemplate(final_prompt_for_llm) # 传入完整的 prompt
+                )
+                
+                llm_response_obj = await query_engine.aquery(request.question) 
+
+                is_response_empty = False
+                if llm_response_obj and hasattr(llm_response_obj, 'response_gen') and llm_response_obj.response_gen is not None:
+                    pass 
+                elif llm_response_obj and hasattr(llm_response_obj, 'response') and (not llm_response_obj.response or llm_response_obj.response.strip() == ""):
+                    is_response_empty = True
+                elif not llm_response_obj: 
+                     is_response_empty = True
+
+                if is_response_empty:
+                    logger.warning(f"Attempt {attempt + 1}: LLM returned an empty or nearly empty response for query: '{request.question}'. Retrying...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt) 
+                        continue 
+                    else:
+                        logger.error(f"All {max_retries} attempts failed for query: '{request.question}', returning error to client.")
+                        logger.error(f"Failed query input details: \n"
+                                     f"Chat History: {chat_history_context_string}\n"
+                                     f"Document Content: {context_str_for_llm}\n" 
+                                     f"User Query: {request.question}\n"
+                                     f"Full Prompt (first 500 chars): {final_prompt_for_llm[:500]}...")
+                        error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+                        yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                        return
+
+                break 
+
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}: Error during LLM query for '{request.question}': {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt) 
+                    continue
+                else:
+                    logger.error(f"All {max_retries} attempts failed for query: '{request.question}', returning error to client.")
+                    logger.error(f"Failed query input details: \n"
+                                 f"Chat History: {chat_history_context_string}\n"
+                                 f"Document Content: {context_str_for_llm}\n" 
+                                 f"User Query: {request.question}\n"
+                                 f"Full Prompt (first 500 chars): {final_prompt_for_llm[:500]}...")
+                    error_chunk_json = StreamChunk(content="抱歉，查询过程中发生错误，请稍后再试。", is_last=True).json()
+                    yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                    return
 
         rag_sources_info = []
-        if response.source_nodes:
-            for node in response.source_nodes:
+        # 只有在有实际召回节点的情况下，才填充 rag_sources_info
+        # 这里使用 original_retrieved_nodes_count 来判断是否是真实召回
+        if original_retrieved_nodes_count > 0 and llm_response_obj and hasattr(llm_response_obj, 'source_nodes'):
+            for node in llm_response_obj.source_nodes:
                 rag_sources_info.append({
                     "file_name": node.metadata.get("file_name", "未知文件"),
                     "page_number": node.metadata.get("page_label", "未知页"),
@@ -313,25 +420,31 @@ class QueryService:
                 })
         
         full_response_content = ""
-        if hasattr(response, 'response_gen'):
-            async for chunk_text in response.response_gen:
+        if llm_response_obj and hasattr(llm_response_obj, 'response_gen'):
+            async for chunk_text in llm_response_obj.response_gen:
                 full_response_content += chunk_text
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
-                # logger.debug(f"Yielding raw JSON chunk: {sse_event_json}")
                 yield f"data: {sse_event_json}\n\n".encode("utf-8") 
+            logger.debug("Successfully streamed response chunks.")
+        elif llm_response_obj and hasattr(llm_response_obj, 'response') and llm_response_obj.response: 
+            full_response_content = llm_response_obj.response
+            sse_event_json = StreamChunk(content=full_response_content, is_last=False).json()
+            yield f"data: {sse_event_json}\n\n".encode("utf-8")
+            logger.warning(f"Non-streaming QueryEngine response yielded once: '{full_response_content[:50]}...'. Expected streaming.")
+        else:
+            logger.warning(f"No valid LLM response content (stream or direct response) for query: '{request.question}'. This should have been caught by retry logic.")
+            error_chunk_json = StreamChunk(content="AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+            yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+            return 
         
         # --- 构建最终的 metadata ---
         final_metadata = {}
         
-        # 添加 rag_sources_info (详细的源节点信息)
         final_metadata["rag_sources"] = rag_sources_info
 
-        # --- Add the new 'referenced_docs' list ---
-        # Use the collected final_referenced_material_ids
-        if final_referenced_material_ids: # 只有当有实际引用的文档时才添加
+        if final_referenced_material_ids: 
             final_metadata["referenced_docs"] = final_referenced_material_ids
 
-        # Add title to metadata if generated
         if generated_title:
             final_metadata["session_title"] = generated_title
         
@@ -340,7 +453,7 @@ class QueryService:
         final_sse_event_json = StreamChunk(
             content="",
             is_last=True,
-            metadata=final_metadata # 使用包含标题的元数据
+            metadata=final_metadata 
         ).json()
         temp_stream_chunk = StreamChunk(content="", is_last=True, metadata=final_metadata)
         logger.debug(f"DEBUG: Final StreamChunk object's dict (pre-json): {temp_stream_chunk.__dict__}")
