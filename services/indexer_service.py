@@ -11,7 +11,7 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core.embeddings import BaseEmbedding
 from llama_cloud import TextNode
 from llama_index.core.llms import LLM
-# from llama_index.core.node_parser import RecursiveCharacterTextSplitter
+from llama_index.core.node_parser import SentenceSplitter 
 
 import chromadb
 from chromadb.config import Settings
@@ -32,12 +32,10 @@ class IndexerService:
         # 内存缓存，用于按需加载索引对象
         self.indices: Dict[str, VectorStoreIndex] = {} 
         
-        # self.node_parser = RecursiveCharacterTextSplitter(
-        #     chunk_size=512,  # 推荐 Chunk 大小
-        #     chunk_overlap=50, # 推荐重叠大小
-        #     separators=["\n\n", "\n", ".", "!", "?", "\n", " "], # 优先级：段落 -> 句子 -> 单词 -> 字符
-        #     length_function=len # 默认按字符数，也可配置为按 token 数
-        # )
+        self.node_parser = SentenceSplitter( 
+            chunk_size=512,  
+            chunk_overlap=50, 
+        )
 
         logger.info("IndexerService initialized.")
 
@@ -87,38 +85,87 @@ class IndexerService:
         将文档添加到指定 collection 的索引中。
         如果索引不存在，则初始化；如果存在，则插入新文档。
         此方法会确保所有文档通过 embedding_model 向量化并入库。
+        对于 PDF 表格行 (document_type="PDF_Table_Row")，它们将作为独立的节点直接入库。
+        对于其他文档类型，将使用 SentenceSplitter 进行 chunking。
         """
         logger.info(f"Adding {len(documents)} documents to index for collection: '{collection_name}'...")
+        if not documents:
+            logger.warning("No LlamaDocuments provided for indexing. Skipping.")
+            return self._get_or_load_index(collection_name) # 返回现有索引或None
+        logger.info(f"Received {len(documents)} raw LlamaDocuments for collection: '{collection_name}'.")
+        all_nodes_to_add: List[TextNode] = [] # <--- 新增：用于收集最终 TextNode 的列表
+
+        for doc in documents: # 遍历 CamelotPDFReader 或 SimpleDirectoryReader 返回的原始 LlamaDocument
+            doc_type = doc.metadata.get("document_type")
+            
+            if doc_type == "PDF_Table_Row":
+                # 如果是 PDF 表格行，它已经被 CamelotPDFReader 精心切分，直接作为 TextNode
+                node = TextNode(
+                    id_=doc.id_, # 保留原始 Document 的 ID
+                    text=doc.text,
+                    metadata=doc.metadata # 保留所有元数据
+                )
+                all_nodes_to_add.append(node)
+                logger.debug(f" [Indexer] Directly adding PDF_Table_Row node (ID: {node.id_}): '{node.text[:80]}...'")
+            else:
+                # 对于其他文档类型（包括 PDF_Text），使用 node_parser 进行细粒度 chunking
+                # LlamaIndex 的 node_parser 接受 Documents 列表，返回 TextNode 列表
+                split_nodes = self.node_parser.get_nodes_from_documents([doc]) 
+                
+                for node in split_nodes:
+                    # 确保 extra_info 是可修改的字典
+                    if not isinstance(node.extra_info, dict):
+                        node.extra_info = {}
+                    
+                    # 合并原始文档的元数据到 TextNode 的 extra_info
+                    # LlamaIndex 的 node_parser 会自动将 LlamaDocument.metadata 复制到 TextNode.extra_info
+                    # 这里主要处理 any list-type metadata to JSON string，确保 ChromaDB 兼容
+                    for key, value in node.extra_info.items():
+                        if isinstance(value, list):
+                            try:
+                                node.extra_info[key] = json.dumps(value) 
+                            except TypeError:
+                                logger.error(f" [Indexer] Failed to JSON serialize metadata key '{key}' with value '{value}'. Keeping original.")
+                    
+                    all_nodes_to_add.append(node)
+                    logger.debug(f" [Indexer] Adding chunked node (ID: {node.id_}, Type: {doc_type}): '{node.text[:80]}...'")
+
+        logger.info(f" [Indexer] Original {len(documents)} documents processed into {len(all_nodes_to_add)} final nodes for indexing.")
+
         # 尝试获取现有索引
         index = self._get_or_load_index(collection_name)
 
         if index is None:
-            logger.info(f"Index for '{collection_name}' not found/loadable. Initializing a new one.")
+            logger.info(f" [Indexer] Index for '{collection_name}' not found/loadable. Initializing a new one.")
             collection = self.chroma_client.get_or_create_collection(name=collection_name)
             vector_store = ChromaVectorStore(chroma_collection=collection)
             storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
 
             new_index = VectorStoreIndex.from_documents(
-                # documents=all_nodes_to_add,
-                documents=documents,
+                documents=all_nodes_to_add, # <--- 关键：传入处理过的 TextNode 列表
                 storage_context=storage_context,
-                embed_model=self.embedding_model
+                embed_model=self.embedding_model, # 确保使用正确的 embedding model
+                # LlamaIndex 0.12.x 在 from_documents 传入 TextNode 时，不会再自动调用 node_parser
+                # 它会直接将 TextNode 视为最终节点。
+                # 如果传入的是 LlamaDocument，且没有显式指定 node_parser，它会用默认的。
+                # 但我们现在是传入 TextNode，所以行为是确定的。
             )
-            logger.info(f"New index for '{collection_name}' initialized successfully.")
+            logger.info(f" [Indexer] New index for '{collection_name}' initialized successfully.")
             index = new_index
         else:
-            logger.info(f"Index for '{collection_name}' already exists. Inserting new documents.")
-            # for idx, doc in enumerate(all_nodes_to_add):
-            for idx, doc in enumerate(documents):
+            logger.info(f" [Indexer] Index for '{collection_name}' already exists. Inserting new nodes.")
+            # 遍历并插入经过处理的 TextNode 列表
+            for idx, node in enumerate(all_nodes_to_add): # <--- 关键：遍历 all_nodes_to_add
                 try:
-                    index.insert(doc) # LlamaIndex insert 会使用其关联的 embed_model
-                    logger.debug(f"✅ Inserted document {idx+1}: {doc.id_} - {doc.text[:80]}...")
+                    # 插入 TextNode 应该使用 insert_nodes，而不是 insert(doc)
+                    index.insert_nodes([node]) 
+                    logger.debug(f" [Indexer] ✅ Inserted node {idx+1}: {node.id_} - '{node.text[:80]}...'")
                 except Exception as e:
-                    logger.error(f"Failed to insert document {idx+1} into index: {e}", exc_info=True)
+                    logger.error(f" [Indexer] Failed to insert node {idx+1} into index: {e}", exc_info=True)
         
         # 持久化索引元数据（如 docstore）
         index.storage_context.persist(persist_dir=PERSIST_DIR)
-        logger.info(f"Index for '{collection_name}' updated and persisted.")
+        logger.info(f" [Indexer] Index for '{collection_name}' updated and persisted.")
         self.indices[collection_name] = index # 更新内存缓存
         return index
 

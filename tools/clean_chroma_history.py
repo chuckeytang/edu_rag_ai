@@ -8,7 +8,6 @@ from chromadb.config import Settings
 # 假设你的 settings 是从 core.config 导入的
 from core.config import settings 
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 CHROMA_PATH = settings.CHROMA_PATH # 确保这个路径正确

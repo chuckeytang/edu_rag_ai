@@ -14,12 +14,6 @@ if TYPE_CHECKING:
     from services.chat_history_service import ChatHistoryService
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG) 
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
 
 from typing import Any, AsyncGenerator, List, Union
 from llama_index.core.schema import Document as LlamaDocument, NodeWithScore, TextNode as LlamaTextNode, QueryBundle

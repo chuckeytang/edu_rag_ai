@@ -3,13 +3,10 @@ from core.config import settings
 from api.api_v1 import api_router
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-
-# 全局日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+from core.logging_config import setup_app_logging
+setup_app_logging(level=logging.INFO, log_file="logs/app.log")
+app_logger = logging.getLogger(__name__) 
+app_logger.info("Starting FastAPI application...")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -38,4 +35,4 @@ if __name__ == '__main__':
 
     import uvicorn
     # uvicorn.run 会使用上面刚刚配置好的日志设置
-    uvicorn.run('main:app', host="0.0.0.0", port=6006, reload=True)
+    uvicorn.run('main:app', host="0.0.0.0", port=6006, reload=False)

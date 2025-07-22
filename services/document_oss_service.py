@@ -19,7 +19,6 @@ from services.task_manager_service import TaskManagerService
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG) 
 
 class DocumentOssService:
     def __init__(self, 
@@ -98,44 +97,40 @@ class DocumentOssService:
             self.task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
             
             # --- 2. 加载原始 LlamaDocument ---
-            loaded_original_docs: List[LlamaDocument] = []
-            
-            # 根据文件类型决定加载方式
-            file_extension_lower = os.path.splitext(local_file_path)[1].lower()
-
-            if file_extension_lower == '.pdf':
-                # 使用自定义的 CamelotPDFReader 处理 PDF
-                # 注意：这里不再使用 preserve_metadata 参数，因为由自定义加载器处理元数据
-                # 你可以根据需要调整 flavor 和 table_settings
-                reader = CamelotPDFReader(
-                    flavor='stream', # 或者 'lattice'
-                    table_settings={'edge_tol': 50}, # 示例参数，根据PDF表格结构调整
-                    extract_text_also=True, # 确保也提取非表格文本
-                    chunk_tables_by_row=True # 是否按行切分表格
+            custom_file_extractor = {
+                ".pdf": CamelotPDFReader(
+                    flavor='lattice', # 或 'lattice'
+                    table_settings={'edge_tol': 50},
+                    extract_text_also=True,
+                    chunk_tables_by_row=True 
                 )
-                loaded_original_docs = reader.load_data(file=local_file_path, extra_info={
-                    "original_file_key": file_key,
-                    "original_display_file_name": display_file_name,
-                    # 可以将其他需要保留的顶层元数据传递给extra_info
-                })
-            else:
-                # 对于其他文件类型，继续使用 SimpleDirectoryReader
-                # 注意：移除 preserve_metadata 参数，因为您的 llama-index 版本不支持
-                reader = SimpleDirectoryReader(input_files=[local_file_path], recursive=True)
-                loaded_original_docs = reader.load_data()
+            }
 
+            reader = SimpleDirectoryReader(
+                input_files=[local_file_path], 
+                recursive=True, 
+                file_extractor=custom_file_extractor
+            )
+            loaded_original_docs = reader.load_data()
+            
             if not loaded_original_docs:
                 raise ValueError("Could not load any documents from the provided file.")
-            
-            if file_extension_lower == '.pdf':
-                from pypdf import PdfReader
+
+            # 获取原始总页数（仅对PDF文件有效，从第一个Document的metadata中推断或重新读取）
+            total_pages = 1 # 默认值
+            file_extension_lower = os.path.splitext(local_file_path)[1].lower()
+            if file_extension_lower == '.pdf' and loaded_original_docs:
                 try:
+                    # 从原始PDF获取总页数，可能需要再次使用 pypdf
+                    from pypdf import PdfReader
                     pdf_reader_obj = PdfReader(local_file_path)
                     total_pages = len(pdf_reader_obj.pages)
                 except Exception:
-                    total_pages = 1 # 降级处理，如果无法读取PDF总页数
-            else:
-                total_pages = len(loaded_original_docs) # 对于非PDF文件，一个doc可能就是一页
+                    logger.warning(f"Could not determine total pages for PDF: {local_file_path}. Defaulting to 1.")
+                    total_pages = 1 # 降级处理
+            elif loaded_original_docs: # 对于非PDF文件，一个doc可能就是一页或更多
+                # 这是一个大致的页数，LlamaIndex默认会将单文件视为1页
+                total_pages = max([int(doc.metadata.get("page_label", 1)) for doc in loaded_original_docs if doc.metadata and doc.metadata.get("page_label")], default=1)
 
             # --- 3. 准备基础元数据并附加到每个 LlamaDocument 上 ---
             # 将顶层的 file_key 也添加到元数据中

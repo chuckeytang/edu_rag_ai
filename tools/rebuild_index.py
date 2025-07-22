@@ -3,12 +3,7 @@ import os
 import logging
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG) 
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+
 # Add project root to path to allow imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 

@@ -9,12 +9,6 @@ from services.document_service import DocumentService
 from services.query_service import QueryService
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG) 
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
     
 router = APIRouter()
 

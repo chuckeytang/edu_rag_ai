@@ -20,7 +20,6 @@ from services.oss_service import OssService
 from services.readers.camelot_pdf_reader import CamelotPDFReader
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG) 
 
 class AIExtractionService:
     def __init__(self,
@@ -64,11 +63,8 @@ class AIExtractionService:
                 file_extension_lower = os.path.splitext(local_file_path)[1].lower()
                 documents = []
                 if file_extension_lower == '.pdf':
-                    # 对于 AI 提取，通常需要整个文档的文本作为上下文
-                    # 所以 chunk_tables_by_row=False (不按行切分表格)
-                    # 并且 ensure extract_text_also=True (确保提取非表格文本)
                     reader = CamelotPDFReader(
-                        flavor='stream', # 或 'lattice'，取决于PDF表格类型
+                        flavor='lattice', # 或 'lattice'，取决于PDF表格类型
                         extract_text_also=True,
                         chunk_tables_by_row=False # AI提取通常需要完整上下文，将整个表格作为一个文本块
                     )

@@ -1,5 +1,5 @@
 # endpoints/extraction.py
-
+import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
@@ -9,6 +9,7 @@ from models.schemas import ExtractedDocumentMetadata, ExtractionRequest, Flashca
 from services.ai_extraction_service import AIExtractionService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # --- 元数据提取 API ---
 @router.post("/extract_metadata", response_model=ExtractedDocumentMetadata, summary="从文档或文本中提取元数据")

@@ -21,12 +21,6 @@ router = APIRouter()
 import logging
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG) 
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
 
 # ---- 单文件上传保持你刚改好的版本 ----
 @router.post("/upload", response_model=UploadResponse)
