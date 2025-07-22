@@ -100,46 +100,60 @@ def get_node(chroma_id: str,
         "text":      res["documents"][0],
     }
 
+
 @router.post("/retrieve-with-filters", summary="[DEBUG] 测试带过滤的节点召回")
-def debug_retrieve_with_filters(request: QueryRequest,
-                                query_service: QueryService = Depends(get_query_service),
-                                indexer_service: IndexerService = Depends(get_indexer_service)):
+def debug_retrieve_with_filters(request: QueryRequest, # 确保这里的 QueryRequest 包含了 target_file_ids
+                            query_service: QueryService = Depends(get_query_service),
+                            indexer_service: IndexerService = Depends(get_indexer_service)):
     """
     一个用于调试的端点。
     它只执行召回步骤，并返回召回的节点列表及其元数据，
     帮助您确认Filter是否按预期工作。
     """
     try:
+        # 创建一个可变的 filters 字典，以便合并
+        combined_filters = request.filters.copy() if request.filters else {}
+
+        if request.target_file_ids:
+            try:
+                material_ids_int = [int(mid) for mid in request.target_file_ids]
+                # 将 target_file_ids 合并到 material_id 过滤器中
+                if "material_id" in combined_filters and isinstance(combined_filters["material_id"], dict) and "$in" in combined_filters["material_id"]:
+                    current_material_ids = combined_filters["material_id"]["$in"]
+                    combined_filters["material_id"]["$in"] = list(set(current_material_ids + material_ids_int))
+                else:
+                    combined_filters["material_id"] = {"$in": material_ids_int}
+            except ValueError:
+                logger.warning("Debug endpoint: Invalid material_id in target_file_ids. Ignoring file filter.")
+
         retrieved_nodes = query_service.retrieve_with_filters(
             question=request.question,
             collection_name=request.collection_name,
-            filters=request.filters,
+            filters=combined_filters, # <--- 传递合并后的 filters
             similarity_top_k=request.similarity_top_k
         )
-        
-        # 将召回的节点信息格式化后返回
+
+        # ... (后续的 results 格式化和返回逻辑保持不变)
         results = []
         for node_with_score in retrieved_nodes:
             current_node_metadata = node_with_score.node.metadata 
 
             try:
                 col = indexer_service.chroma_client.get_collection(name=request.collection_name)
-                # 再次通过 ID 查询，确认 metadata 是否最新
                 latest_meta_from_db = col.get(ids=[node_with_score.node.node_id], include=["metadatas"])['metadatas'][0]
-                # logger.info(f"DEBUG: Node ID {node_with_score.node.node_id}, LlamaIndex metadata: {current_node_metadata}, DB metadata: {latest_meta_from_db}")
                 current_node_metadata = latest_meta_from_db
             except Exception as debug_e:
                 logger.error(f"DEBUG: Failed to get latest metadata from DB for {node_with_score.node.node_id}: {debug_e}")
-            
+
             results.append({
                 "score": node_with_score.score,
                 "node_id": node_with_score.node.node_id,
                 "text_snippet": node_with_score.get_text()[:300] + "...",
                 "metadata": current_node_metadata
             })
-            
+
         return results
-        
+
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
