@@ -71,7 +71,6 @@ class AIExtractionService:
                     documents = reader.load_data(file=local_file_path)
                 else:
                     # 对于其他文件类型，继续使用 SimpleDirectoryReader
-                    # 注意：这里 SimpleDirectoryReader 不再接受 preserve_metadata
                     reader = SimpleDirectoryReader(input_files=[local_file_path])
                     documents = reader.load_data()
                 
