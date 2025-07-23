@@ -35,4 +35,4 @@ if __name__ == '__main__':
 
     import uvicorn
     # uvicorn.run 会使用上面刚刚配置好的日志设置
-    uvicorn.run('main:app', host="0.0.0.0", port=6006, reload=False)
+    uvicorn.run('main:app', host="0.0.0.0", port=8000, reload=False)

@@ -63,6 +63,7 @@ llama-index-llms-openai-like==0.3.4
 llama-index-multi-modal-llms-openai==0.4.3
 llama-index-program-openai==0.3.1
 llama-index-question-gen-openai==0.3.0
+llama-index-readers-file==0.4.6
 llama-index-readers-llama-parse==0.4.0
 llama-index-vector-stores-chroma==0.4.1
 llama-parse==0.6.4.post1
@@ -149,7 +150,5 @@ wheel==0.45.1
 wrapt==1.17.2
 yarl==1.18.3
 zipp==3.21.0
-camelot-py==1.0.0
-ghostscript==0.8.1
 torch==2.7.1
 sentence-transformers==5.0.0
