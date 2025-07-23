@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Depends, status
 from typing import Dict, Any
 
-from models.schemas import AddChatMessageRequest, DeleteChatMessagesRequest, UpdateChatMessageRequest # 从统一的 schemas 文件导入
+from models.schemas import AddChatMessageRequest, DeleteChatMessagesRequest, UpdateChatMessageRequest 
 from services.chat_history_service import ChatHistoryService
 from api.dependencies import get_chat_history_service
 import logging

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from api.dependencies import get_query_service
 from services.query_service import QueryService
-from models.schemas import ChatQueryRequest, QueryRequest, QueryResponse, QueryResponseNode, StreamChunk, StreamingResponseWrapper
+from models.schemas import ChatQueryRequest, QueryResponse, QueryResponseNode, StreamChunk, StreamingResponseWrapper
 from fastapi.responses import StreamingResponse
 import logging
 

@@ -7,7 +7,7 @@ from services.indexer_service import IndexerService
 logger = logging.getLogger(__name__)
 
 from typing import Any, Dict, List, Optional
-from models.schemas import QueryRequest
+from models.schemas import ChatQueryRequest
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from services.query_service import QueryService  
@@ -75,7 +75,7 @@ def list_indexed(
                     "metadata": meta,
                     "file_name": meta.get("file_name") or node_content_meta.get("file_name"), 
                     "page_label": meta.get("page_label") or node_content_meta.get("page_label"), 
-                    "text_snippet": (doc or "")[:200] + ("..." if doc and len(doc) > 200 else "")
+                    "text": doc
                 }
                 items.append(formatted_item)
             else:
@@ -124,7 +124,7 @@ def list_indexed(
                 "metadata": meta,
                 "file_name": current_file_name, # 返回时使用已处理的
                 "page_label": meta.get("page_label") or node_content_meta.get("page_label"),
-                "text_snippet": (doc or "")[:200] + ("..." if doc and len(doc) > 200 else "")
+                "text": doc
             })
             
             if len(items) >= limit:
@@ -163,7 +163,7 @@ def get_node(chroma_id: str,
 
 
 @router.post("/retrieve-with-filters", summary="[DEBUG] 测试带过滤的节点召回")
-def debug_retrieve_with_filters(request: QueryRequest, # 确保这里的 QueryRequest 包含了 target_file_ids
+def debug_retrieve_with_filters(request: ChatQueryRequest, 
                             query_service: QueryService = Depends(get_query_service),
                             indexer_service: IndexerService = Depends(get_indexer_service)):
     """
@@ -190,7 +190,7 @@ def debug_retrieve_with_filters(request: QueryRequest, # 确保这里的 QueryRe
         retrieved_nodes = query_service.retrieve_with_filters(
             question=request.question,
             collection_name=request.collection_name,
-            filters=combined_filters, # <--- 传递合并后的 filters
+            filters=combined_filters, 
             similarity_top_k=request.similarity_top_k
         )
 

@@ -154,3 +154,5 @@ zipp==3.21.0
 camelot-py==1.0.0
 ghostscript==0.8.1
 pypdf>=4.0.0
+torch==2.7.1
+sentence-transformers==5.0.0

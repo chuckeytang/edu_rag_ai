@@ -12,6 +12,9 @@ from llama_index.core.embeddings import BaseEmbedding
 from llama_cloud import TextNode
 from llama_index.core.llms import LLM
 from llama_index.core.node_parser import SentenceSplitter 
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.storage.index_store import SimpleIndexStore
+from llama_index.core.storage.kvstore import SimpleKVStore
 
 import chromadb
 from chromadb.config import Settings
@@ -36,45 +39,90 @@ class IndexerService:
             chunk_size=512,  
             chunk_overlap=50, 
         )
+        os.makedirs(PERSIST_DIR, exist_ok=True)
 
         logger.info("IndexerService initialized.")
 
     def _get_or_load_index(self, collection_name: str) -> Optional[VectorStoreIndex]:
-        """
-        按需加载或获取指定 collection 的 LlamaIndex 索引对象。
-        1. 检查内存缓存。
-        2. 如果不在缓存，尝试从 ChromaDB 和本地存储加载。
-        3. 如果加载失败，则从 ChromaDB VectorStore 重建 Index 对象。
-        """
         if collection_name in self.indices:
             logger.info(f"Returning cached index for collection: '{collection_name}'.")
             return self.indices[collection_name]
 
+        collection = None
+        vector_store = None
+        
+        # --- 步骤 1: 确保 ChromaDB Collection 可用 ---
         try:
             logger.info(f"Checking for collection '{collection_name}' in ChromaDB...")
             collection = self.chroma_client.get_or_create_collection(name=collection_name)
             vector_store = ChromaVectorStore(chroma_collection=collection)
-            storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
             logger.info(f"Collection '{collection_name}' found/created in ChromaDB.")
-
         except Exception as e:
-            logger.warning(f"Failed to get or create collection '{collection_name}' in ChromaDB: {e}", exc_info=True)
-            return None # 无法获取 Collection 则无法创建 Index
+            logger.error(f"Failed to get or create collection '{collection_name}' in ChromaDB: {e}", exc_info=True)
+            return None # 如果 ChromaDB 本身就无法连接或创建 Collection，则无法继续
 
-        try:
-            index = load_index_from_storage(storage_context=storage_context, embed_model=self.embedding_model)
-            logger.info(f"Successfully loaded index metadata for collection '{collection_name}' from '{PERSIST_DIR}'.")
-        except Exception as e:
-            logger.warning(f"Could not load LlamaIndex metadata from '{PERSIST_DIR}' for collection '{collection_name}'. Error: {e}")
-            logger.info(f"Reconstructing index object from existing VectorStore for '{collection_name}' (metadata might be missing)...")
-            # 如果本地元数据丢失，从现有 VectorStore 重建索引对象
+        index = None
+        
+        # --- 步骤 2: 尝试从本地持久化存储加载 StorageContext 和 Index ---
+        docstore_path = os.path.join(PERSIST_DIR, "docstore.json")
+        index_store_path = os.path.join(PERSIST_DIR, "index_store.json")
+
+        load_from_disk_success = False
+        storage_context_from_disk = None # 声明在这里，以便在重建时使用
+
+        if os.path.exists(docstore_path) and os.path.exists(index_store_path):
+            try:
+                # 额外检查文件是否为空
+                if os.path.getsize(docstore_path) > 0 and os.path.getsize(index_store_path) > 0:
+                    # 只有当文件存在且不为空时，才尝试从本地路径创建 storage_context
+                    # 这行不会引发 FileNotFoundError，因为它前面已经检查了文件是否存在
+                    storage_context_from_disk = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
+                    index = load_index_from_storage(storage_context=storage_context_from_disk, embed_model=self.embedding_model)
+                    logger.info(f"Successfully loaded index metadata for collection '{collection_name}' from '{PERSIST_DIR}'.")
+                    load_from_disk_success = True
+                else:
+                    logger.warning(f"Local LlamaIndex metadata files found but are empty. Will reconstruct index for '{collection_name}'.")
+            except Exception as e: # 捕获加载过程中的其他错误，例如文件损坏
+                logger.warning(f"Could not load LlamaIndex metadata from '{PERSIST_DIR}' for collection '{collection_name}' (Error during load: {e}).", exc_info=True)
+                logger.warning(f"Will reconstruct index object from existing VectorStore for '{collection_name}'.")
+        else:
+            logger.info(f"Local LlamaIndex metadata files (docstore.json, index_store.json) not found. Will reconstruct index for '{collection_name}'.")
+
+        # --- 步骤 3: 如果未能从磁盘加载，则从 VectorStore 重建 Index ---
+        if not load_from_disk_success:
+            logger.info(f"Creating a new StorageContext and reconstructing index object from existing VectorStore for '{collection_name}'.")
+            
+            # 手动实例化空的存储组件，而不是从文件加载
+            # 这确保了即使文件不存在，也不会抛出 FileNotFoundError
+            docstore = SimpleDocumentStore()
+            index_store = SimpleIndexStore()
+            
+            # 使用手动创建的存储组件来创建 StorageContext
+            storage_context = StorageContext.from_defaults(
+                vector_store=vector_store, 
+                docstore=docstore, 
+                index_store=index_store, 
+            )
+            
             index = VectorStoreIndex.from_vector_store(
                 vector_store=vector_store,
                 embed_model=self.embedding_model,
-                storage_context=storage_context # 即使重建也传入，以便它能保存新的元数据
+                storage_context=storage_context # 传入 StorageContext，以便它能保存新的元数据
             )
-            logger.info(f"Successfully reconstructed index from VectorStore for '{collection_name}'.")
+            
+            # 重建后，立即持久化，确保本地文件被创建
+            try:
+                index.storage_context.persist(persist_dir=PERSIST_DIR)
+                logger.info(f"Successfully reconstructed and persisted index metadata for '{collection_name}'.")
+            except Exception as e:
+                logger.error(f"Failed to persist reconstructed index for '{collection_name}': {e}", exc_info=True)
+                logger.warning(f"Returning index in memory, but persistence may be an issue.")
         
+        # 确保 index 不为 None
+        if index is None:
+            logger.error(f"Failed to load or reconstruct index for collection '{collection_name}'. Returning None.")
+            return None
+
         self.indices[collection_name] = index
         return index
 
@@ -93,7 +141,7 @@ class IndexerService:
             logger.warning("No LlamaDocuments provided for indexing. Skipping.")
             return self._get_or_load_index(collection_name) # 返回现有索引或None
         logger.info(f"Received {len(documents)} raw LlamaDocuments for collection: '{collection_name}'.")
-        all_nodes_to_add: List[TextNode] = [] # <--- 新增：用于收集最终 TextNode 的列表
+        all_nodes_to_add: List[TextNode] = [] 
 
         for doc in documents: # 遍历 CamelotPDFReader 或 SimpleDirectoryReader 返回的原始 LlamaDocument
             doc_type = doc.metadata.get("document_type")

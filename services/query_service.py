@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -26,9 +27,9 @@ from llama_index.core.llms import LLM
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.query_engine import RetrieverQueryEngine # Import RetrieverQueryEngine
 from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.postprocessor import SentenceTransformerRerank 
+import torch 
 
-# from llama_index.cura import CURARetriever
-# print(CURARetriever)
 from core.config import Settings, settings
 from models.schemas import ChatQueryRequest, StreamChunk
 from typing import List, Dict
@@ -37,9 +38,6 @@ import chromadb
 PERSIST_DIR = settings.INDEX_PATH
 
 try:
-    # 尝试加载 Qwen 模型专用的 tokenizer，如果 DashScope SDK 提供
-    # 注意：LlamaIndex 的 DashScope LLM 对象可能不直接暴露 tokenizer，
-    # 考虑直接使用 dashscope 库或 tiktoken 估算
     _tokenizer = tiktoken.get_encoding("cl100k_base") 
     logger.info("Using tiktoken 'cl100k_base' for token counting estimation.")
 except Exception as e:
@@ -56,15 +54,10 @@ class CustomRetriever(BaseRetriever):
         self._nodes = nodes
     
     async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-        # 异步方法，现在接受 QueryBundle 对象
-        # logger.debug(f"CustomRetriever: _aretrieve called for query '{query_bundle.query_str[:50]}...'. Returning {len(self._nodes)} pre-set nodes.")
-        # LlamaIndex 内部会自动从 query_bundle.query_str 获取查询字符串
-        # 在这里我们只是返回预设的节点，所以 query_bundle 实际用处不大，但必须接受
         logger.debug(f"CustomRetriever: _aretrieve called for query '{query_bundle.query_str[:50]}...'. Returning {len(self._nodes)} pre-set nodes.")
         return self._nodes
     
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-        # 同步方法，现在接受 QueryBundle 对象
         logger.debug(f"CustomRetriever: _retrieve called for query '{query_bundle.query_str[:50]}...'. Returning {len(self._nodes)} pre-set nodes.")
         return self._nodes
     
@@ -89,6 +82,15 @@ class QueryService:
 
         # 保存 chat_history_service 实例
         self._chat_history_service = chat_history_service
+
+        # 这里实例化 Reranker，它会在整个服务生命周期内存在
+        self.reranker_top_n_fixed = 5
+        self.reranker = SentenceTransformerRerank(
+            model="BAAI/bge-reranker-base", 
+            top_n=self.reranker_top_n_fixed, # <--- 这里使用一个固定的、足够大的值
+            device="cuda" if torch.cuda.is_available() else "cpu" 
+        )
+        logger.info(f"Initialized SentenceTransformerRerank with model '{self.reranker.model}' on device '{self.reranker.device}' and fixed top_n={self.reranker_top_n_fixed}.")
         
     def _get_or_load_index(self, collection_name: str) -> VectorStoreIndex:
         """
@@ -111,16 +113,20 @@ class QueryService:
         # 1. 创建一个Retriever，配置和查询时完全一样
         retriever = index.as_retriever(
             vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=similarity_top_k
+            similarity_top_k=similarity_top_k * 3
         )
         
-        # 2. 执行召回
         retrieved_nodes = retriever.retrieve(question)
-        
         logger.info(f"[DEBUG] Retriever found {len(retrieved_nodes)} nodes matching the criteria.")
-        
-        # 3. 返回召回的原始节点
-        return retrieved_nodes
+
+        query_bundle_for_rerank = QueryBundle(query_str=question)
+        final_retrieved_nodes = self.reranker.postprocess_nodes(
+            retrieved_nodes, 
+            query_bundle=query_bundle_for_rerank
+        )
+        logger.info(f"[DEBUG] Reranker returned {len(final_retrieved_nodes)} nodes after reranking.")
+
+        return final_retrieved_nodes
 
     def _build_chroma_where_clause(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -191,32 +197,43 @@ class QueryService:
     @property
     def default_qa_prompt(self) -> PromptTemplate:
         return PromptTemplate(
-            # === 将聊天历史上下文放在最前面 ===
-            "{chat_history_context}" 
-            "You are an advanced academic AI assistant specializing in high school curricula (IB, A-Level, AP, IGCSE, etc.). "
-            "Your task is to provide clear, elegant, and academically accurate responses based **only** on the provided context and documents.\n"
+            "{chat_history_context}"
+            "You are an advanced, highly specialized Academic AI Assistant for high school curricula (IB, A-Level, AP, IGCSE, etc.). "
+            "Your SOLE purpose is to provide precise, academically rigorous, and impeccably accurate responses that are "
+            "**EXCLUSIVELY derived from the 'Document content' provided below.**\n"
             "\n"
-            "--- Your Response Guidelines ---\n"
-            "1. **Accuracy & Fact-based**: Adhere strictly to the provided 'Document content'. **Never guess or invent information.**\n"
-            "   - **If the information is missing, ambiguous, or if you cannot answer based *solely* on the provided documents, state clearly: 'I cannot find enough information in the provided documents to answer this question.' Do not attempt to answer if the context is insufficient.**\n"
-            "2. **Concise & Elegant**: Use polished, academic language. Avoid verbosity or repetition.\n"
-            "3. **Formatting**: Use section headers, bullet points, or Q&A structures for clarity. Avoid dense paragraphs.\n"
-            "4. **Language**: Primarily respond in English. If the user's query includes Chinese, you may add short, clarifying Chinese phrases naturally, but keep English as the main language.\n"
-            "5. **Target Audience**: Tailor your answer for motivated high school students, prioritizing clarity and depth.\n"
+            "--- ABSOLUTE Response Guidelines ---\n"
+            "1.  **Source Adherence (CRITICAL)**: "
+            "    - Your answer MUST be constructed *entirely* and *only* from the factual information presented in the 'Document content'.\n"
+            "    - **ABSOLUTELY DO NOT** use any external knowledge, pre-trained data, inferences, or assumptions.\n"
+            "    - **DO NOT** provide any explanations, clarifications, examples, or supplementary details that are not directly and explicitly found in the 'Document content'.\n"
+            "    - If the 'Document content' is insufficient, ambiguous, or does not contain the answer, you MUST state verbatim: "
+            "      'I cannot find enough information in the provided documents to answer this question.' DO NOT provide any other answer or guess.\n"
+            "2.  **Precision & Conciseness**: Deliver information with academic elegance. Avoid verbose language, redundant phrases, or conversational filler. **Get straight to the answer.**\n"
+            "3.  **Formatting**: Use clear formatting (e.g., bullet points, bolding) only if it directly aids clarity for the *extracted content*. Avoid dense paragraphs. **If the answer is a simple definition, provide only the definition.**\n"
+            "4.  **Context Prioritization**: The 'Document content' is provided with source types (e.g., 'PDF_Table_Row', 'PDF_Text').\n"
+            "    - **Prioritize information from 'PDF_Table_Row' chunks** if they directly answer the query, as these are often precise, structured definitions or facts. Use them verbatim if appropriate.\n"
+            "    - Use 'PDF_Text' chunks to provide broader context or supplementary details *only if* they are directly relevant and do not duplicate information already provided by 'PDF_Table_Row' chunks. Avoid repeating information.\n"
+            "    - Your goal is to synthesize information from all relevant sources without redundancy, always favoring the most precise and direct answer.\n"
+            "5.  **Language Protocol**: Your primary response language is English. If the user's query includes Chinese, you may include brief, contextually relevant Chinese phrases naturally, but English must remain the dominant language.\n"
+            "6.  **Audience**: Formulate responses for highly motivated high school students, prioritizing clarity and direct relevance.\n"
             "\n"
             "--- Tone ---\n"
-            "Academic, supportive, focused, efficient.\n"
+            "Academic, precise, authoritative, focused, objective, and **direct**.\n"
             "\n"
-            "--- Specific Instructions ---\n"
-            "If the query is an exam question (e.g., '6(b)(ii)'): first briefly describe its content, then identify relevant syllabus knowledge from the documents, and finally provide a clear, step-by-step response.\n"
+            "--- Specific Task Instructions ---\n"
+            "If the query is an exam question format (e.g., '6(b)(ii)' or similar numbering/lettering): "
+            "    1. Briefly summarize the core request of the exam question *based only on the query itself*.\n"
+            "    2. Identify and reference the relevant syllabus knowledge or factual points *directly and verbatim from the 'Document content'*.\n"
+            "    3. Provide a clear, step-by-step, and concise response to the exam question, based *only* on the identified knowledge from the document.\n"
             "\n"
-            "Document content: {context_str}\n" # RAG 检索到的文档内容
-            "Query: {query_str}" # 用户当前的问题
+            "Document content: {context_str}\n"
+            "Query: {query_str}\n"
+            "Answer:"
         )
             
     @property
     def general_chat_prompt(self) -> PromptTemplate:
-        # 新增一个通用聊天提示词，不依赖任何文档内容
         return PromptTemplate(
             "{chat_history_context}"
             "You are a friendly and helpful AI assistant. Respond to the user's query naturally. If the query is a general greeting or does not require specific knowledge, respond in a conversational manner. If the user asks for academic information, but no relevant documents are found, you may state that you are an academic assistant but cannot find specific information on that topic. Always maintain a polite and supportive tone.\n"
@@ -242,7 +259,7 @@ class QueryService:
                     top_k=request.similarity_top_k or 5
                 )
                 if chat_history_context_nodes:
-                    chat_history_context_string = "以下是与您当前问题相关的历史对话片段：\n" + \
+                    chat_history_context_string = "The following are excerpts from a historical conversation relevant to your current problem:\n" + \
                                                   "\n".join([f"[{node.metadata.get('role', '未知')}]: {node.text}" for node in chat_history_context_nodes]) + \
                                                   "\n---\n"
                 logger.info(f"Chat history context: \n{chat_history_context_string}")
@@ -257,7 +274,7 @@ class QueryService:
         if not rag_index:
             logger.error(f"RAG collection '{request.collection_name}' does not exist or could not be loaded.")
             error_chunk_json = StreamChunk(content="抱歉，知识库未准备好，请稍后再试。", is_last=True).json()
-            yield f"data: {error_chunk_json}\n\n".encode("utf-8") # <--- 直接返回完整 SSE 格式的 bytes
+            yield f"data: {error_chunk_json}\n\n".encode("utf-8") 
             return
 
         combined_rag_filters = request.filters if request.filters else {}
@@ -268,7 +285,7 @@ class QueryService:
             try:
                 material_ids_int = [int(mid) for mid in request.target_file_ids]
                 # Store the original string IDs for the metadata
-                final_referenced_material_ids = request.target_file_ids # <--- Collect the string IDs here
+                final_referenced_material_ids = request.target_file_ids 
                 
                 if "material_id" in combined_rag_filters and isinstance(combined_rag_filters["material_id"], dict) and "$in" in combined_rag_filters["material_id"]:
                     current_material_ids = combined_rag_filters["material_id"]["$in"]
@@ -283,13 +300,11 @@ class QueryService:
         logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
 
 
-        # --- 根据 Java 侧指示，生成会话标题 ---
         generated_title = ""
         # 直接使用 Java 侧传递的 is_first_query 字段来判断是否生成标题
-        if request.is_first_query: # <--- 字段名修改为 is_first_query
+        if request.is_first_query: 
             logger.info("Attempting to generate session title as requested by Java side (is_first_query is True).")
             try:
-                # ... (标题生成逻辑保持不变)
                 title_query_engine = rag_index.as_query_engine(
                     llm=self.llm,
                     vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
@@ -312,15 +327,15 @@ class QueryService:
         # --- 召回文档 ---
         retriever = rag_index.as_retriever(
             vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=request.similarity_top_k or 5
+            similarity_top_k=(request.similarity_top_k or 5) * 3 # 初始召回更多节点，例如3倍，以便 Reranker 有更多选择
         )
         logger.info(f"RAG Retriever query clause: {chroma_where_clause}") 
+
         retrieved_nodes = await retriever.aretrieve(request.question)
-        original_retrieved_nodes_count = len(retrieved_nodes) # 记录原始召回数量
+        original_retrieved_nodes_count = len(retrieved_nodes) 
         logger.info(f"Retrieved {original_retrieved_nodes_count} chunks for query: '{request.question[:50]}...'")
 
-        # --- 核心修改：如果 0 召回，注入虚拟节点 ---
-        current_retrieved_nodes = list(retrieved_nodes) # 复制一份，确保可修改
+        current_retrieved_nodes = list(retrieved_nodes) 
         
         if original_retrieved_nodes_count == 0:
             logger.info("No documents retrieved. Adding a virtual 'NO_RELEVANT_DOCUMENTS_FOUND' node for LLM context.")
@@ -328,22 +343,45 @@ class QueryService:
             virtual_node = LlamaTextNode(text=virtual_node_content, metadata={"source": "virtual_fallback", "type": "no_document_found"})
             virtual_node_with_score = NodeWithScore(node=virtual_node, score=0.0)
             current_retrieved_nodes.append(virtual_node_with_score) 
-        # -------------------------------------------------------------------------------------
-
-        # 构建发送给 LLM 的 context_str，它现在可能包含虚拟节点的内容
-        context_str_for_llm = "\n\n".join([n.get_content() for n in current_retrieved_nodes])
-
-        final_qa_prompt_template = self._create_qa_prompt(request.prompt) 
+            
+        # LlamaIndex 0.12.x series, rerankers typically take a query_bundle
+        query_bundle_for_rerank = QueryBundle(query_str=request.question)
         
+        # 1. 实例化 Reranker (如果还没有在 __init__ 中实例化的话，但我们已经移到 __init__)
+        # 这里使用 self.reranker
+        
+        # 2. 应用 Reranker
+        # postprocess_nodes 方法接收 QueryBundle 和 NodeWithScore 列表
+        logger.info(f"Applying reranker to {len(current_retrieved_nodes)} nodes...")
+        final_retrieved_nodes = self.reranker.postprocess_nodes(
+            current_retrieved_nodes, 
+            query_bundle=query_bundle_for_rerank
+        )
+        logger.info(f"Reranker returned {len(final_retrieved_nodes)} nodes.")
+
+        context_parts = []
+        for n in final_retrieved_nodes: # 使用重排后的节点列表
+            doc_type = n.node.metadata.get("document_type", "Unknown")
+            page_label = n.node.metadata.get("page_label", "N/A")
+            file_name = n.node.metadata.get("file_name", "N/A")
+            # 格式化上下文，让 LLM 知道每个片段的来源和类型
+            context_parts.append(
+                f"--- Document Content (Type: {doc_type}, Page: {page_label}, File: {file_name}) ---\n"
+                f"{n.get_content()}\n"
+                f"--------------------------------------------------------------------------------"
+            )
+        context_str_for_llm = "\n\n".join(context_parts)
+
+        # --- 主 RAG 查询 LLM ---
         llm_response_obj = None 
         for attempt in range(max_retries):
             try:
-                # 重新构建完整的 PromptTemplate，确保 context_str 被正确传入
-                final_prompt_for_llm = final_qa_prompt_template.format(
+                final_prompt_for_llm = self.qa_prompt.format( # 使用 self.qa_prompt，因为它会调用 _create_qa_prompt
                     chat_history_context=chat_history_context_string,
-                    context_str=context_str_for_llm, # 这里传入处理后的 context_str_for_llm
+                    context_str=context_str_for_llm, 
                     query_str=request.question
                 )
+                logger.info(f"final_prompt_for_llm {final_prompt_for_llm}.")
 
                 if _tokenizer:
                     token_count = len(_tokenizer.encode(final_prompt_for_llm))
@@ -352,10 +390,10 @@ class QueryService:
                     logger.warning("Tokenizer not available, skipping token count for LLM query.")
 
                 query_engine = RetrieverQueryEngine.from_args(
-                    retriever=CustomRetriever(current_retrieved_nodes), # 使用我们自定义的 Retriever
+                    retriever=CustomRetriever(final_retrieved_nodes), 
                     llm=self.llm,
                     streaming=True,
-                    text_qa_template=PromptTemplate(final_prompt_for_llm) # 传入完整的 prompt
+                    text_qa_template=PromptTemplate(final_prompt_for_llm) 
                 )
                 
                 llm_response_obj = await query_engine.aquery(request.question) 
@@ -380,7 +418,7 @@ class QueryService:
                                      f"Document Content: {context_str_for_llm}\n" 
                                      f"User Query: {request.question}\n"
                                      f"Full Prompt (first 500 chars): {final_prompt_for_llm[:500]}...")
-                        error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+                        error_chunk_json = StreamChunk(content="Sorry, AI did not generate a valid response, please try a different way to ask questions.", is_last=True).json()
                         yield f"data: {error_chunk_json}\n\n".encode("utf-8")
                         return
 
@@ -398,20 +436,42 @@ class QueryService:
                                  f"Document Content: {context_str_for_llm}\n" 
                                  f"User Query: {request.question}\n"
                                  f"Full Prompt (first 500 chars): {final_prompt_for_llm[:500]}...")
-                    error_chunk_json = StreamChunk(content="抱歉，查询过程中发生错误，请稍后再试。", is_last=True).json()
+                    error_chunk_json = StreamChunk(content="Sorry, an error occurred during the query. Please try again later.", is_last=True).json()
                     yield f"data: {error_chunk_json}\n\n".encode("utf-8")
                     return
 
         rag_sources_info = []
-        # 只有在有实际召回节点的情况下，才填充 rag_sources_info
-        # 这里使用 original_retrieved_nodes_count 来判断是否是真实召回
-        if original_retrieved_nodes_count > 0 and llm_response_obj and hasattr(llm_response_obj, 'source_nodes'):
-            for node in llm_response_obj.source_nodes:
-                rag_sources_info.append({
-                    "file_name": node.metadata.get("file_name", "未知文件"),
-                    "page_number": node.metadata.get("page_label", "未知页"),
-                    "material_id": node.metadata.get("material_id")
-                })
+        # === 基于 final_retrieved_nodes 来构建来源信息 ===
+        # 确保只包含实际的文档节点，排除虚拟节点
+        for node_with_score in final_retrieved_nodes:
+            node = node_with_score.node # 获取 LlamaIndex 节点对象
+            
+            # 过滤掉虚拟节点
+            if node.metadata.get("source") == "virtual_fallback" or \
+               node.metadata.get("document_type") == "no_document_found": # 确保捕获所有虚拟节点标识
+                continue
+                
+            # 确保 file_name 和 page_label 存在于 metadata 中，并处理可能的嵌套
+            file_name = node.metadata.get("file_name", "未知文件")
+            page_label = node.metadata.get("page_label", "未知页")
+            material_id = node.metadata.get("material_id")
+
+            # 如果 file_name 或 page_label 可能在 _node_content 的 metadata 中，需要解析
+            # 这与之前在 debug_index 中的逻辑类似
+            if '_node_content' in node.metadata and isinstance(node.metadata['_node_content'], str):
+                try:
+                    node_content_data = json.loads(node.metadata['_node_content'])
+                    node_content_meta = node_content_data.get('metadata', {})
+                    file_name = node_content_meta.get('file_name', file_name)
+                    page_label = node_content_meta.get('page_label', page_label)
+                except json.JSONDecodeError:
+                    pass
+
+            rag_sources_info.append({
+                "file_name": file_name,
+                "page_number": page_label,
+                "material_id": material_id # 确保 material_id 也被正确传递
+            })
         
         full_response_content = ""
         if llm_response_obj and hasattr(llm_response_obj, 'response_gen'):

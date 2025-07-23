@@ -65,9 +65,9 @@ class CamelotPDFReader(BaseReader):
         documents = []
         file_path = str(file)
         logger.info(f"[CamelotPDFReader] Loading data from file: {file_path}")
-        
-        # 提取表格
         extracted_tables_count = 0
+        extracted_pages_text_count = 0
+
         try:
             # 尝试使用 camelot 提取表格
             logger.debug(f"[CamelotPDFReader] Attempting to extract tables with flavor='{self.flavor}' and settings={self.table_settings}")
@@ -80,68 +80,71 @@ class CamelotPDFReader(BaseReader):
             extracted_tables_count = tables.n # 获取提取到的表格数量
             logger.info(f"[CamelotPDFReader] Found {extracted_tables_count} tables using camelot-py.")
             
-            for table_idx, table in enumerate(tables):
-                logger.debug(f"[CamelotPDFReader] Processing table {table_idx+1}/{extracted_tables_count} from page {table.page}.")
-                
-                table_bbox_str = "N/A_Error" # 默认值，如果无法获取
-                table_text_content = table.df.to_csv(index=False) # 始终在这里定义
+            if extracted_tables_count > 0: # 只有当识别到表格时才进入处理循环
+                for table_idx, table in enumerate(tables):
+                    logger.debug(f"[CamelotPDFReader] Processing table {table_idx+1}/{extracted_tables_count} from page {table.page}.")
+                    
+                    table_bbox_str = "N/A_Error" # 默认值，如果无法获取
+                    table_text_content = table.df.to_csv(index=False) # 始终在这里定义
 
-                try:
-                    x1, y1, x2, y2 = table._bbox
-                    table_bbox_str = f"({x1}, {y1}, {x2}, {y2})"
-                except AttributeError:
-                    logger.warning(f"[CamelotPDFReader] Table object has no 'bbox' attribute in version 1.0.0, trying alternative.")
-                    # 备用方案：检查 parsing_report 中是否有边界框信息
-                    if 'page_bbox' in table.parsing_report:
-                        table_bbox_str = str(table.parsing_report['page_bbox'])
-                    else:
-                        table_bbox_str = "N/A" # 如果实在没有，就标记为 N/A
-                except Exception as e:
-                    logger.warning(f"[CamelotPDFReader] Error accessing table.bbox or its components: {e}", exc_info=True)
-                    table_bbox_str = "Error_bbox" # 标记错误
-
-                # 构建元数据
-                metadata = {
-                    "file_path": file_path,
-                    "file_name": os.path.basename(file_path),
-                    "page_label": str(table.page), # Camelot 返回的是页码
-                    "table_index": table_idx,
-                    "table_bbox": table_bbox_str, # 表格在页面上的位置
-                    "document_type": "PDF_Table",
-                    **({} if extra_info is None else extra_info) # 合并额外信息
-                }
-
-                if self.chunk_tables_by_row:
-                    logger.debug(f"[CamelotPDFReader] Chunking table {table_idx+1} by row. Total rows: {len(table.df)}.")
-                    # 按行切分表格
-                    for row_idx, row in table.df.iterrows():
-                        # to_string() 默认会包含索引，我们只想要数据
-                        row_text = row.to_string(header=False, index=False) 
-                        
-                        # 确保提取的文本不为空白
-                        if row_text.strip():
-                            row_metadata = metadata.copy()
-                            row_metadata["row_index"] = row_idx
-                            row_metadata["document_type"] = "PDF_Table_Row" # 更细粒度的类型
-                            documents.append(Document(text=row_text, metadata=row_metadata))
-                            logger.debug(f"[CamelotPDFReader] Added table row chunk (Pg:{row_metadata['page_label']}, Table:{table_idx}, Row:{row_idx}): '{row_text.strip()[:100]}...'")
+                    try:
+                        x1, y1, x2, y2 = table._bbox
+                        table_bbox_str = f"({x1}, {y1}, {x2}, {y2})"
+                    except AttributeError:
+                        logger.warning(f"[CamelotPDFReader] Table object has no 'bbox' attribute in version 1.0.0, trying alternative.")
+                        # 备用方案：检查 parsing_report 中是否有边界框信息
+                        if 'page_bbox' in table.parsing_report:
+                            table_bbox_str = str(table.parsing_report['page_bbox'])
                         else:
-                            logger.debug(f"[CamelotPDFReader] Skipping empty table row chunk (Pg:{metadata['page_label']}, Table:{table_idx}, Row:{row_idx}).")
-                
-                else:
-                    logger.debug(f"[CamelotPDFReader] Adding entire table {table_idx+1} as one chunk.")
-                    # 将整个表格作为一个chunk
-                    documents.append(Document(text=table_text_content, metadata=metadata))
-                    logger.debug(f"[CamelotPDFReader] Added full table chunk (Pg:{metadata['page_label']}, Table:{table_idx}): '{table_text_content[:100]}...'")
+                            table_bbox_str = "N/A" # 如果实在没有，就标记为 N/A
+                    except Exception as e:
+                        logger.warning(f"[CamelotPDFReader] Error accessing table.bbox or its components: {e}", exc_info=True)
+                        table_bbox_str = "Error_bbox" # 标记错误
+
+                    # 构建元数据
+                    metadata = {
+                        "file_path": file_path,
+                        "file_name": os.path.basename(file_path),
+                        "page_label": str(table.page), # Camelot 返回的是页码
+                        "table_index": table_idx,
+                        "table_bbox": table_bbox_str, # 表格在页面上的位置
+                        "document_type": "PDF_Table",
+                        **({} if extra_info is None else extra_info) # 合并额外信息
+                    }
+
+                    if self.chunk_tables_by_row:
+                        logger.debug(f"[CamelotPDFReader] Chunking table {table_idx+1} by row. Total rows: {len(table.df)}.")
+                        # 按行切分表格
+                        for row_idx, row in table.df.iterrows():
+                            # to_string() 默认会包含索引，我们只想要数据
+                            row_text = " | ".join([str(cell).strip() for cell in row.values])
+                            
+                            # 确保提取的文本不为空白
+                            if row_text.strip():
+                                row_metadata = metadata.copy()
+                                row_metadata["row_index"] = row_idx
+                                row_metadata["document_type"] = "PDF_Table_Row" 
+                                documents.append(Document(text=row_text, metadata=row_metadata))
+                                logger.debug(f"[CamelotPDFReader] Added table row chunk (Pg:{row_metadata['page_label']}, Table:{table_idx}, Row:{row_idx}): '{row_text.strip()[:100]}...'")
+                            else:
+                                logger.debug(f"[CamelotPDFReader] Skipping empty table row chunk (Pg:{metadata['page_label']}, Table:{table_idx}, Row:{row_idx}).")
+                    
+                    else:
+                        logger.debug(f"[CamelotPDFReader] Adding entire table {table_idx+1} as one chunk.")
+                        # 将整个表格作为一个chunk
+                        documents.append(Document(text=table_text_content, metadata=metadata))
+                        logger.debug(f"[CamelotPDFReader] Added full table chunk (Pg:{metadata['page_label']}, Table:{table_idx}): '{table_text_content[:100]}...'")
+            else:
+                logger.info(f"[CamelotPDFReader] No tables found by camelot-py in {file_path}.")
+
 
         except Exception as e:
-            logger.warning(f"[CamelotPDFReader] Error extracting tables from {file_path} using camelot-py: {e}", exc_info=True)
-            # 如果表格提取失败，不中断，尝试提取纯文本
+            logger.warning(f"[CamelotPDFReader] Major Error during table extraction from {file_path} using camelot-py (read_pdf failed): {e}", exc_info=True)
+            # 如果 camelot.read_pdf 失败，tables_successfully_extracted 仍为 False
             pass 
-
+        
         # 提取非表格文本
-        if self.extract_text_also:
-            extracted_pages_text_count = 0
+        if self.extract_text_also: 
             try:
                 logger.debug(f"[CamelotPDFReader] Attempting to extract non-table text using pypdf.")
                 pdf_reader = PdfReader(file_path)
@@ -158,7 +161,7 @@ class CamelotPDFReader(BaseReader):
                             **({} if extra_info is None else extra_info)
                         }
                         documents.append(Document(text=page_text, metadata=text_metadata))
-                        logger.debug(f"[CamelotPDFReader] Added PDF_Text chunk (Page:{page_num+1}): '{page_text[:100]}...'")
+                        logger.debug(f"[CamelotPDFReader] Added PDF_Text chunk (Page:{page_num+1}): '{page_text.strip()[:100]}...'")
                     else:
                         logger.debug(f"[CamelotPDFReader] Page {page_num+1} extracted no text (might be image-based or empty).")
 

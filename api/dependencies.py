@@ -54,8 +54,8 @@ def get_dashscope_rag_llm() -> LlamaLLM: # 类型提示为 LlamaIndex 的 LLM
         model_name=DashScopeGenerationModels.QWEN_PLUS,
         api_key=settings.DASHSCOPE_API_KEY,
         max_tokens=4096,
-        temperature=0.5,
-        similarity_cutoff=0.5
+        temperature=0.1,
+        similarity_cutoff=0.4
     )
 
 def get_deepseek_llm_metadata() -> OpenAILike:
