@@ -106,7 +106,6 @@ pydantic==2.10.6
 pydantic-settings==2.8.1
 pydantic_core==2.27.2
 Pygments==2.19.1
-pypdf==5.4.0
 PyPika==0.48.9
 pyproject_hooks==1.2.0
 python-dateutil==2.9.0.post0
@@ -152,6 +151,5 @@ yarl==1.18.3
 zipp==3.21.0
 camelot-py==1.0.0
 ghostscript==0.8.1
-pypdf>=4.0.0
 torch==2.7.1
 sentence-transformers==5.0.0
