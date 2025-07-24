@@ -20,20 +20,7 @@ from services.task_manager_service import TaskManagerService
 
 logger = logging.getLogger(__name__)
 
-# 全局存储服务实例，确保它们是单例
-_indexer_service: IndexerService = None
-_query_service: QueryService = None
-_chat_history_service: ChatHistoryService = None
-_ai_extraction_service: AIExtractionService = None
-_document_oss_service: DocumentOssService = None 
-_document_service: DocumentService = None
-_oss_service: OssService = None 
-_task_manager_service: TaskManagerService = None 
-
-# 全局存储 LLM 实例，防止重复创建
-_deepseek_llm_metadata: OpenAILike = None
-_deepseek_llm_flashcard: OpenAILike = None
-
+@lru_cache(maxsize=1)
 def get_chroma_client():
     """获取 ChromaDB 客户端的依赖"""
     return chromadb.PersistentClient(
@@ -41,6 +28,7 @@ def get_chroma_client():
         settings=Settings(is_persistent=True)
     )
 
+@lru_cache(maxsize=1)
 def get_embedding_model():
     """获取 Embedding 模型的依赖"""
     return DashScopeEmbedding(
@@ -48,6 +36,7 @@ def get_embedding_model():
         text_type="document"
     )
 
+@lru_cache(maxsize=1)
 def get_dashscope_rag_llm() -> LlamaLLM: # 类型提示为 LlamaIndex 的 LLM
     """获取用于 RAG 的 DashScope LLM 依赖"""
     return DashScope(
@@ -58,6 +47,7 @@ def get_dashscope_rag_llm() -> LlamaLLM: # 类型提示为 LlamaIndex 的 LLM
         similarity_cutoff=0.4
     )
 
+@lru_cache(maxsize=1)
 def get_deepseek_llm_metadata() -> OpenAILike:
     """获取用于元数据提取的 DeepSeek LLM 依赖"""
     global _deepseek_llm_metadata
@@ -71,6 +61,7 @@ def get_deepseek_llm_metadata() -> OpenAILike:
         )
     return _deepseek_llm_metadata
 
+@lru_cache(maxsize=1)
 def get_deepseek_llm_flashcard() -> OpenAILike:
     """获取用于闪卡提取的 DeepSeek LLM 依赖"""
     global _deepseek_llm_flashcard
