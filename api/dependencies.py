@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def get_chroma_client():
     """获取 ChromaDB 客户端的依赖"""
+    logger.info("Initializing ChromaDB PersistentClient...")
     return chromadb.PersistentClient(
         path=settings.CHROMA_PATH,
         settings=Settings(is_persistent=True)
@@ -31,6 +32,7 @@ def get_chroma_client():
 @lru_cache(maxsize=1)
 def get_embedding_model():
     """获取 Embedding 模型的依赖"""
+    logger.info("Initializing DashScopeEmbedding model...")
     return DashScopeEmbedding(
         model_name=DashScopeTextEmbeddingModels.TEXT_EMBEDDING_V2,
         text_type="document"
@@ -39,6 +41,7 @@ def get_embedding_model():
 @lru_cache(maxsize=1)
 def get_dashscope_rag_llm() -> LlamaLLM: # 类型提示为 LlamaIndex 的 LLM
     """获取用于 RAG 的 DashScope LLM 依赖"""
+    logger.info("Initializing DashScope RAG LLM (QWEN_PLUS)...")
     return DashScope(
         model_name=DashScopeGenerationModels.QWEN_PLUS,
         api_key=settings.DASHSCOPE_API_KEY,
@@ -50,115 +53,109 @@ def get_dashscope_rag_llm() -> LlamaLLM: # 类型提示为 LlamaIndex 的 LLM
 @lru_cache(maxsize=1)
 def get_deepseek_llm_metadata() -> OpenAILike:
     """获取用于元数据提取的 DeepSeek LLM 依赖"""
-    global _deepseek_llm_metadata
-    if _deepseek_llm_metadata is None:
-        _deepseek_llm_metadata = OpenAILike(
-            model="deepseek-chat",
-            api_base=settings.DEEPSEEK_API_BASE,
-            api_key=settings.DEEPSEEK_API_KEY,
-            temperature=0.0,
-            kwargs={'response_format': {'type': 'json_object'}}
-        )
-    return _deepseek_llm_metadata
+    logger.info("Initializing DeepSeek LLM for metadata extraction (deepseek-chat)...")
+    _deepseek_llm_metadata_instance = OpenAILike( # 使用局部变量名
+        model="deepseek-chat",
+        api_base=settings.DEEPSEEK_API_BASE,
+        api_key=settings.DEEPSEEK_API_KEY,
+        temperature=0.0,
+        kwargs={'response_format': {'type': 'json_object'}}
+    )
+    return _deepseek_llm_metadata_instance
 
 @lru_cache(maxsize=1)
 def get_deepseek_llm_flashcard() -> OpenAILike:
     """获取用于闪卡提取的 DeepSeek LLM 依赖"""
-    global _deepseek_llm_flashcard
-    if _deepseek_llm_flashcard is None:
-        _deepseek_llm_flashcard = OpenAILike(
-            model="deepseek-chat",
-            api_base=settings.DEEPSEEK_API_BASE,
-            api_key=settings.DEEPSEEK_API_KEY,
-            temperature=0.3,
-            kwargs={'response_format': {'type': 'json_object'}}
-        )
-    return _deepseek_llm_flashcard
+    logger.info("Initializing DeepSeek LLM for flashcard extraction (deepseek-chat)...")
+    _deepseek_llm_flashcard_instance = OpenAILike( # 使用局部变量名
+        model="deepseek-chat",
+        api_base=settings.DEEPSEEK_API_BASE,
+        api_key=settings.DEEPSEEK_API_KEY,
+        temperature=0.3,
+        kwargs={'response_format': {'type': 'json_object'}}
+    )
+    return _deepseek_llm_flashcard_instance
 
 @lru_cache(maxsize=1)
 def get_indexer_service() -> IndexerService:
     """提供 IndexerService 的单例实例"""
-    global _indexer_service
-    if _indexer_service is None:
-        _indexer_service = IndexerService(
-            chroma_client=get_chroma_client(),
-            embedding_model=get_embedding_model()
-        )
-    return _indexer_service
+    logger.info("Initializing IndexerService...")
+    _indexer_service_instance = IndexerService(
+        chroma_client=get_chroma_client(),
+        embedding_model=get_embedding_model()
+    )
+    return _indexer_service_instance
 
 @lru_cache(maxsize=1)
 def get_chat_history_service() -> ChatHistoryService:
     """提供 ChatHistoryService 的单例实例"""
-    global _chat_history_service
-    if _chat_history_service is None:
-        # ChatHistoryService 现在会通过构造函数接收 embedding_model
-        _chat_history_service = ChatHistoryService(
-            chroma_client=get_chroma_client(),
-            embedding_model=get_embedding_model(),
-            indexer_service=get_indexer_service()
-        )
-    return _chat_history_service
+    logger.info("Initializing ChatHistoryService...")
+    
+    _chat_history_service_instance = ChatHistoryService(
+        chroma_client=get_chroma_client(),
+        embedding_model=get_embedding_model(),
+        indexer_service=get_indexer_service()
+    )
+    return _chat_history_service_instance
 
 @lru_cache(maxsize=1)
 def get_query_service() -> QueryService:
     """提供 QueryService 的单例实例"""
-    global _query_service
-    if _query_service is None:
-        _query_service = QueryService(
-            chroma_client=get_chroma_client(), # 传入 Chroma 客户端
-            embedding_model=get_embedding_model(), # 传入 embedding model
-            llm=get_dashscope_rag_llm(), # 传入 LLM
-            indexer_service=get_indexer_service(), # 传入 indexer_service
-            chat_history_service=get_chat_history_service() # 传入 chat_history_service 实例
-        )
-    return _query_service
+    logger.info("Initializing QueryService...")
+    
+    _query_service_instance = QueryService(
+        chroma_client=get_chroma_client(),
+        embedding_model=get_embedding_model(),
+        llm=get_dashscope_rag_llm(),
+        indexer_service=get_indexer_service(),
+        chat_history_service=get_chat_history_service()
+    )
+    return _query_service_instance
 
 @lru_cache(maxsize=1)
 def get_ai_extraction_service() -> AIExtractionService:
     """提供 AIExtractionService 的单例实例"""
-    global _ai_extraction_service
-    if _ai_extraction_service is None:
-        _ai_extraction_service = AIExtractionService(
-            llm_metadata_model=get_deepseek_llm_metadata(),
-            llm_flashcard_model=get_deepseek_llm_flashcard(),
-            oss_service_instance=get_oss_service() 
-        )
-    return _ai_extraction_service
-
+    logger.info("Initializing AIExtractionService...")
+    
+    _ai_extraction_service_instance = AIExtractionService(
+        llm_metadata_model=get_deepseek_llm_metadata(),
+        llm_flashcard_model=get_deepseek_llm_flashcard(),
+        oss_service_instance=get_oss_service()
+    )
+    return _ai_extraction_service_instance
 
 @lru_cache(maxsize=1)
 def get_oss_service() -> OssService:
     """提供 OSSService 的单例实例"""
-    global _oss_service
-    if _oss_service is None:
-        _oss_service = OssService()
-    return _oss_service
+    logger.info("Initializing OssService...")
+    
+    _oss_service_instance = OssService()
+    return _oss_service_instance
 
 @lru_cache(maxsize=1)
 def get_task_manager_service() -> TaskManagerService:
     """提供 TaskManagerService 的单例实例"""
-    global _task_manager_service
-    if _task_manager_service is None:
-        _task_manager_service = TaskManagerService()
-    return _task_manager_service
+    logger.info("Initializing TaskManagerService...")
+    
+    _task_manager_service_instance = TaskManagerService()
+    return _task_manager_service_instance
 
 @lru_cache(maxsize=1)
 def get_document_service() -> DocumentService:
     """提供 DocumentService 的单例实例"""
-    global _document_service
-    if _document_service is None:
-        _document_service = DocumentService()
-    return _document_service
+    logger.info("Initializing DocumentService...")
+    
+    _document_service_instance = DocumentService()
+    return _document_service_instance
 
 @lru_cache(maxsize=1)
 def get_document_oss_service() -> DocumentOssService:
     """提供 DocumentOssService 的单例实例"""
-    global _document_oss_service
-    if _document_oss_service is None:
-        logger.info("Initializing DocumentOssService...")
-        _document_oss_service = DocumentOssService(
-            indexer_service=get_indexer_service(),
-            oss_service_instance=get_oss_service(),
-            task_manager_service=get_task_manager_service()
-        )
-    return _document_oss_service
+    logger.info("Initializing DocumentOssService...")
+    
+    _document_oss_service_instance = DocumentOssService(
+        indexer_service=get_indexer_service(),
+        oss_service_instance=get_oss_service(),
+        task_manager_service=get_task_manager_service()
+    )
+    return _document_oss_service_instance
