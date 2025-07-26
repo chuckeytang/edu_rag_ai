@@ -6,3 +6,4 @@ index_store
 storage
 .config
 data/pdf
+logs/

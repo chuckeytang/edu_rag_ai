@@ -87,7 +87,7 @@ class QueryService:
         self.reranker_top_n_fixed = 5
         self.reranker = SentenceTransformerRerank(
             model="BAAI/bge-reranker-base", 
-            top_n=self.reranker_top_n_fixed, # <--- 这里使用一个固定的、足够大的值
+            top_n=self.reranker_top_n_fixed, 
             device="cuda" if torch.cuda.is_available() else "cpu" 
         )
         logger.info(f"Initialized SentenceTransformerRerank with model '{self.reranker.model}' on device '{self.reranker.device}' and fixed top_n={self.reranker_top_n_fixed}.")
@@ -198,6 +198,7 @@ class QueryService:
     def default_qa_prompt(self) -> PromptTemplate:
         return PromptTemplate(
             "{chat_history_context}"
+
             "You are an advanced, highly specialized Academic AI Assistant for high school curricula (IB, A-Level, AP, IGCSE, etc.). "
             "Your SOLE purpose is to provide precise, academically rigorous, and impeccably accurate responses that are "
             "**EXCLUSIVELY derived from the 'Document content' provided below.**\n"
@@ -211,9 +212,10 @@ class QueryService:
             "      'I cannot find enough information in the provided documents to answer this question.' DO NOT provide any other answer or guess.\n"
             "2.  **Precision & Conciseness**: Deliver information with academic elegance. Avoid verbose language, redundant phrases, or conversational filler. **Get straight to the answer.**\n"
             "3.  **Formatting**: Use clear formatting (e.g., bullet points, bolding) only if it directly aids clarity for the *extracted content*. Avoid dense paragraphs. **If the answer is a simple definition, provide only the definition.**\n"
-            "4.  **Context Prioritization**: The 'Document content' is provided with source types (e.g., 'PDF_Table_Row', 'PDF_Text').\n"
-            "    - **Prioritize information from 'PDF_Table_Row' chunks** if they directly answer the query, as these are often precise, structured definitions or facts. Use them verbatim if appropriate.\n"
-            "    - Use 'PDF_Text' chunks to provide broader context or supplementary details *only if* they are directly relevant and do not duplicate information already provided by 'PDF_Table_Row' chunks. Avoid repeating information.\n"
+            "4.  **Context Utilization**: The 'Document content' is provided with source types (e.g., 'PDF_Table', 'PDF_Text').\n" # <--- 修改为 PDF_Table (整个表格)
+            "    - **Prioritize the most direct and accurate information available**, regardless of its source type.\n" # <--- 强调直接和准确，不分来源类型
+            "    - If a 'PDF_Table' chunk provides a precise answer (e.g., a term's definition in a glossary table), use it directly. The table is marked with '--- START TABLE ---' and '--- END TABLE ---' for clear identification.\n" # <--- 明确表格标记和使用方式
+            "    - Use 'PDF_Text' chunks to provide broader contextual understanding or supplementary details *only if* they are directly relevant and do not duplicate information already present. Avoid repeating information.\n"
             "    - Your goal is to synthesize information from all relevant sources without redundancy, always favoring the most precise and direct answer.\n"
             "5.  **Language Protocol**: Your primary response language is English. If the user's query includes Chinese, you may include brief, contextually relevant Chinese phrases naturally, but English must remain the dominant language.\n"
             "6.  **Audience**: Formulate responses for highly motivated high school students, prioritizing clarity and direct relevance.\n"
