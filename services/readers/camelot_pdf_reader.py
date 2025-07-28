@@ -20,14 +20,16 @@ class CamelotPDFReader(BaseReader):
         flavor: str = 'lattice', # 默认值
         table_settings: Optional[Dict[str, Any]] = None, # 传递给camelot.read_pdf的额外参数
         extract_text_also: bool = True,
-        chunk_tables_by_row: bool = True,
+        chunk_tables_intelligently: bool = True, # 是否智能地按行分块并限制长度
+        table_chunk_size: int = 600,
         **kwargs # 允许传入其他初始化参数
     ):
         super().__init__(**kwargs) # 首先调用父类的构造函数
 
         self.flavor = flavor
         self.extract_text_also = extract_text_also
-        self.chunk_tables_by_row = chunk_tables_by_row
+        self.chunk_tables_intelligently = chunk_tables_intelligently
+        self.table_chunk_size = table_chunk_size
 
         # 处理 table_settings，确保兼容性
         # 从提供的 table_settings 开始，如果为 None，则为空字典
@@ -52,9 +54,9 @@ class CamelotPDFReader(BaseReader):
                  _effective_table_settings['edge_tol'] = 50 # 常见默认值
         
         # 将处理后的设置赋值给实例属性，只赋值一次
-        self.table_settings = _effective_table_settings # <--- 只在这里赋值一次 self.table_settings
+        self.table_settings = _effective_table_settings 
 
-        logger.debug(f"[CamelotPDFReader] Initialized with flavor='{self.flavor}', extract_text_also={self.extract_text_also}, chunk_tables_by_row={self.chunk_tables_by_row}, table_settings={self.table_settings}")
+        logger.debug(f"[CamelotPDFReader] Initialized with flavor='{self.flavor}', extract_text_also={self.extract_text_also}, chunk_tables_intelligently={self.chunk_tables_intelligently}, table_settings={self.table_settings}")
 
     def load_data(
         self, file: Union[str, os.PathLike], extra_info: Optional[Dict] = None
@@ -80,19 +82,12 @@ class CamelotPDFReader(BaseReader):
             extracted_tables_count = tables.n # 获取提取到的表格数量
             logger.info(f"[CamelotPDFReader] Found {extracted_tables_count} tables using camelot-py.")
             
-            if extracted_tables_count > 0: # 只有当识别到表格时才进入处理循环
+            if extracted_tables_count > 0:
                 for table_idx, table in enumerate(tables):
                     logger.debug(f"[CamelotPDFReader] Processing table {table_idx+1}/{extracted_tables_count} from page {table.page}.")
                     
-                    table_bbox_str = "N/A_Error" # 默认值，如果无法获取
-                    table_md_content = table.df.to_markdown(index=False) 
-                    # LLM 会识别这种模式，并知道这是一段表格数据
-                    table_formatted_text = (
-                        f"--- START TABLE (Page {table.page}, Table {table_idx+1}) ---\n"
-                        f"{table_md_content}\n"
-                        f"--- END TABLE ---"
-                    )
-
+                    table_bbox_str = "N/A_Error" 
+                    
                     try:
                         x1, y1, x2, y2 = table._bbox
                         table_bbox_str = f"({x1}, {y1}, {x2}, {y2})"
@@ -106,30 +101,118 @@ class CamelotPDFReader(BaseReader):
                         logger.warning(f"[CamelotPDFReader] Error accessing table.bbox or its components: {e}", exc_info=True)
                         table_bbox_str = "Error_bbox" 
 
-                    # 构建元数据
-                    metadata = {
+                    # 构建基础元数据，用于每个表格 chunk
+                    base_table_metadata = {
                         "file_path": file_path,
                         "file_name": os.path.basename(file_path),
                         "page_label": str(table.page),
                         "table_index": table_idx,
                         "table_bbox": table_bbox_str,
-                        "document_type": "PDF_Table", # 现在是整个表格
-                        **({} if extra_info is None else extra_info) # 合并额外信息
+                        **({} if extra_info is None else extra_info) 
                     }
 
-                    if table_formatted_text.strip():
-                        documents.append(Document(text=table_formatted_text, metadata=metadata))
-                        logger.debug(f"[CamelotPDFReader] Added full table chunk (Pg:{metadata['page_label']}, Table:{table_idx}): '{table_formatted_text.strip()[:100]}...'")
-                    else:
-                        logger.debug(f"[CamelotPDFReader] Skipping empty full table chunk (Pg:{metadata['page_label']}, Table:{table_idx}).")
+                    # === 智能表格分块逻辑 ===
+                    if self.chunk_tables_intelligently:
+                        table_df = table.df # 获取表格的 DataFrame
+                        
+                        current_chunk_rows = []
+                        current_chunk_text_len = 0
+                        start_row_for_chunk = 0
+
+                        # 如果有表头，将其加入第一个 chunk
+                        header_row_text = " | ".join([str(col_name).strip() for col_name in table_df.columns])
+                        header_md_prefix = f"| {header_row_text} |\n|{'---|' * len(table_df.columns)}\n"
+
+                        if header_row_text.strip():
+                            current_chunk_rows.append(header_row_text)
+                            current_chunk_text_len += len(header_row_text) + 2 # +2 for "| "
+                        
+                        for row_idx, row in table_df.iterrows():
+                            row_text = " | ".join([str(cell).strip() for cell in row.values])
+                            
+                            # 预估添加当前行后的长度
+                            # 加上当前行的长度和分隔符（例如 '\n'）
+                            potential_next_len = current_chunk_text_len + len(row_text) + 1 
+
+                            # 如果添加当前行后，超出 chunk 限制，且当前 chunk 不为空
+                            # 就将当前累积的行打包成一个 chunk
+                            if potential_next_len > self.table_chunk_size and current_chunk_rows:
+                                # 生成 chunk 文本 (Markdown 格式)
+                                chunk_md_content = "\n".join(current_chunk_rows)
+                                if current_chunk_rows[0] == header_row_text: # 如果第一个是表头，则需要再次添加Markdown分隔符
+                                    chunk_md_content = header_md_prefix + chunk_md_content
+                                
+                                # 添加开始/结束标记
+                                formatted_chunk_text = (
+                                    f"--- START TABLE CHUNK (Page {base_table_metadata['page_label']}, Table {table_idx+1}, Chunk {len(documents)}) ---\n"
+                                    f"{chunk_md_content}\n"
+                                    f"--- END TABLE CHUNK (Rows {start_row_for_chunk}-{row_idx-1}) ---"
+                                )
+                                
+                                # 构建 Document
+                                chunk_metadata = base_table_metadata.copy()
+                                chunk_metadata["document_type"] = "PDF_Table_Chunk"
+                                chunk_metadata["chunk_index"] = len(documents) # 当前是第几个表格chunk
+                                chunk_metadata["start_row_index"] = start_row_for_chunk
+                                chunk_metadata["end_row_index"] = row_idx - 1
+                                
+                                documents.append(Document(text=formatted_chunk_text, metadata=chunk_metadata))
+                                logger.debug(f"[CamelotPDFReader] Added intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:100]}...'")
+                                
+                                # 重置当前 chunk 状态，开始新的 chunk
+                                current_chunk_rows = []
+                                current_chunk_text_len = 0
+                                start_row_for_chunk = row_idx # 新 chunk 的起始行是当前行
+                                # 如果新 chunk 也要包含表头，可以在这里再次添加
+                                if header_row_text.strip():
+                                    current_chunk_rows.append(header_row_text)
+                                    current_chunk_text_len += len(header_row_text) + 2 # +2 for "| "
+
+
+                            # 添加当前行到 chunk
+                            current_chunk_rows.append(row_text)
+                            current_chunk_text_len += len(row_text) + 1 # +1 for newline
+
+                        # 处理循环结束后剩余的行
+                        if current_chunk_rows:
+                            chunk_md_content = "\n".join(current_chunk_rows)
+                            if current_chunk_rows[0] == header_row_text and len(current_chunk_rows) > 1: # 如果第一个是表头且不只是表头自己一个chunk
+                                chunk_md_content = header_md_prefix + chunk_md_content
+                            
+                            formatted_chunk_text = (
+                                f"--- START TABLE CHUNK (Page {base_table_metadata['page_label']}, Table {table_idx+1}, Chunk {len(documents)}) ---\n"
+                                f"{chunk_md_content}\n"
+                                f"--- END TABLE CHUNK (Rows {start_row_for_chunk}-{row_idx}) ---"
+                            )
+                            
+                            chunk_metadata = base_table_metadata.copy()
+                            chunk_metadata["document_type"] = "PDF_Table_Chunk"
+                            chunk_metadata["chunk_index"] = len(documents)
+                            chunk_metadata["start_row_index"] = start_row_for_chunk
+                            chunk_metadata["end_row_index"] = row_idx
+                            
+                            documents.append(Document(text=formatted_chunk_text, metadata=chunk_metadata))
+                            logger.debug(f"[CamelotPDFReader] Added final intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:100]}...'")
+
+                    else: # 如果不进行智能分块，就将整个表格作为一个 chunk (原先的逻辑)
+                        table_md_content = table.df.to_markdown(index=False)
+                        table_formatted_text = (
+                            f"--- START TABLE (Page {table.page}, Table {table_idx+1}) ---\n"
+                            f"{table_md_content}\n"
+                            f"--- END TABLE ---"
+                        )
+                        if table_formatted_text.strip():
+                            documents.append(Document(text=table_formatted_text, metadata=base_table_metadata))
+                            logger.debug(f"[CamelotPDFReader] Added full table chunk (Pg:{base_table_metadata['page_label']}, Table:{table_idx}): '{table_formatted_text.strip()[:100]}...'")
+                        else:
+                            logger.debug(f"[CamelotPDFReader] Skipping empty full table chunk (Pg:{base_table_metadata['page_label']}, Table:{table_idx}).")
 
             else:
                 logger.info(f"[CamelotPDFReader] No tables found by camelot-py in {file_path}.")
 
-
         except Exception as e:
             logger.warning(f"[CamelotPDFReader] Major Error during table extraction from {file_path} using camelot-py (read_pdf failed): {e}", exc_info=True)
-            # 如果 camelot.read_pdf 失败，tables_successfully_extracted 仍为 False
+            
             pass 
         
         # 提取非表格文本

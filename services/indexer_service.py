@@ -146,15 +146,22 @@ class IndexerService:
         for doc in documents: # 遍历 CamelotPDFReader 或 SimpleDirectoryReader 返回的原始 LlamaDocument
             doc_type = doc.metadata.get("document_type")
             
-            if doc_type == "PDF_Table_Row":
-                # 如果是 PDF 表格行，它已经被 CamelotPDFReader 精心切分，直接作为 TextNode
+            if doc_type == "PDF_Table_Chunk":
                 node = TextNode(
-                    id_=doc.id_, # 保留原始 Document 的 ID
+                    id_=doc.id_, 
                     text=doc.text,
-                    metadata=doc.metadata # 保留所有元数据
+                    metadata=doc.metadata 
                 )
                 all_nodes_to_add.append(node)
-                logger.debug(f" [Indexer] Directly adding PDF_Table_Row node (ID: {node.id_}): '{node.text[:80]}...'")
+                logger.debug(f" [Indexer] Directly adding PDF_Table_Chunk node (ID: {node.id_}): '{node.text[:80]}...'")
+            elif doc_type == "PDF_Table" or doc_type == "PDF_Table_Row":
+                node = TextNode(
+                    id_=doc.id_, 
+                    text=doc.text,
+                    metadata=doc.metadata 
+                )
+                all_nodes_to_add.append(node)
+                logger.debug(f" [Indexer] Directly adding {doc_type} node (ID: {node.id_}): '{node.text[:80]}...'")
             else:
                 # 对于其他文档类型（包括 PDF_Text），使用 node_parser 进行细粒度 chunking
                 # LlamaIndex 的 node_parser 接受 Documents 列表，返回 TextNode 列表

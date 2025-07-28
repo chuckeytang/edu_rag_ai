@@ -102,7 +102,7 @@ class DocumentOssService:
                     flavor='lattice', # 或 'lattice'
                     table_settings={'edge_tol': 50},
                     extract_text_also=True,
-                    chunk_tables_by_row=True 
+                    chunk_tables_intelligently=True
                 )
             }
 

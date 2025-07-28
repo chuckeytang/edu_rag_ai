@@ -7,9 +7,9 @@ from services.indexer_service import IndexerService
 logger = logging.getLogger(__name__)
 
 from typing import Any, Dict, List, Optional
-from models.schemas import ChatQueryRequest
-from fastapi import APIRouter, Depends, HTTPException, Query
-
+from models.schemas import ChatQueryRequest, QueryRequest
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+import numpy as np
 from services.query_service import QueryService  
 
 router = APIRouter()
@@ -163,7 +163,7 @@ def get_node(chroma_id: str,
 
 
 @router.post("/retrieve-with-filters", summary="[DEBUG] 测试带过滤的节点召回")
-def debug_retrieve_with_filters(request: ChatQueryRequest, 
+def debug_retrieve_with_filters(request: QueryRequest, 
                             query_service: QueryService = Depends(get_query_service),
                             indexer_service: IndexerService = Depends(get_indexer_service)):
     """
@@ -194,7 +194,6 @@ def debug_retrieve_with_filters(request: ChatQueryRequest,
             similarity_top_k=request.similarity_top_k
         )
 
-        # ... (后续的 results 格式化和返回逻辑保持不变)
         results = []
         for node_with_score in retrieved_nodes:
             current_node_metadata = node_with_score.node.metadata 
@@ -206,11 +205,25 @@ def debug_retrieve_with_filters(request: ChatQueryRequest,
             except Exception as debug_e:
                 logger.error(f"DEBUG: Failed to get latest metadata from DB for {node_with_score.node.node_id}: {debug_e}")
 
+            score_to_append = float(node_with_score.score) # <--- 将 score 强制转换为 Python float
+            
+            # 对 metadata 进行深度拷贝，并转换其中的 NumPy 类型
+            cleaned_metadata = {}
+            for key, value in current_node_metadata.items():
+                if isinstance(value, np.ndarray): # 如果是 NumPy 数组
+                    cleaned_metadata[key] = value.tolist() # 转换为 Python 列表
+                elif isinstance(value, (np.float32, np.float64)): # <--- 移除 np.float
+                    cleaned_metadata[key] = float(value) 
+                elif isinstance(value, (np.int32, np.int64)): 
+                    cleaned_metadata[key] = int(value) 
+                else:
+                    cleaned_metadata[key] = value 
+                    
             results.append({
-                "score": node_with_score.score,
+                "score": score_to_append,
                 "node_id": node_with_score.node.node_id,
                 "text_snippet": node_with_score.get_text()[:300] + "...",
-                "metadata": current_node_metadata
+                "metadata": cleaned_metadata
             })
 
         return results
@@ -219,4 +232,35 @@ def debug_retrieve_with_filters(request: ChatQueryRequest,
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Debug retrieval failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+@router.post("/delete-material/{material_id}", summary="根据 material_id 删除所有相关文档块（chunk）")
+def delete_chunks_by_material_id(
+    material_id: int = Path(..., description="要删除的文档的 material_id"),
+    collection_name: str = Query(..., description="目标Collection的名称"),
+    indexer_service: IndexerService = Depends(get_indexer_service) # 依赖注入 IndexerService
+) -> Dict[str, Any]:
+    """
+    根据给定的 material_id，从指定 Collection 中删除所有相关的文档块（chunk）。
+    """
+    logger.info(f"Received request to delete chunks for material_id: {material_id} in collection: '{collection_name}'")
+    
+    try:
+        # IndexerService 中的 delete_nodes_by_metadata 方法已经处理了过滤逻辑
+        filters = {"material_id": material_id} # material_id 存储为整数，直接传递整数
+        
+        result = indexer_service.delete_nodes_by_metadata(collection_name=collection_name, filters=filters)
+        
+        # delete_nodes_by_metadata 已经返回了清晰的状态和信息
+        if result.get("status") == "success":
+            logger.info(f"Successfully processed delete request for material_id {material_id}: {result.get('message')}")
+            return {"status": "success", "message": result.get("message")}
+        else:
+            logger.error(f"Failed to delete chunks for material_id {material_id}: {result.get('message')}")
+            raise HTTPException(status_code=500, detail=result.get("message"))
+            
+    except HTTPException: # 如果 delete_nodes_by_metadata 内部抛出 HTTPException，直接向上抛
+        raise
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during deletion for material_id {material_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")

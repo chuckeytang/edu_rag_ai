@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+from services.query_service import _tokenizer
 from typing import List, Dict, Any, Optional
 
 from fastapi import HTTPException
@@ -20,6 +21,8 @@ from services.oss_service import OssService
 from services.readers.camelot_pdf_reader import CamelotPDFReader
 
 logger = logging.getLogger(__name__)
+# 定义一个 LLM 输入的最大 token 限制 (可以放在 settings.py 中)
+MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION = 58000
 
 class AIExtractionService:
     def __init__(self,
@@ -66,7 +69,7 @@ class AIExtractionService:
                     reader = CamelotPDFReader(
                         flavor='lattice', # 或 'lattice'，取决于PDF表格类型
                         extract_text_also=True,
-                        chunk_tables_by_row=False # AI提取通常需要完整上下文，将整个表格作为一个文本块
+                        chunk_tables_intelligently=True
                     )
                     documents = reader.load_data(file=local_file_path)
                 else:
@@ -75,6 +78,20 @@ class AIExtractionService:
                     documents = reader.load_data()
                 
                 full_content = "\n".join([doc.text for doc in documents])
+                if _tokenizer: # 如果 tokenizer 可用，按 token 截断
+                    tokens = _tokenizer.encode(full_content)
+                    if len(tokens) > MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION:
+                        logger.warning(f"File '{file_key}' content ({len(tokens)} tokens) exceeds LLM input limit ({MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION}). Truncating for AI extraction.")
+                        truncated_tokens = tokens[:MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION]
+                        truncated_content = _tokenizer.decode(truncated_tokens)
+                        return truncated_content
+                    return full_content
+                else: # 如果 tokenizer 不可用，按字符截断 (不够精确但安全)
+                    max_chars = MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION * 4 # 粗略估计 1 token = 4 字符
+                    if len(full_content) > max_chars:
+                        logger.warning(f"File '{file_key}' content ({len(full_content)} chars) exceeds LLM input limit (approx. {max_chars} chars). Truncating for AI extraction.")
+                        return full_content[:max_chars]
+                    return full_content
                 return full_content
             except Exception as e:
                 logger.error(f"从OSS下载或读取文件 '{file_key}' 失败 (桶: {target_bucket}): {e}", exc_info=True)
