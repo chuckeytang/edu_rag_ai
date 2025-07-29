@@ -108,7 +108,8 @@ def get_query_service() -> QueryService:
         embedding_model=get_embedding_model(),
         llm=get_dashscope_rag_llm(),
         indexer_service=get_indexer_service(),
-        chat_history_service=get_chat_history_service()
+        chat_history_service=get_chat_history_service(),
+        deepseek_llm_for_reranker=get_deepseek_llm_metadata()
     )
     return _query_service_instance
 

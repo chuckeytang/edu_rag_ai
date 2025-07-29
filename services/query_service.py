@@ -28,6 +28,7 @@ from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.query_engine import RetrieverQueryEngine # Import RetrieverQueryEngine
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.postprocessor import SentenceTransformerRerank 
+from llama_index.core.postprocessor import LLMRerank
 import torch 
 
 from core.config import Settings, settings
@@ -67,7 +68,8 @@ class QueryService:
                  embedding_model: BaseEmbedding,
                  llm: LLM, 
                  indexer_service: IndexerService,
-                 chat_history_service: Optional['ChatHistoryService'] = None):
+                 chat_history_service: Optional['ChatHistoryService'] = None,
+                 deepseek_llm_for_reranker: Optional[LLM] = None):
         """
         构造函数 - 实现“按需加载”策略
         启动时只初始化客户端和空的索引缓存，不加载任何实际的索引数据。
@@ -83,14 +85,25 @@ class QueryService:
         # 保存 chat_history_service 实例
         self._chat_history_service = chat_history_service
 
-        # 这里实例化 Reranker，它会在整个服务生命周期内存在
         self.reranker_top_n_fixed = 5
-        self.reranker = SentenceTransformerRerank(
+        # 1. 本地模型 SentenceTransformer Reranker
+        self.local_reranker = SentenceTransformerRerank(
             model="BAAI/bge-reranker-base", 
             top_n=self.reranker_top_n_fixed, 
             device="cuda" if torch.cuda.is_available() else "cpu" 
         )
-        logger.info(f"Initialized SentenceTransformerRerank with model '{self.reranker.model}' on device '{self.reranker.device}' and fixed top_n={self.reranker_top_n_fixed}.")
+        logger.info(f"Initialized Local Reranker: SentenceTransformerRerank with model '{self.local_reranker.model}' on device '{self.local_reranker.device}' and fixed top_n={self.local_reranker.top_n}.")
+
+        # 2. 基于 LLM 的 Reranker (使用 DeepSeek)
+        self.llm_reranker = None
+        if deepseek_llm_for_reranker:
+            self.llm_reranker = LLMRerank(
+                llm=deepseek_llm_for_reranker, # 传入 DeepSeek LLM 实例
+                top_n=self.reranker_top_n_fixed # 与本地重排器返回相同数量的节点
+            )
+            logger.info(f"Initialized LLM Reranker: LLMRerank with model '{deepseek_llm_for_reranker.model}' and fixed top_n={self.llm_reranker.top_n}.")
+        else:
+            logger.warning("DeepSeek LLM for Reranker not provided. LLM Reranker will not be initialized.")
         
     def _get_or_load_index(self, collection_name: str) -> VectorStoreIndex:
         """
@@ -245,7 +258,7 @@ class QueryService:
     
     async def rag_query_with_context(
         self,
-        request: ChatQueryRequest 
+        request: ChatQueryRequest
     ) -> AsyncGenerator[bytes, None]:
         
         logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
@@ -346,27 +359,38 @@ class QueryService:
             virtual_node_with_score = NodeWithScore(node=virtual_node, score=0.0)
             current_retrieved_nodes.append(virtual_node_with_score) 
             
-        # LlamaIndex 0.12.x series, rerankers typically take a query_bundle
+        final_retrieved_nodes = []
+        # 确保 reranker_top_n 是最终需要返回的数量
+        effective_reranker_top_n = request.similarity_top_k or 5
         query_bundle_for_rerank = QueryBundle(query_str=request.question)
-        
-        # 1. 实例化 Reranker (如果还没有在 __init__ 中实例化的话，但我们已经移到 __init__)
-        # 这里使用 self.reranker
-        
-        # 2. 应用 Reranker
-        # postprocess_nodes 方法接收 QueryBundle 和 NodeWithScore 列表
-        logger.info(f"Applying reranker to {len(current_retrieved_nodes)} nodes...")
-        final_retrieved_nodes = self.reranker.postprocess_nodes(
-            current_retrieved_nodes, 
-            query_bundle=query_bundle_for_rerank
-        )
-        logger.info(f"Reranker returned {len(final_retrieved_nodes)} nodes.")
 
+        if request.use_llm_reranker and self.llm_reranker:
+            logger.info(f"Applying LLM Reranker to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
+            # LLMRerank 的 aretrieve 方法接收 QueryBundle 和 NodeWithScore 列表
+            # LLMRerank 内部会自动处理 top_n 过滤
+            self.llm_reranker.top_n = effective_reranker_top_n # 动态设置 LLM Reranker 的 top_n
+            final_retrieved_nodes = self.llm_reranker._postprocess_nodes( # <--- 修正：调用 _postprocess_nodes
+                nodes=current_retrieved_nodes, 
+                query_bundle=query_bundle_for_rerank
+            )
+            logger.info(f"LLM Reranker returned {len(final_retrieved_nodes)} nodes.")
+        else:
+            logger.info(f"Applying Local Reranker (SentenceTransformerRerank) to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
+            # SentenceTransformerRerank 的 postprocess_nodes 方法接收 QueryBundle 和 NodeWithScore 列表
+            # SentenceTransformerRerank 内部会自动处理 top_n 过滤
+            self.local_reranker.top_n = effective_reranker_top_n # 动态设置本地 Reranker 的 top_n
+            final_retrieved_nodes = self.local_reranker.postprocess_nodes(
+                current_retrieved_nodes, 
+                query_bundle=query_bundle_for_rerank
+            )
+            logger.info(f"Local Reranker returned {len(final_retrieved_nodes)} nodes.")
+        
+         # --- 构建发送给 LLM 的 context_str，现在包含类型信息 ---
         context_parts = []
         for n in final_retrieved_nodes: # 使用重排后的节点列表
             doc_type = n.node.metadata.get("document_type", "Unknown")
             page_label = n.node.metadata.get("page_label", "N/A")
             file_name = n.node.metadata.get("file_name", "N/A")
-            # 格式化上下文，让 LLM 知道每个片段的来源和类型
             context_parts.append(
                 f"--- Document Content (Type: {doc_type}, Page: {page_label}, File: {file_name}) ---\n"
                 f"{n.get_content()}\n"

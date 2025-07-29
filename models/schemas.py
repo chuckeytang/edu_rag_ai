@@ -203,7 +203,7 @@ class ChatQueryRequest(BaseModel):
     similarity_top_k: Optional[int] = 5
     prompt: Optional[str] = None
     is_first_query: bool = False
-
+    use_llm_reranker: bool = True
 
 class UpdateChatMessageRequest(BaseModel):
     """
