@@ -15,7 +15,6 @@ from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.llms import LLM as LlamaLLM
 import logging
 from functools import lru_cache
-import time
 
 from services.task_manager_service import TaskManagerService
 
@@ -45,7 +44,6 @@ def initialize_global_chroma_client():
     global _global_chroma_client_instance
     if _global_chroma_client_instance is None:
         logger.info("Starting global ChromaDB PersistentClient initialization...")
-        # start_time = time.time() # 可以用来记录耗时
         try:
             _global_chroma_client_instance = chromadb.PersistentClient(
                 path=settings.CHROMA_PATH,
@@ -56,8 +54,6 @@ def initialize_global_chroma_client():
             logger.critical(f"FATAL: Failed to initialize global ChromaDB PersistentClient: {e}", exc_info=True)
             # 在启动时失败，应该阻止应用继续运行
             raise
-        # end_time = time.time()
-        # logger.info(f"Global ChromaDB PersistentClient initialization took {end_time - start_time:.2f} seconds.")
     else:
         logger.info("Global ChromaDB PersistentClient already initialized.")
 
