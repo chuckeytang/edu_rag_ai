@@ -1,4 +1,5 @@
 # api/services/indexer_service.py
+from datetime import time
 import json
 import logging
 import os
@@ -129,99 +130,112 @@ class IndexerService:
     def add_documents_to_index(self, 
                                documents: List[LlamaDocument], 
                                collection_name: str) -> VectorStoreIndex:
-        """
-        将文档添加到指定 collection 的索引中。
-        如果索引不存在，则初始化；如果存在，则插入新文档。
-        此方法会确保所有文档通过 embedding_model 向量化并入库。
-        对于 PDF 表格行 (document_type="PDF_Table_Row")，它们将作为独立的节点直接入库。
-        对于其他文档类型，将使用 SentenceSplitter 进行 chunking。
-        """
-        logger.info(f"Adding {len(documents)} documents to index for collection: '{collection_name}'...")
+        logger.info(f"Attempting to add {len(documents)} documents to index for collection: '{collection_name}'...")
         if not documents:
             logger.warning("No LlamaDocuments provided for indexing. Skipping.")
-            return self._get_or_load_index(collection_name) # 返回现有索引或None
-        logger.info(f"Received {len(documents)} raw LlamaDocuments for collection: '{collection_name}'.")
+            return self._get_or_load_index(collection_name) 
+
+        logger.debug(f"Received {len(documents)} raw LlamaDocuments for collection: '{collection_name}'.")
         all_nodes_to_add: List[TextNode] = [] 
 
-        for doc in documents: # 遍历 CamelotPDFReader 或 SimpleDirectoryReader 返回的原始 LlamaDocument
-            doc_type = doc.metadata.get("document_type")
+        # --- 增加节点处理前的日志 ---
+        logger.debug(f"Starting document processing into nodes for collection: '{collection_name}'.")
+        processing_start_time = time.time() # 导入 time 模块
+        for doc in documents:
+            doc_id = doc.id_ if doc.id_ else "no_id"
+            doc_type = doc.metadata.get("document_type", "Unknown")
+            logger.debug(f"Processing document ID: '{doc_id}', Type: '{doc_type}', Text Length: {len(doc.text)}.")
             
-            if doc_type == "PDF_Table_Chunk":
+            if doc_type == "PDF_Table_Chunk" or doc_type == "PDF_Table" or doc_type == "PDF_Table_Row":
                 node = TextNode(
                     id_=doc.id_, 
                     text=doc.text,
                     metadata=doc.metadata 
                 )
                 all_nodes_to_add.append(node)
-                logger.debug(f" [Indexer] Directly adding PDF_Table_Chunk node (ID: {node.id_}): '{node.text[:80]}...'")
-            elif doc_type == "PDF_Table" or doc_type == "PDF_Table_Row":
-                node = TextNode(
-                    id_=doc.id_, 
-                    text=doc.text,
-                    metadata=doc.metadata 
-                )
-                all_nodes_to_add.append(node)
-                logger.debug(f" [Indexer] Directly adding {doc_type} node (ID: {node.id_}): '{node.text[:80]}...'")
+                logger.debug(f" [Indexer] Directly adding {doc_type} node (ID: {node.id_}): '{node.text[:50]}...'")
             else:
                 # 对于其他文档类型（包括 PDF_Text），使用 node_parser 进行细粒度 chunking
                 # LlamaIndex 的 node_parser 接受 Documents 列表，返回 TextNode 列表
-                split_nodes = self.node_parser.get_nodes_from_documents([doc]) 
-                
-                for node in split_nodes:
-                    # 确保 extra_info 是可修改的字典
-                    if not isinstance(node.extra_info, dict):
-                        node.extra_info = {}
-                    
-                    # 合并原始文档的元数据到 TextNode 的 extra_info
-                    # LlamaIndex 的 node_parser 会自动将 LlamaDocument.metadata 复制到 TextNode.extra_info
-                    # 这里主要处理 any list-type metadata to JSON string，确保 ChromaDB 兼容
-                    for key, value in node.extra_info.items():
-                        if isinstance(value, list):
-                            try:
-                                node.extra_info[key] = json.dumps(value) 
-                            except TypeError:
-                                logger.error(f" [Indexer] Failed to JSON serialize metadata key '{key}' with value '{value}'. Keeping original.")
-                    
-                    all_nodes_to_add.append(node)
-                    logger.debug(f" [Indexer] Adding chunked node (ID: {node.id_}, Type: {doc_type}): '{node.text[:80]}...'")
-
-        logger.info(f" [Indexer] Original {len(documents)} documents processed into {len(all_nodes_to_add)} final nodes for indexing.")
+                try:
+                    split_nodes = self.node_parser.get_nodes_from_documents([doc]) 
+                    for node in split_nodes:
+                        # 确保 extra_info 是可修改的字典
+                        if not isinstance(node.extra_info, dict):
+                            node.extra_info = {}
+                        
+                        # 合并原始文档的元数据到 TextNode 的 extra_info
+                        for key, value in node.extra_info.items():
+                            if isinstance(value, list):
+                                try:
+                                    node.extra_info[key] = json.dumps(value) 
+                                except TypeError:
+                                    logger.error(f" [Indexer] Failed to JSON serialize metadata key '{key}' with value '{value}'. Keeping original.")
+                        
+                        all_nodes_to_add.append(node)
+                        logger.debug(f" [Indexer] Adding chunked node (ID: {node.id_}, Type: {doc_type}): '{node.text[:50]}...'")
+                except Exception as e:
+                    logger.error(f" [Indexer] Error chunking document ID '{doc_id}': {e}", exc_info=True)
+        
+        processing_end_time = time.time()
+        logger.info(f" [Indexer] Document processing into nodes completed. Took {processing_end_time - processing_start_time:.2f} seconds. Original {len(documents)} documents processed into {len(all_nodes_to_add)} final nodes for indexing.")
 
         # 尝试获取现有索引
         index = self._get_or_load_index(collection_name)
 
         if index is None:
             logger.info(f" [Indexer] Index for '{collection_name}' not found/loadable. Initializing a new one.")
-            collection = self.chroma_client.get_or_create_collection(name=collection_name)
-            vector_store = ChromaVectorStore(chroma_collection=collection)
-            storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
+            # --- 增加初始化新索引前的日志 ---
+            init_start_time = time.time()
+            try:
+                collection = self.chroma_client.get_or_create_collection(name=collection_name)
+                vector_store = ChromaVectorStore(chroma_collection=collection)
+                storage_context = StorageContext.from_defaults(vector_store=vector_store, persist_dir=PERSIST_DIR)
 
-            new_index = VectorStoreIndex.from_documents(
-                documents=all_nodes_to_add, # <--- 关键：传入处理过的 TextNode 列表
-                storage_context=storage_context,
-                embed_model=self.embedding_model, # 确保使用正确的 embedding model
-                # LlamaIndex 0.12.x 在 from_documents 传入 TextNode 时，不会再自动调用 node_parser
-                # 它会直接将 TextNode 视为最终节点。
-                # 如果传入的是 LlamaDocument，且没有显式指定 node_parser，它会用默认的。
-                # 但我们现在是传入 TextNode，所以行为是确定的。
-            )
-            logger.info(f" [Indexer] New index for '{collection_name}' initialized successfully.")
-            index = new_index
+                new_index = VectorStoreIndex.from_documents(
+                    documents=all_nodes_to_add,
+                    storage_context=storage_context,
+                    embed_model=self.embedding_model,
+                )
+                logger.info(f" [Indexer] New index for '{collection_name}' initialized successfully.")
+                index = new_index
+            except Exception as e:
+                logger.error(f" [Indexer] Failed to initialize new index for '{collection_name}': {e}", exc_info=True)
+                raise # 重新抛出异常，让上层捕获
+            finally:
+                init_end_time = time.time()
+                logger.info(f" [Indexer] Index initialization for '{collection_name}' took {init_end_time - init_start_time:.2f} seconds.")
         else:
             logger.info(f" [Indexer] Index for '{collection_name}' already exists. Inserting new nodes.")
-            # 遍历并插入经过处理的 TextNode 列表
-            for idx, node in enumerate(all_nodes_to_add): # <--- 关键：遍历 all_nodes_to_add
+            # --- 增加插入新节点前的日志 ---
+            insert_start_time = time.time()
+            for idx, node in enumerate(all_nodes_to_add):
                 try:
-                    # 插入 TextNode 应该使用 insert_nodes，而不是 insert(doc)
+                    # 记录每个节点插入前的状态
+                    logger.debug(f" [Indexer] Attempting to insert node {idx+1}/{len(all_nodes_to_add)}: {node.id_} - '{node.text[:50]}...'")
+                    node_insert_start_time = time.time()
                     index.insert_nodes([node]) 
-                    logger.debug(f" [Indexer] ✅ Inserted node {idx+1}: {node.id_} - '{node.text[:80]}...'")
+                    node_insert_end_time = time.time()
+                    logger.debug(f" [Indexer] ✅ Inserted node {idx+1}: {node.id_} - '{node.text[:50]}...' in {node_insert_end_time - node_insert_start_time:.4f} seconds.")
                 except Exception as e:
-                    logger.error(f" [Indexer] Failed to insert node {idx+1} into index: {e}", exc_info=True)
+                    logger.error(f" [Indexer] Failed to insert node {idx+1} ({node.id_}) into index: {e}", exc_info=True)
+            insert_end_time = time.time()
+            logger.info(f" [Indexer] All {len(all_nodes_to_add)} nodes insertion for '{collection_name}' took {insert_end_time - insert_start_time:.2f} seconds.")
         
-        # 持久化索引元数据（如 docstore）
-        index.storage_context.persist(persist_dir=PERSIST_DIR)
-        logger.info(f" [Indexer] Index for '{collection_name}' updated and persisted.")
-        self.indices[collection_name] = index # 更新内存缓存
+        # --- 增加持久化操作的日志 ---
+        persist_start_time = time.time()
+        try:
+            index.storage_context.persist(persist_dir=PERSIST_DIR)
+            logger.info(f" [Indexer] Index for '{collection_name}' updated and persisted successfully.")
+        except Exception as e:
+            logger.error(f" [Indexer] Failed to persist index for '{collection_name}': {e}", exc_info=True)
+            # 这里可以选择 re-raise 异常或者进行其他错误处理
+            raise
+        finally:
+            persist_end_time = time.time()
+            logger.info(f" [Indexer] Index persistence for '{collection_name}' took {persist_end_time - persist_start_time:.2f} seconds.")
+            
+        self.indices[collection_name] = index
         return index
 
     def delete_nodes_by_metadata(self, collection_name: str, filters: dict) -> dict:
