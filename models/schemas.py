@@ -204,6 +204,7 @@ class ChatQueryRequest(BaseModel):
     prompt: Optional[str] = None
     is_first_query: bool = False
     use_llm_reranker: bool = True
+    use_reranker: Optional[bool] = True
 
 class UpdateChatMessageRequest(BaseModel):
     """

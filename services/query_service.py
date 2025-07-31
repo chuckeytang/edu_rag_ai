@@ -364,27 +364,34 @@ class QueryService:
         effective_reranker_top_n = request.similarity_top_k or 5
         query_bundle_for_rerank = QueryBundle(query_str=request.question)
 
-        if request.use_llm_reranker and self.llm_reranker:
-            logger.info(f"Applying LLM Reranker to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
-            # LLMRerank 的 aretrieve 方法接收 QueryBundle 和 NodeWithScore 列表
-            # LLMRerank 内部会自动处理 top_n 过滤
-            self.llm_reranker.top_n = effective_reranker_top_n # 动态设置 LLM Reranker 的 top_n
-            final_retrieved_nodes = self.llm_reranker._postprocess_nodes( # <--- 修正：调用 _postprocess_nodes
-                nodes=current_retrieved_nodes, 
-                query_bundle=query_bundle_for_rerank
-            )
-            logger.info(f"LLM Reranker returned {len(final_retrieved_nodes)} nodes.")
+        if request.use_reranker:
+            if request.use_llm_reranker and self.llm_reranker:
+                logger.info(f"Applying LLM Reranker to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
+                # LLMRerank 的 aretrieve 方法接收 QueryBundle 和 NodeWithScore 列表
+                # LLMRerank 内部会自动处理 top_n 过滤
+                self.llm_reranker.top_n = effective_reranker_top_n # 动态设置 LLM Reranker 的 top_n
+                final_retrieved_nodes = self.llm_reranker._postprocess_nodes( # <--- 修正：调用 _postprocess_nodes
+                    nodes=current_retrieved_nodes, 
+                    query_bundle=query_bundle_for_rerank
+                )
+                logger.info(f"LLM Reranker returned {len(final_retrieved_nodes)} nodes.")
+            elif self.local_reranker:
+                logger.info(f"Applying Local Reranker (SentenceTransformerRerank) to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
+                # SentenceTransformerRerank 的 postprocess_nodes 方法接收 QueryBundle 和 NodeWithScore 列表
+                # SentenceTransformerRerank 内部会自动处理 top_n 过滤
+                self.local_reranker.top_n = effective_reranker_top_n # 动态设置本地 Reranker 的 top_n
+                final_retrieved_nodes = self.local_reranker.postprocess_nodes(
+                    current_retrieved_nodes, 
+                    query_bundle=query_bundle_for_rerank
+                )
+                logger.info(f"Local Reranker returned {len(final_retrieved_nodes)} nodes.")
+            else:
+                logger.warning("Reranker is enabled but no Reranker (LLM or Local) is initialized. Skipping reranking.")
+                final_retrieved_nodes = current_retrieved_nodes[:effective_reranker_top_n] # 截断到 top_n
         else:
-            logger.info(f"Applying Local Reranker (SentenceTransformerRerank) to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
-            # SentenceTransformerRerank 的 postprocess_nodes 方法接收 QueryBundle 和 NodeWithScore 列表
-            # SentenceTransformerRerank 内部会自动处理 top_n 过滤
-            self.local_reranker.top_n = effective_reranker_top_n # 动态设置本地 Reranker 的 top_n
-            final_retrieved_nodes = self.local_reranker.postprocess_nodes(
-                current_retrieved_nodes, 
-                query_bundle=query_bundle_for_rerank
-            )
-            logger.info(f"Local Reranker returned {len(final_retrieved_nodes)} nodes.")
-        
+            logger.info("Reranker is disabled by request. Skipping reranking.")
+            final_retrieved_nodes = current_retrieved_nodes[:effective_reranker_top_n] # 确保即使不 Rerank 也只取 top_n
+
          # --- 构建发送给 LLM 的 context_str，现在包含类型信息 ---
         context_parts = []
         for n in final_retrieved_nodes: # 使用重排后的节点列表
