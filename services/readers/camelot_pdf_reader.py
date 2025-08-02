@@ -86,6 +86,12 @@ class CamelotPDFReader(BaseReader):
                 for table_idx, table in enumerate(tables):
                     logger.debug(f"[CamelotPDFReader] Processing table {table_idx+1}/{extracted_tables_count} from page {table.page}.")
                     
+                    table_df = table.df # 获取表格的 DataFrame
+                    logger.debug(f"[CamelotPDFReader] DEBUG: DataFrame shape for Table {table_idx+1}: {table_df.shape}")
+                    logger.debug(f"[CamelotPDFReader] DEBUG: DataFrame columns for Table {table_idx+1}: {table_df.columns.tolist()}")
+                    # 打印前几行数据，以确认内容是否符合预期
+                    logger.debug(f"[CamelotPDFReader] DEBUG: DataFrame head for Table {table_idx+1}:\n{table_df.head()}")
+                    
                     table_bbox_str = "N/A_Error" 
                     
                     try:
@@ -119,8 +125,19 @@ class CamelotPDFReader(BaseReader):
                         current_chunk_text_len = 0
                         start_row_for_chunk = 0
 
-                        # 如果有表头，将其加入第一个 chunk
-                        header_row_text = " | ".join([str(col_name).strip() for col_name in table_df.columns])
+                        # 检查列名是否是默认的整数索引，如果是，就将第一行数据作为表头
+                        if all(isinstance(col, (int, float)) for col in table_df.columns):
+                             # 将第一行数据作为表头，并从DataFrame中移除
+                            header_row = table_df.iloc[0]
+                            table_df = table_df.iloc[1:]
+                            # 重新设置 DataFrame 的列名
+                            table_df.columns = header_row
+                            # 重新构建 header_row_text
+                            header_row_text = " | ".join([str(col_name).strip() for col_name in table_df.columns])
+                        else:
+                            header_row_text = " | ".join([str(col_name).strip() for col_name in table_df.columns])
+                        
+                        # Markdown 分隔符
                         header_md_prefix = f"| {header_row_text} |\n|{'---|' * len(table_df.columns)}\n"
 
                         if header_row_text.strip():
@@ -129,10 +146,13 @@ class CamelotPDFReader(BaseReader):
                         
                         for row_idx, row in table_df.iterrows():
                             row_text = " | ".join([str(cell).strip() for cell in row.values])
+                            logger.debug(f"[CamelotPDFReader] Row {row_idx}: length={len(row_text)}, content='{row_text[:50]}...'")
+                            logger.debug(f"[CamelotPDFReader] Current chunk length: {current_chunk_text_len}, Table chunk size: {self.table_chunk_size}")
                             
                             # 预估添加当前行后的长度
                             # 加上当前行的长度和分隔符（例如 '\n'）
                             potential_next_len = current_chunk_text_len + len(row_text) + 1 
+                            logger.debug(f"[CamelotPDFReader] Current potential next length: {potential_next_len}")
 
                             # 如果添加当前行后，超出 chunk 限制，且当前 chunk 不为空
                             # 就将当前累积的行打包成一个 chunk
@@ -157,7 +177,7 @@ class CamelotPDFReader(BaseReader):
                                 chunk_metadata["end_row_index"] = row_idx - 1
                                 
                                 documents.append(Document(text=formatted_chunk_text, metadata=chunk_metadata))
-                                logger.debug(f"[CamelotPDFReader] Added intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:100]}...'")
+                                logger.debug(f"[CamelotPDFReader] Added intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:500]}...'")
                                 
                                 # 重置当前 chunk 状态，开始新的 chunk
                                 current_chunk_rows = []
@@ -192,7 +212,7 @@ class CamelotPDFReader(BaseReader):
                             chunk_metadata["end_row_index"] = row_idx
                             
                             documents.append(Document(text=formatted_chunk_text, metadata=chunk_metadata))
-                            logger.debug(f"[CamelotPDFReader] Added final intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:100]}...'")
+                            logger.debug(f"[CamelotPDFReader] Added final intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:500]}...'")
 
                     else: # 如果不进行智能分块，就将整个表格作为一个 chunk (原先的逻辑)
                         table_md_content = table.df.to_markdown(index=False)

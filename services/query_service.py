@@ -405,6 +405,10 @@ class QueryService:
             )
         context_str_for_llm = "\n\n".join(context_parts)
 
+        # --- 创建一个节点ID到完整节点对象的映射 ---
+        retrieved_node_map: Dict[str, LlamaTextNode] = {node_with_score.node.id_: node_with_score.node for node_with_score in final_retrieved_nodes}
+        logger.debug(f"Created map of {len(retrieved_node_map)} retrieved nodes for lookup.")
+
         # --- 主 RAG 查询 LLM ---
         llm_response_obj = None 
         for attempt in range(max_retries):
@@ -524,6 +528,79 @@ class QueryService:
             yield f"data: {error_chunk_json}\n\n".encode("utf-8")
             return 
         
+
+        if not full_response_content or full_response_content.strip() == "NO_RELEVANT_DOCUMENTS_FOUND":
+             # 处理LLM找不到答案的情况
+             # ... (你的 fallback 逻辑) ...
+             return
+    
+        # 获取所有被引用的 chunk 的文本列表和 ID 列表
+        referenced_chunk_texts = [node.text for node in retrieved_node_map.values()]
+        referenced_chunk_ids = list(retrieved_node_map.keys())
+
+        # 步骤 3.1: 将回答分割成句子
+        import re
+        # 使用正则表达式进行句子分割
+        # 注意：这可能不完美，但对于大多数情况足够
+        response_sentences = re.split(r'(?<=[.!?。！？])\s+', full_response_content)
+        
+        sentence_citations = []
+        
+        # 步骤 3.2: 遍历每个句子，找到它最相似的引用 chunk
+        # LlamaIndex 的 `embedding_model` 实例可以用来生成句子向量
+        # 你需要在 QueryService 中注入 embedding_model
+        
+        if self.embedding_model:
+            # 批量获取句子和 chunk 的 embeddings，效率更高
+            all_text_to_embed = response_sentences + referenced_chunk_texts
+            all_embeddings = await self.embedding_model.aget_text_embedding_batch(all_text_to_embed, show_progress=False)
+            
+            response_sentence_embeddings = all_embeddings[:len(response_sentences)]
+            referenced_chunk_embeddings = all_embeddings[len(response_sentences):]
+
+            import numpy as np
+            # 计算余弦相似度
+            def cosine_similarity(v1, v2):
+                v1 = np.array(v1)
+                v2 = np.array(v2)
+                dot_product = np.dot(v1, v2)
+                norm_v1 = np.linalg.norm(v1)
+                norm_v2 = np.linalg.norm(v2)
+                if norm_v1 == 0 or norm_v2 == 0:
+                    return 0
+                return dot_product / (norm_v1 * norm_v2)
+
+            for i, sentence in enumerate(response_sentences):
+                sentence_embedding = response_sentence_embeddings[i]
+                best_match_id = None
+                max_similarity = -1.0
+                
+                for j, chunk_embedding in enumerate(referenced_chunk_embeddings):
+                    similarity = cosine_similarity(sentence_embedding, chunk_embedding)
+                    if similarity > max_similarity:
+                        max_similarity = similarity
+                        best_match_id = referenced_chunk_ids[j]
+
+                # 阈值判断：如果最高相似度低于某个阈值，可能就不认为是引用
+                if max_similarity > 0.3:  # 可以根据实际情况调整阈值
+                    source_node = retrieved_node_map.get(best_match_id)
+                    if source_node:
+                        # 确保元数据存在
+                        source_meta = source_node.metadata
+                        citation_info = {
+                            "sentence": sentence,
+                            "referenced_chunk_id": best_match_id,
+                            "referenced_chunk_text": source_node.text,
+                            "document_id": source_meta.get('document_id'), # 或其他你希望引用的 ID
+                            "material_id": source_meta.get('material_id'),
+                            "file_name": source_meta.get('file_name'),
+                            "page_label": source_meta.get('page_label')
+                        }
+                        sentence_citations.append(citation_info)
+                        
+        else:
+            logger.warning("Embedding model not available for sentence-level citation.")
+            
         # --- 构建最终的 metadata ---
         final_metadata = {}
         
@@ -534,6 +611,9 @@ class QueryService:
 
         if generated_title:
             final_metadata["session_title"] = generated_title
+        
+        if sentence_citations:
+            final_metadata["sentence_citations"] = sentence_citations
         
         logger.debug(f"DEBUG: Final metadata before StreamChunk creation: {final_metadata}")
 

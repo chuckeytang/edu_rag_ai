@@ -163,6 +163,8 @@ class IndexerService:
                         # 确保 extra_info 是可修改的字典
                         if not isinstance(node.extra_info, dict):
                             node.extra_info = {}
+
+                        node.extra_info.update(doc.metadata)
                         
                         # 合并原始文档的元数据到 TextNode 的 extra_info
                         for key, value in node.extra_info.items():
