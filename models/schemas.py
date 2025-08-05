@@ -1,6 +1,8 @@
 from pydantic import BaseModel, Field
 from typing import Any, Optional, List, Dict
 from datetime import datetime, timezone
+
+from core.rag_config import RagConfig
 class DocumentMetadata(BaseModel):
     file_name: str
     page_label: str
@@ -148,6 +150,10 @@ class UploadFromOssRequest(BaseModel):
     file_key: str = Field(..., description="The object key for the file in the public OSS bucket.")
     metadata: RAGMetadata
     collection_name: Optional[str] = Field(None)
+    rag_config: RagConfig = Field(
+        ...,
+        description="RAG 配置，用于文档索引阶段的参数，例如 chunk_size。"
+    )
 
 class UpdateMetadataRequest(BaseModel):
     material_id: int = Field(..., description="The ID of the material to update.")
@@ -203,8 +209,7 @@ class ChatQueryRequest(BaseModel):
     similarity_top_k: Optional[int] = 5
     prompt: Optional[str] = None
     is_first_query: bool = False
-    use_llm_reranker: bool = True
-    use_reranker: Optional[bool] = True
+    rag_config: RagConfig
 
 class UpdateChatMessageRequest(BaseModel):
     """

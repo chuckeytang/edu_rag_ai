@@ -10,6 +10,7 @@ from fastapi import Depends
 
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.schema import Document as LlamaDocument
+from core.rag_config import RagConfig
 from models.schemas import UploadFromOssRequest
 from core.config import settings
 from services.indexer_service import IndexerService
@@ -58,7 +59,10 @@ class DocumentOssService:
             for key, filename in self.processed_files.items():
                 f.write(f"{key}:{filename}\n")
 
-    def process_new_oss_file(self, request: UploadFromOssRequest, task_id: str) -> dict:
+    def process_new_oss_file(self, 
+                             request: UploadFromOssRequest, 
+                             task_id: str,
+                             rag_config: RagConfig) -> dict:
         """
         一个完整的、自包含的OSS文件处理流程。
         它不返回任何东西，而是通过task_manager更新任务进度。
@@ -200,7 +204,7 @@ class DocumentOssService:
                 self.task_manager.finish_task(task_id, "error", result={"message": "No valid content or nodes generated for indexing."})
             else:
                 logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
-                self.indexer_service.add_documents_to_index(final_nodes_to_index, collection_name=collection_name)
+                self.indexer_service.add_documents_to_index(final_nodes_to_index, collection_name=collection_name, rag_config=rag_config)
                 
                 self.processed_files[file_key] = display_file_name
                 self._save_processed_keys()

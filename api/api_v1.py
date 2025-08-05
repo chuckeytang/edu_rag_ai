@@ -1,8 +1,9 @@
 # api/api_v1.py
+from logging import config
 from fastapi import APIRouter
 
 # 现有 endpoint
-from api.endpoints import chat_history, documents, extraction, queries, uploads
+from api.endpoints import chat_history, documents, extraction, queries, uploads, config
 # 新增调试 endpoint
 from api.endpoints import debug_index
 
@@ -25,4 +26,7 @@ api_router.include_router(
 )
 api_router.include_router(
     chat_history.router, prefix="/chat_history", tags=["chat_history"]
+)
+api_router.include_router(
+    config.router, prefix="/config", tags=["config"]
 )

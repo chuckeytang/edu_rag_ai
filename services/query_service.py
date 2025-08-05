@@ -29,6 +29,7 @@ from llama_index.core.query_engine import RetrieverQueryEngine # Import Retrieve
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.postprocessor import SentenceTransformerRerank 
 from llama_index.core.postprocessor import LLMRerank
+from core.rag_config import RagConfig
 import torch 
 
 from core.config import Settings, settings
@@ -68,6 +69,7 @@ class QueryService:
                  embedding_model: BaseEmbedding,
                  llm: LLM, 
                  indexer_service: IndexerService,
+                 rag_config: RagConfig,
                  chat_history_service: Optional['ChatHistoryService'] = None,
                  deepseek_llm_for_reranker: Optional[LLM] = None):
         """
@@ -80,26 +82,30 @@ class QueryService:
         
         self.indices: Dict[str, VectorStoreIndex] = {}
         self._indexer_service = indexer_service
-        self.qa_prompt = self._create_qa_prompt()
 
         # 保存 chat_history_service 实例
         self._chat_history_service = chat_history_service
+        self.rag_config = rag_config
 
-        self.reranker_top_n_fixed = 5
+        # 使用配置中的提示词
+        self.qa_prompt = PromptTemplate(rag_config.qa_prompt_template)
+        self.title_generation_prompt = PromptTemplate(rag_config.title_prompt_template)
+        self.general_chat_prompt = PromptTemplate(rag_config.general_chat_prompt_template)
+        
         # 1. 本地模型 SentenceTransformer Reranker
         self.local_reranker = SentenceTransformerRerank(
             model="BAAI/bge-reranker-base", 
-            top_n=self.reranker_top_n_fixed, 
+            top_n=rag_config.retrieval_top_k*rag_config.initial_retrieval_multiplier, 
             device="cuda" if torch.cuda.is_available() else "cpu" 
         )
         logger.info(f"Initialized Local Reranker: SentenceTransformerRerank with model '{self.local_reranker.model}' on device '{self.local_reranker.device}' and fixed top_n={self.local_reranker.top_n}.")
 
         # 2. 基于 LLM 的 Reranker (使用 DeepSeek)
         self.llm_reranker = None
-        if deepseek_llm_for_reranker:
+        if deepseek_llm_for_reranker and rag_config.reranker_type == "llm":
             self.llm_reranker = LLMRerank(
                 llm=deepseek_llm_for_reranker, # 传入 DeepSeek LLM 实例
-                top_n=self.reranker_top_n_fixed # 与本地重排器返回相同数量的节点
+                top_n=rag_config.retrieval_top_k*rag_config.initial_retrieval_multiplier
             )
             logger.info(f"Initialized LLM Reranker: LLMRerank with model '{deepseek_llm_for_reranker.model}' and fixed top_n={self.llm_reranker.top_n}.")
         else:
@@ -179,89 +185,15 @@ class QueryService:
         
         # 只有一个条件，直接返回
         return chroma_filters[0]
-            
-    def _create_qa_prompt(self, prompt: str = None) -> PromptTemplate:
-        if prompt:
-            return PromptTemplate(prompt)
-        else:
-            return self.default_qa_prompt
-
-    @property
-    def title_generation_prompt(self) -> PromptTemplate:
-        """
-        用于从用户查询和相关文档中生成简短会话标题的提示词。
-        """
-        return PromptTemplate(
-            "You are a title generator assistant working in an educational AI consultation system. "
-            "Based on the user's initial question or message, generate a short, clear, and meaningful title that summarizes the core academic intent of the query.\n\n"
-            "Requirements:\n"
-            "- Title must be concise (ideally 5–12 words)\n"
-            "- Use academic, study-friendly tone (not too casual)\n"
-            "- Format in English Title Case (capitalize major words)\n"
-            "- Do not include emojis or decorative elements\n"
-            "- If the user writes in another language (e.g. Chinese), you may include short bilingual elements or mix languages naturally — but the main title should still be understandable in English\n"
-            "- Focus on accuracy: represent the actual intent or topic of the user's question\n"
-            "---------------------\n"
-            "User query: {query_str}\n"      # LLM Query Engine will automatically fill this
-            "Relevant document content: {context_str}\n" # LLM Query Engine will automatically fill this
-            "Session Title:" # Guides the LLM to output only the title
-        )
-    
-    @property
-    def default_qa_prompt(self) -> PromptTemplate:
-        return PromptTemplate(
-            "{chat_history_context}"
-
-            "You are an advanced, highly specialized Academic AI Assistant for high school curricula (IB, A-Level, AP, IGCSE, etc.). "
-            "Your SOLE purpose is to provide precise, academically rigorous, and impeccably accurate responses that are "
-            "**EXCLUSIVELY derived from the 'Document content' provided below.**\n"
-            "\n"
-            "--- ABSOLUTE Response Guidelines ---\n"
-            "1.  **Source Adherence (CRITICAL)**: "
-            "    - Your answer MUST be constructed *entirely* and *only* from the factual information presented in the 'Document content'.\n"
-            "    - **ABSOLUTELY DO NOT** use any external knowledge, pre-trained data, inferences, or assumptions.\n"
-            "    - **DO NOT** provide any explanations, clarifications, examples, or supplementary details that are not directly and explicitly found in the 'Document content'.\n"
-            "    - **If the 'Document content' is insufficient, ambiguous, or does not contain the answer for the given query, you MUST inform the user about the limitation and politely ask for clarification or more specific details.** Do not attempt to guess or provide irrelevant information.\n" # <--- 关键修改：改为询问，而不是拒绝
-            "2.  **Precision & Conciseness**: Deliver information with academic elegance. Avoid verbose language, redundant phrases, or conversational filler. **Get straight to the answer.**\n"
-            "3.  **Formatting**: Use clear formatting (e.g., bullet points, bolding) only if it directly aids clarity for the *extracted content*. Avoid dense paragraphs. **If the answer is a simple definition, provide only the definition.**\n"
-            "4.  **Context Utilization**: The 'Document content' is provided with source types (e.g., 'PDF_Table', 'PDF_Text').\n"
-            "    - **Prioritize the most direct and accurate information available**, regardless of its source type.\n"
-            "    - If a 'PDF_Table' chunk provides a precise answer (e.g., a term's definition in a glossary table), use it directly. The table is marked with '--- START TABLE ---' and '--- END TABLE ---' for clear identification.\n"
-            "    - Use 'PDF_Text' chunks to provide broader contextual understanding or supplementary details *only if* they are directly relevant and do not duplicate information already provided by 'PDF_Table' chunks. Avoid repeating information.\n"
-            "    - Your goal is to synthesize information from all relevant sources without redundancy, always favoring the most precise and direct answer.\n"
-            "5.  **Language Protocol**: Your primary response language is English. If the user's query includes Chinese, you may include brief, contextually relevant Chinese phrases naturally, but English must remain the dominant language.\n"
-            "6.  **Audience**: Formulate responses for highly motivated high school students, prioritizing clarity and direct relevance.\n"
-            "\n"
-            "--- Tone ---\n"
-            "Academic, precise, authoritative, focused, objective, helpful, and **direct**.\n" # <--- 增加 helpful
-            "\n"
-            "--- Specific Task Instructions ---\n"
-            "If the query is an exam question format (e.g., '6(b)(ii)' or similar numbering/lettering): "
-            "    1. Briefly summarize the core request of the exam question *based only on the query itself*.\n"
-            "    2. Identify and reference the relevant syllabus knowledge or factual points *directly and verbatim from the 'Document content'*. If found, proceed to answer.\n" # <--- 强调如果找到就回答
-            "    3. Provide a clear, step-by-step, and concise response to the exam question, based *only* on the identified knowledge from the document.\n"
-            "    4. If the exam question requires information not found in the documents, follow the general guideline above (inform and ask for clarification).\n" # <--- 考试题也遵循总原则
-            "\n"
-            "Document content: {context_str}\n"
-            "Query: {query_str}\n"
-            "Answer:"
-        )
-            
-    @property
-    def general_chat_prompt(self) -> PromptTemplate:
-        return PromptTemplate(
-            "{chat_history_context}"
-            "You are a friendly and helpful AI assistant. Respond to the user's query naturally. If the query is a general greeting or does not require specific knowledge, respond in a conversational manner. If the user asks for academic information, but no relevant documents are found, you may state that you are an academic assistant but cannot find specific information on that topic. Always maintain a polite and supportive tone.\n"
-            "\n"
-            "Query: {query_str}"
-        )
     
     async def rag_query_with_context(
         self,
-        request: ChatQueryRequest
+        request: ChatQueryRequest,
+        rag_config: RagConfig
     ) -> AsyncGenerator[bytes, None]:
         
         logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
+        self.rag_config = rag_config
         
         # --- 语义检索历史聊天上下文 ---
         chat_history_context_string = ""
@@ -271,7 +203,7 @@ class QueryService:
                     session_id=request.session_id,
                     account_id=request.account_id,
                     query_text=request.context_retrieval_query,
-                    top_k=request.similarity_top_k or 5
+                    top_k=self.rag_config.history_retrieval_top_k or 5
                 )
                 if chat_history_context_nodes:
                     chat_history_context_string = "The following are excerpts from a historical conversation relevant to your current problem:\n" + \
@@ -323,7 +255,7 @@ class QueryService:
                 title_query_engine = rag_index.as_query_engine(
                     llm=self.llm,
                     vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-                    similarity_top_k=2,
+                    similarity_top_k=3,
                     text_qa_template=self.title_generation_prompt
                 )
                 title_response = await title_query_engine.aquery(request.question)
@@ -342,7 +274,7 @@ class QueryService:
         # --- 召回文档 ---
         retriever = rag_index.as_retriever(
             vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=(request.similarity_top_k or 5) * 3 # 初始召回更多节点，例如3倍，以便 Reranker 有更多选择
+            similarity_top_k=self.rag_config.retrieval_top_k
         )
         logger.info(f"RAG Retriever query clause: {chroma_where_clause}") 
 
@@ -361,21 +293,21 @@ class QueryService:
             
         final_retrieved_nodes = []
         # 确保 reranker_top_n 是最终需要返回的数量
-        effective_reranker_top_n = request.similarity_top_k or 5
+        effective_reranker_top_n = self.rag_config.retrieval_top_k * self.rag_config.initial_retrieval_multiplier or 5
         query_bundle_for_rerank = QueryBundle(query_str=request.question)
 
-        if request.use_reranker:
-            if request.use_llm_reranker and self.llm_reranker:
+        if self.rag_config.use_reranker:
+            if self.rag_config.reranker_type == "llm" and self.llm_reranker:
                 logger.info(f"Applying LLM Reranker to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
                 # LLMRerank 的 aretrieve 方法接收 QueryBundle 和 NodeWithScore 列表
                 # LLMRerank 内部会自动处理 top_n 过滤
                 self.llm_reranker.top_n = effective_reranker_top_n # 动态设置 LLM Reranker 的 top_n
-                final_retrieved_nodes = self.llm_reranker._postprocess_nodes( # <--- 修正：调用 _postprocess_nodes
+                final_retrieved_nodes = self.llm_reranker._postprocess_nodes(
                     nodes=current_retrieved_nodes, 
                     query_bundle=query_bundle_for_rerank
                 )
                 logger.info(f"LLM Reranker returned {len(final_retrieved_nodes)} nodes.")
-            elif self.local_reranker:
+            elif self.rag_config.reranker_type == "local" and self.local_reranker:
                 logger.info(f"Applying Local Reranker (SentenceTransformerRerank) to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
                 # SentenceTransformerRerank 的 postprocess_nodes 方法接收 QueryBundle 和 NodeWithScore 列表
                 # SentenceTransformerRerank 内部会自动处理 top_n 过滤
@@ -387,7 +319,7 @@ class QueryService:
                 logger.info(f"Local Reranker returned {len(final_retrieved_nodes)} nodes.")
             else:
                 logger.warning("Reranker is enabled but no Reranker (LLM or Local) is initialized. Skipping reranking.")
-                final_retrieved_nodes = current_retrieved_nodes[:effective_reranker_top_n] # 截断到 top_n
+                final_retrieved_nodes = current_retrieved_nodes[:self.rag_config.post_rerank_top_n] # 截断到 top_n
         else:
             logger.info("Reranker is disabled by request. Skipping reranking.")
             final_retrieved_nodes = current_retrieved_nodes[:effective_reranker_top_n] # 确保即使不 Rerank 也只取 top_n
@@ -413,7 +345,7 @@ class QueryService:
         llm_response_obj = None 
         for attempt in range(max_retries):
             try:
-                final_prompt_for_llm = self.qa_prompt.format( # 使用 self.qa_prompt，因为它会调用 _create_qa_prompt
+                final_prompt_for_llm = self.qa_prompt.format(
                     chat_history_context=chat_history_context_string,
                     context_str=context_str_for_llm, 
                     query_str=request.question
@@ -582,7 +514,7 @@ class QueryService:
                         best_match_id = referenced_chunk_ids[j]
 
                 # 阈值判断：如果最高相似度低于某个阈值，可能就不认为是引用
-                if max_similarity > 0.3:  # 可以根据实际情况调整阈值
+                if max_similarity > self.rag_config.citation_similarity_threshold: 
                     source_node = retrieved_node_map.get(best_match_id)
                     if source_node:
                         # 确保元数据存在

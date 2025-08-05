@@ -13,6 +13,8 @@ import chromadb
 from chromadb.config import Settings
 from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.llms import LLM as LlamaLLM
+from core.rag_config import RagConfig
+import json
 import logging
 from functools import lru_cache
 
@@ -21,6 +23,27 @@ from services.task_manager_service import TaskManagerService
 logger = logging.getLogger(__name__)
 _global_chroma_client_instance = None 
 
+_current_rag_config = RagConfig.get_default_config()
+
+def get_rag_config():
+    """依赖项函数，返回当前的RAG配置"""
+    return _current_rag_config
+
+def update_rag_config(new_config_json_str: str):
+    """
+    一个用于从 Java 端更新 RAG 配置的函数。
+    可以考虑用一个专用的 /config API 暴露给后端。
+    """
+    global _current_rag_config
+    try:
+        config_dict = json.loads(new_config_json_str)
+        _current_rag_config = RagConfig(**config_dict)
+        logger.info("RAG configuration updated successfully.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update RAG config: {e}")
+        return False
+    
 def get_chroma_client():
     """
     获取 ChromaDB 客户端的依赖。
@@ -56,7 +79,6 @@ def initialize_global_chroma_client():
             raise
     else:
         logger.info("Global ChromaDB PersistentClient already initialized.")
-
 
 @lru_cache(maxsize=1)
 def get_embedding_model():
@@ -107,10 +129,12 @@ def get_deepseek_llm_flashcard() -> OpenAILike:
 def get_indexer_service() -> IndexerService:
     """提供 IndexerService 的单例实例"""
     logger.info("Initializing IndexerService...")
+    rag_config = get_rag_config()
     # IndexerService 依赖于 get_chroma_client()，它会获取全局单例
     return IndexerService(
         chroma_client=get_chroma_client(), 
-        embedding_model=get_embedding_model()
+        embedding_model=get_embedding_model(),
+        rag_config=rag_config
     )
 
 @lru_cache(maxsize=1)
@@ -127,9 +151,11 @@ def get_chat_history_service() -> ChatHistoryService:
 def get_query_service() -> QueryService:
     """提供 QueryService 的单例实例"""
     logger.info("Initializing QueryService...")
+    rag_config = get_rag_config()
     return QueryService(
         chroma_client=get_chroma_client(),
         embedding_model=get_embedding_model(),
+        rag_config=rag_config,
         llm=get_dashscope_rag_llm(),
         indexer_service=get_indexer_service(),
         chat_history_service=get_chat_history_service(),

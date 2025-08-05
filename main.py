@@ -5,6 +5,11 @@ from api.api_v1 import api_router
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from core.logging_config import setup_app_logging # 假设这个模块存在并配置了日志
+from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 
 # 导入 asynccontextmanager 用于 FastAPI 的生命周期事件
 from contextlib import asynccontextmanager
@@ -88,6 +93,35 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    自定义请求验证异常处理程序，用于打印详细的 Pydantic 错误日志。
+    """
+    print("--- Pydantic Validation Error Details ---")
+    print(f"Request URL: {request.url}")
+    print(f"Request Method: {request.method}")
+    print(f"Request Body: {await request.body()}")  # 打印原始请求体
+    
+    # 打印详细的错误列表
+    errors = exc.errors()
+    for error in errors:
+        loc = " -> ".join(map(str, error['loc']))
+        msg = error['msg']
+        type_ = error['type']
+        print(f"  Field: {loc}")
+        print(f"  Message: {msg}")
+        print(f"  Error Type: {type_}")
+        print("-" * 20)
+
+    print("--- End of Validation Error ---")
+    
+    # 返回一个格式化的 JSON 响应给客户端
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content=jsonable_encoder({"detail": errors})
+    )
 
 if __name__ == '__main__':
     # =================================================================

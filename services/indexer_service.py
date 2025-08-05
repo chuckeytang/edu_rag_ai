@@ -21,6 +21,7 @@ import chromadb
 from chromadb.config import Settings
 
 from core.config import settings
+from core.rag_config import RagConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,21 +30,39 @@ PERSIST_DIR = settings.INDEX_PATH
 class IndexerService:
     def __init__(self, 
                  chroma_client: chromadb.PersistentClient,
-                 embedding_model: BaseEmbedding):
+                 embedding_model: BaseEmbedding,
+                 rag_config: RagConfig):
         
         self.chroma_client = chroma_client
         self.embedding_model = embedding_model
+        self._current_rag_config = rag_config
         # 内存缓存，用于按需加载索引对象
         self.indices: Dict[str, VectorStoreIndex] = {} 
         
         self.node_parser = SentenceSplitter( 
-            chunk_size=512,  
-            chunk_overlap=50, 
+            chunk_size=self._current_rag_config.chunk_size,  
+            chunk_overlap=self._current_rag_config.chunk_overlap, 
         )
         os.makedirs(PERSIST_DIR, exist_ok=True)
 
         logger.info("IndexerService initialized.")
 
+    # 用于按需更新 SentenceSplitter
+    def _update_node_parser_if_needed(self, new_rag_config: RagConfig):
+        # 检查关键参数是否改变
+        if (new_rag_config.chunk_size != self._current_rag_config.chunk_size or
+            new_rag_config.chunk_overlap != self._current_rag_config.chunk_overlap):
+            
+            logger.info("RAG config for SentenceSplitter has changed. Re-initializing node_parser.")
+            # 只有当参数发生变化时才重新创建
+            self.node_parser = SentenceSplitter( 
+                chunk_size=new_rag_config.chunk_size,  
+                chunk_overlap=new_rag_config.chunk_overlap, 
+            )
+            self._current_rag_config = new_rag_config
+        else:
+            logger.debug("RAG config for SentenceSplitter is unchanged. Skipping re-initialization.")
+            
     def _get_or_load_index(self, collection_name: str) -> Optional[VectorStoreIndex]:
         if collection_name in self.indices:
             logger.info(f"Returning cached index for collection: '{collection_name}'.")
@@ -129,11 +148,14 @@ class IndexerService:
 
     def add_documents_to_index(self, 
                                documents: List[LlamaDocument], 
-                               collection_name: str) -> VectorStoreIndex:
+                               collection_name: str,
+                               rag_config: RagConfig) -> VectorStoreIndex:
         logger.info(f"Attempting to add {len(documents)} documents to index for collection: '{collection_name}'...")
         if not documents:
             logger.warning("No LlamaDocuments provided for indexing. Skipping.")
             return self._get_or_load_index(collection_name) 
+        
+        self._update_node_parser_if_needed(rag_config)
 
         logger.debug(f"Received {len(documents)} raw LlamaDocuments for collection: '{collection_name}'.")
         all_nodes_to_add: List[TextNode] = [] 

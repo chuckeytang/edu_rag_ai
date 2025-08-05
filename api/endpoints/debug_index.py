@@ -7,7 +7,7 @@ from services.indexer_service import IndexerService
 logger = logging.getLogger(__name__)
 
 from typing import Any, Dict, List, Optional
-from models.schemas import ChatQueryRequest, QueryRequest
+from models.schemas import QueryRequest
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 import numpy as np
 from services.query_service import QueryService  

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from api.dependencies import get_query_service
+from core.rag_config import RagConfig
 from services.query_service import QueryService
 from models.schemas import ChatQueryRequest, QueryResponse, QueryResponseNode, StreamChunk, StreamingResponseWrapper
 from fastapi.responses import StreamingResponse
@@ -21,7 +22,7 @@ async def rag_query_with_context_api(request: ChatQueryRequest,
         # 直接返回 query_service.rag_query_with_context(request) 产生的异步生成器
         # FastAPI 的 StreamingResponse 会自动接管这个生成器，并将其作为 SSE 流发送
         return StreamingResponse(
-            query_service.rag_query_with_context(request),
+            query_service.rag_query_with_context(request, request.rag_config),
             media_type="text/event-stream"
         )
 
