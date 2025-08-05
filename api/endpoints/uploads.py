@@ -134,8 +134,7 @@ async def _handle_single_file(
 def process_task_wrapper(request: UploadFromOssRequest, 
                          task_id: str,
                          document_oss_service: DocumentOssService,
-                         task_manager_service: TaskManagerService,
-                         rag_config: RagConfig):
+                         task_manager_service: TaskManagerService):
     """
     这个函数现在是一个纯粹的包装器/调度器。
     它的唯一职责就是调用业务服务层的方法，并把 task_id 传过去。
@@ -144,7 +143,7 @@ def process_task_wrapper(request: UploadFromOssRequest,
     logger.info(f"[TASK_ID: {task_id}] Background task wrapper started. Delegating all logic to DocumentOssService...")
     try:
         # 直接调用，不关心返回值。所有状态更新都在 process_new_oss_file 内部完成。
-        document_oss_service.process_new_oss_file(request, task_id, rag_config)
+        document_oss_service.process_new_oss_file(request, task_id, request.rag_config)
     except Exception as e:
         logger.error(f"[TASK_ID: {task_id}] A critical unhandled exception escaped the service layer: {e}", exc_info=True)
         task_manager_service.finish_task(task_id, "error", result={"message": "A critical and unexpected error occurred in the service layer."})
