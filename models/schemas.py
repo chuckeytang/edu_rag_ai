@@ -159,6 +159,7 @@ class UpdateMetadataRequest(BaseModel):
     material_id: int = Field(..., description="The ID of the material to update.")
     collection_name: Optional[str] = Field(None)
     metadata: RAGMetadata = Field(..., description="The new metadata payload.")
+    rag_config: Optional[RagConfig] = Field(None, description="可选的 RAG 配置，用于文档索引阶段的参数，例如 chunk_size。")
 
 class UpdateMetadataResponse(BaseModel):
     message: str
@@ -191,6 +192,8 @@ class AddChatMessageRequest(BaseModel):
     content: str
     metadata: Optional[Dict[str, Any]] = {} # 这里使用 Dict[str, Any] 来兼容 JsonNode 传递过来的数据
     timestamp: str # ISO formatted string
+    rag_config: Optional[RagConfig] = Field(None, description="可选的RAG配置，用于覆盖默认值。")
+
 class QueryRequest(BaseModel):
     question: str
     collection_name: str = Field(...) 

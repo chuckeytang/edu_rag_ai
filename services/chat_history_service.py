@@ -10,6 +10,7 @@ import chromadb
 
 from core.config import settings
 from core.metadata_utils import prepare_metadata_for_storage
+from core.rag_config import RagConfig
 from services.indexer_service import IndexerService # 假设你的这个工具函数存在
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ class ChatHistoryService:
             logger.error(f"Failed to initialize chat history collection: {e}")
             raise
 
-    def add_chat_message_to_chroma(self, message_data: Dict[str, Any]):
+    def add_chat_message_to_chroma(self, message_data: Dict[str, Any], rag_config: Optional[RagConfig] = None):
         """
         将聊天消息作为文档添加到 ChromaDB 的聊天历史Collection。
         """
@@ -60,7 +61,8 @@ class ChatHistoryService:
         try:
             self._indexer_service.add_documents_to_index(
                 documents=[doc],
-                collection_name=self.chat_history_collection_name
+                collection_name=self.chat_history_collection_name,
+                rag_config=rag_config
             )
         except Exception as e:
             logger.error(f"Failed to add chat message '{doc.id_}' to ChromaDB via IndexerService: {e}", exc_info=True)

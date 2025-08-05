@@ -1,5 +1,5 @@
 import os
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional
 from core.rag_config import RagConfig
 from services.chat_history_service import ChatHistoryService
@@ -27,14 +27,17 @@ logger = logging.getLogger(__name__)
 @router.post("/upload", response_model=UploadResponse)
 async def upload_file(file: UploadFile = File(...),
     document_service: DocumentService = Depends(get_document_service), 
-    indexer_service: IndexerService = Depends(get_indexer_service)):
-    return await _handle_single_file(file, document_service=document_service, indexer_service=indexer_service)
+    indexer_service: IndexerService = Depends(get_indexer_service),
+    rag_config: Optional[str] = Query(None, description="JSON string for RAG configuration")
+    ):
+    
+    return await _handle_single_file(file, document_service=document_service, indexer_service=indexer_service, rag_config=rag_config)
 
 # ---- 批量上传：调用同一套业务逻辑 _handle_single_file ----
 @router.post("/upload-multiple", response_model=List[UploadResponse])
 async def upload_multiple_files(files: List[UploadFile] = File(...),
                                 document_service: DocumentService = Depends(get_document_service),
-                                indexer_service: IndexerService = Depends(get_indexer_service)):
+                                indexer_service: IndexerService = Depends(get_indexer_service),rag_config: Optional[str] = Query(None, description="JSON string for RAG configuration")):
     responses: List[UploadResponse] = []
     seen_hashes: set[str] = set()  # 本批次内已处理的文件 Hash
 
@@ -60,7 +63,7 @@ async def upload_multiple_files(files: List[UploadFile] = File(...),
 
             # 交给统一处理函数
             response = await _handle_single_file(file, precomputed_hash=file_hash, 
-                                                  document_service=document_service, indexer_service=indexer_service)
+                                                  document_service=document_service, indexer_service=indexer_service, rag_config=rag_config)
             responses.append(response)
 
         except HTTPException as e:
@@ -82,7 +85,8 @@ async def _handle_single_file(
     file: UploadFile,
     document_service: DocumentService,
     indexer_service: IndexerService,
-    precomputed_hash: str | None = None
+    precomputed_hash: str | None = None,
+    rag_config: Optional[RagConfig] = None
 ) -> UploadResponse:
     """
     真正执行: 去重 -> 保存 -> 解析 -> 过滤 -> 向量索引
@@ -119,7 +123,7 @@ async def _handle_single_file(
         logger.debug(f"Item {i} in filtered_docs has type: {type(item)}")
         
     # 5. 更新向量索引
-    indexer_service.add_documents_to_index(filtered_docs, collection_name="public_collection") 
+    indexer_service.add_documents_to_index(filtered_docs, collection_name="public_collection",rag_config=rag_config) 
 
     # 6. 返回
     return UploadResponse(
@@ -187,6 +191,7 @@ def update_metadata_task(request: UpdateMetadataRequest,
     task_id = str(request.material_id)
     material_id = request.material_id
     collection_name = request.collection_name
+    rag_config = request.rag_config 
     logger.info(f"[TASK_ID: {task_id}] Metadata update task started. Delegating to DocumentOssService...")
     
     final_status_dict = {"status": "error", "message": "Task failed unexpectedly."}
@@ -212,7 +217,8 @@ def update_metadata_task(request: UpdateMetadataRequest,
             # 2. 调用发布（新增公共节点）的方法
             publish_status = indexer_service.add_public_acl_to_material(
                 material_id=material_id,
-                collection_name=collection_name
+                collection_name=collection_name,
+                rag_config=rag_config 
             )
             # 将发布操作的结果作为最终结果
             final_status_dict = publish_status

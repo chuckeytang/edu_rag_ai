@@ -58,6 +58,18 @@ class CamelotPDFReader(BaseReader):
 
         logger.debug(f"[CamelotPDFReader] Initialized with flavor='{self.flavor}', extract_text_also={self.extract_text_also}, chunk_tables_intelligently={self.chunk_tables_intelligently}, table_settings={self.table_settings}")
 
+    def _clean_text_for_utf8(self, text: str) -> str:
+        """
+        清洗文本，移除不完整的或无法编码为UTF-8的Unicode字符。
+        """
+        if not text:
+            return ""
+        try:
+            return text.encode('utf-8', 'ignore').decode('utf-8')
+        except Exception as e:
+            logger.warning(f"Error during text cleaning, returning original text. Error: {e}")
+            return text
+        
     def load_data(
         self, file: Union[str, os.PathLike], extra_info: Optional[Dict] = None
     ) -> List[Document]:
@@ -119,90 +131,65 @@ class CamelotPDFReader(BaseReader):
 
                     # === 智能表格分块逻辑 ===
                     if self.chunk_tables_intelligently:
-                        table_df = table.df # 获取表格的 DataFrame
+                        table_df = table.df.copy()
                         
                         current_chunk_rows = []
                         current_chunk_text_len = 0
                         start_row_for_chunk = 0
 
-                        # 检查列名是否是默认的整数索引，如果是，就将第一行数据作为表头
                         if all(isinstance(col, (int, float)) for col in table_df.columns):
-                             # 将第一行数据作为表头，并从DataFrame中移除
-                            header_row = table_df.iloc[0]
-                            table_df = table_df.iloc[1:]
-                            # 重新设置 DataFrame 的列名
-                            table_df.columns = header_row
-                            # 重新构建 header_row_text
-                            header_row_text = " | ".join([str(col_name).strip() for col_name in table_df.columns])
+                            if not table_df.empty:
+                                header_row = table_df.iloc[0]
+                                table_df = table_df.iloc[1:]
+                                table_df.columns = header_row.values
+                                header_row_text = " | ".join([str(col_name).strip() for col_name in table_df.columns])
+                            else:
+                                header_row_text = ""
+                                logger.debug("[CamelotPDFReader] Empty table with integer columns. Skipping header processing.")
                         else:
                             header_row_text = " | ".join([str(col_name).strip() for col_name in table_df.columns])
                         
-                        # Markdown 分隔符
-                        header_md_prefix = f"| {header_row_text} |\n|{'---|' * len(table_df.columns)}\n"
-
-                        if header_row_text.strip():
-                            current_chunk_rows.append(header_row_text)
-                            current_chunk_text_len += len(header_row_text) + 2 # +2 for "| "
+                        header_md_prefix = ""
+                        if header_row_text:
+                            header_md_prefix = f"| {header_row_text} |\n|{'---|' * len(table_df.columns)}\n"
                         
                         for row_idx, row in table_df.iterrows():
-                            row_text = " | ".join([str(cell).strip() for cell in row.values])
-                            logger.debug(f"[CamelotPDFReader] Row {row_idx}: length={len(row_text)}, content='{row_text[:50]}...'")
-                            logger.debug(f"[CamelotPDFReader] Current chunk length: {current_chunk_text_len}, Table chunk size: {self.table_chunk_size}")
+                            # === 在处理表格行时进行清洗 ===
+                            row_text = self._clean_text_for_utf8(" | ".join([str(cell).strip() for cell in row.values]))
+                            row_len = len(row_text) + 1
                             
-                            # 预估添加当前行后的长度
-                            # 加上当前行的长度和分隔符（例如 '\n'）
-                            potential_next_len = current_chunk_text_len + len(row_text) + 1 
-                            logger.debug(f"[CamelotPDFReader] Current potential next length: {potential_next_len}")
+                            potential_next_len = current_chunk_text_len + row_len
+                            if not current_chunk_rows:
+                                potential_next_len += len(header_md_prefix)
 
-                            # 如果添加当前行后，超出 chunk 限制，且当前 chunk 不为空
-                            # 就将当前累积的行打包成一个 chunk
+                            logger.debug(f"[CamelotPDFReader] Row {row_idx}: len={row_len}, current_len={current_chunk_text_len}, potential_len={potential_next_len}, chunk_size={self.table_chunk_size}")
+
                             if potential_next_len > self.table_chunk_size and current_chunk_rows:
-                                # 生成 chunk 文本 (Markdown 格式)
                                 chunk_md_content = "\n".join(current_chunk_rows)
-                                if current_chunk_rows[0] == header_row_text: # 如果第一个是表头，则需要再次添加Markdown分隔符
-                                    chunk_md_content = header_md_prefix + chunk_md_content
-                                
-                                # 添加开始/结束标记
                                 formatted_chunk_text = (
-                                    f"--- START TABLE CHUNK (Page {base_table_metadata['page_label']}, Table {table_idx+1}, Chunk {len(documents)}) ---\n"
-                                    f"{chunk_md_content}\n"
-                                    f"--- END TABLE CHUNK (Rows {start_row_for_chunk}-{row_idx-1}) ---"
+                                    f"--- START TABLE CHUNK ---\n{header_md_prefix}{chunk_md_content}\n--- END TABLE CHUNK (Rows {start_row_for_chunk}-{row_idx-1}) ---"
                                 )
                                 
-                                # 构建 Document
                                 chunk_metadata = base_table_metadata.copy()
                                 chunk_metadata["document_type"] = "PDF_Table_Chunk"
-                                chunk_metadata["chunk_index"] = len(documents) # 当前是第几个表格chunk
+                                chunk_metadata["chunk_index"] = len(documents)
                                 chunk_metadata["start_row_index"] = start_row_for_chunk
                                 chunk_metadata["end_row_index"] = row_idx - 1
                                 
                                 documents.append(Document(text=formatted_chunk_text, metadata=chunk_metadata))
-                                logger.debug(f"[CamelotPDFReader] Added intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:500]}...'")
+                                logger.debug(f"[CamelotPDFReader] Added intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:100]}...'")
                                 
-                                # 重置当前 chunk 状态，开始新的 chunk
                                 current_chunk_rows = []
                                 current_chunk_text_len = 0
-                                start_row_for_chunk = row_idx # 新 chunk 的起始行是当前行
-                                # 如果新 chunk 也要包含表头，可以在这里再次添加
-                                if header_row_text.strip():
-                                    current_chunk_rows.append(header_row_text)
-                                    current_chunk_text_len += len(header_row_text) + 2 # +2 for "| "
-
-
-                            # 添加当前行到 chunk
+                                start_row_for_chunk = row_idx
+                            
                             current_chunk_rows.append(row_text)
-                            current_chunk_text_len += len(row_text) + 1 # +1 for newline
+                            current_chunk_text_len += row_len
 
-                        # 处理循环结束后剩余的行
                         if current_chunk_rows:
                             chunk_md_content = "\n".join(current_chunk_rows)
-                            if current_chunk_rows[0] == header_row_text and len(current_chunk_rows) > 1: # 如果第一个是表头且不只是表头自己一个chunk
-                                chunk_md_content = header_md_prefix + chunk_md_content
-                            
                             formatted_chunk_text = (
-                                f"--- START TABLE CHUNK (Page {base_table_metadata['page_label']}, Table {table_idx+1}, Chunk {len(documents)}) ---\n"
-                                f"{chunk_md_content}\n"
-                                f"--- END TABLE CHUNK (Rows {start_row_for_chunk}-{row_idx}) ---"
+                                f"--- START TABLE CHUNK ---\n{header_md_prefix}{chunk_md_content}\n--- END TABLE CHUNK (Rows {start_row_for_chunk}-{row_idx}) ---"
                             )
                             
                             chunk_metadata = base_table_metadata.copy()
@@ -212,7 +199,7 @@ class CamelotPDFReader(BaseReader):
                             chunk_metadata["end_row_index"] = row_idx
                             
                             documents.append(Document(text=formatted_chunk_text, metadata=chunk_metadata))
-                            logger.debug(f"[CamelotPDFReader] Added final intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:500]}...'")
+                            logger.debug(f"[CamelotPDFReader] Added final intelligent table chunk (Pg:{chunk_metadata['page_label']}, Table:{table_idx}, Chunk:{chunk_metadata['chunk_index']}): '{formatted_chunk_text.strip()[:100]}...'")
 
                     else: # 如果不进行智能分块，就将整个表格作为一个 chunk (原先的逻辑)
                         table_md_content = table.df.to_markdown(index=False)
@@ -243,7 +230,7 @@ class CamelotPDFReader(BaseReader):
                 extracted_pages_text_count = len(pdf_reader.pages)
                 
                 for page_num, page in enumerate(pdf_reader.pages):
-                    page_text = page.extract_text()
+                    page_text = self._clean_text_for_utf8(page.extract_text())
                     if page_text and page_text.strip():
                         text_metadata = {
                             "file_path": file_path,

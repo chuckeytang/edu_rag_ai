@@ -424,7 +424,7 @@ class IndexerService:
             logger.error(f"Error during generic metadata update for material_id '{material_id}': {e}", exc_info=True)
             raise # 重新抛出异常
 
-    def add_public_acl_to_material(self, material_id: int, collection_name: str) -> dict:
+    def add_public_acl_to_material(self, material_id: int, collection_name: str, rag_config: Optional[RagConfig] = None) -> dict:
         """
         为已存在的私有文档添加公共权限（通过创建副本）。
         """
@@ -477,7 +477,7 @@ class IndexerService:
             if public_nodes_to_add:
                 logger.info(f"Adding {len(public_nodes_to_add)} new public nodes for material_id {material_id}.")
                 # 调用自身的 add_documents_to_index 方法来执行插入
-                self.add_documents_to_index(public_nodes_to_add, collection_name) # <-- 使用通用的 add_documents_to_index
+                self.add_documents_to_index(public_nodes_to_add, collection_name, rag_config)
             else:
                 logger.info(f"No new public nodes needed for material_id {material_id}, it might have been published already.")
 

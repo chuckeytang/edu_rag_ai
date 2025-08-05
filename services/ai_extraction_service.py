@@ -78,21 +78,23 @@ class AIExtractionService:
                     documents = reader.load_data()
                 
                 full_content = "\n".join([doc.text for doc in documents])
-                if _tokenizer: # 如果 tokenizer 可用，按 token 截断
-                    tokens = _tokenizer.encode(full_content)
+                import unicodedata
+                cleaned_content = ''.join(c for c in full_content if unicodedata.category(c) != 'Cs')
+                if _tokenizer:
+                    tokens = _tokenizer.encode(cleaned_content)
                     if len(tokens) > MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION:
                         logger.warning(f"File '{file_key}' content ({len(tokens)} tokens) exceeds LLM input limit ({MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION}). Truncating for AI extraction.")
                         truncated_tokens = tokens[:MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION]
                         truncated_content = _tokenizer.decode(truncated_tokens)
                         return truncated_content
-                    return full_content
-                else: # 如果 tokenizer 不可用，按字符截断 (不够精确但安全)
-                    max_chars = MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION * 4 # 粗略估计 1 token = 4 字符
-                    if len(full_content) > max_chars:
-                        logger.warning(f"File '{file_key}' content ({len(full_content)} chars) exceeds LLM input limit (approx. {max_chars} chars). Truncating for AI extraction.")
-                        return full_content[:max_chars]
-                    return full_content
-                return full_content
+                    return cleaned_content
+                else: 
+                    max_chars = MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION * 4
+                    if len(cleaned_content) > max_chars:
+                        logger.warning(f"File '{file_key}' content ({len(cleaned_content)} chars) exceeds LLM input limit (approx. {max_chars} chars). Truncating for AI extraction.")
+                        return cleaned_content[:max_chars]
+                    return cleaned_content
+                
             except Exception as e:
                 logger.error(f"从OSS下载或读取文件 '{file_key}' 失败 (桶: {target_bucket}): {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail=f"从OSS下载或读取文件失败: {e}. 请检查文件键和权限。")

@@ -19,7 +19,9 @@ async def add_chat_message_to_chroma_api(request: AddChatMessageRequest,
     由 Spring 后端调用。
     """
     try:
-        chat_history_service.add_chat_message_to_chroma(request.dict())
+        request_dict = request.dict()
+        rag_config = request_dict.pop("rag_config", None) # 从字典中移除 rag_config
+        chat_history_service.add_chat_message_to_chroma(request_dict, rag_config=rag_config)
         return {"status": "success", "message": "Chat message added to ChromaDB."}
     except Exception as e:
         logger.error(f"Error adding chat message to ChromaDB: {e}", exc_info=True)
