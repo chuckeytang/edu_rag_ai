@@ -346,11 +346,18 @@ class IndexerService:
         try:
             collection = self.chroma_client.get_collection(name=collection_name)
             
-            results = collection.get(
-                where=filters,
-                include=["metadatas", "documents"]
-            )
-            
+            if not filters:
+                # 如果过滤器为空，则不传入where参数，直接获取所有节点
+                results = collection.get(
+                    include=["metadatas", "documents"]
+                )
+            else:
+                # 如果过滤器不为空，则正常传入where参数
+                results = collection.get(
+                    where=filters,
+                    include=["metadatas", "documents"]
+                )
+                
             if not results or not results['ids']:
                 logger.info(f"No nodes found for filters: {filters}")
                 return []
