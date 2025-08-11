@@ -158,7 +158,6 @@ async def upload_from_oss(request: UploadFromOssRequest,
                           background_tasks: BackgroundTasks,
                           document_oss_service: DocumentOssService = Depends(get_document_oss_service),
                           task_manager_service: TaskManagerService = Depends(get_task_manager_service)):
-        
     # 准备要存入任务初始状态的上下文数据
     initial_data = {
         "file_name": request.metadata.file_name,

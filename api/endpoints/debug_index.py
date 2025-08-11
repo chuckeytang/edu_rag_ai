@@ -25,6 +25,7 @@ class DebugQueryResponse(BaseModel):
     final_response_content: str
     citations: List[Dict[str, Any]]
 
+
 router = APIRouter()
 @router.get("/indexed", summary="列出索引中的节点（chunk）")
 def list_indexed(
@@ -46,6 +47,9 @@ def list_indexed(
     从指定的ChromaDB Collection中直接“窥视”数据，用于调试。
     支持按Collection名称、返回数量、文件名/标题模糊过滤，以及特定节点ID精确查询。
     """
+    # 在函数入口处直接打印原始参数值
+    logger.info(f"Received parameters: collection_name='{collection_name}', title='{title}', file_name='{file_name}', limit='{limit}'")
+
     try:
         col = query_service.chroma_client.get_collection(name=collection_name)
     except ValueError:
@@ -57,21 +61,24 @@ def list_indexed(
 
     items = []
     
-    if title or file_name:
+    # 修复点：在条件判断前，对 title 和 file_name 进行显式检查
+    # 如果参数为 None 或空字符串，则将其重置为 None
+    # 这样可以确保 if title or file_name: 的判断在所有环境中都一致
+    effective_title = title.strip() if title else None
+    effective_file_name = file_name.strip() if file_name else None
+
+    # 然后使用修正后的变量进行判断
+    if effective_title or effective_file_name:
         filters = {}
         
-        # 1. 打印调用前的状态
-        logger.info(f"Debug: Starting filtered search for collection '{collection_name}' with title='{title}' and file_name='{file_name}'.")
+        logger.info(f"Debug: Starting filtered search for collection '{collection_name}' with effective_title='{effective_title}' and effective_file_name='{effective_file_name}'.")
 
         nodes = indexer_service.get_nodes_by_metadata_filter(collection_name, filters)
         
-        # 2. 打印 get_nodes_by_metadata_filter 返回的节点数量和第一个节点的详细信息
         logger.info(f"Debug: get_nodes_by_metadata_filter returned {len(nodes)} nodes.")
         if nodes:
             first_node = nodes[0]
-            # 注意：使用vars()打印对象的__dict__，能清楚地看到所有属性
             logger.info(f"Debug: First node details: {vars(first_node)}")
-            # 专门检查 extra_info
             logger.info(f"Debug: First node's extra_info: {first_node.extra_info}")
             if 'title' in first_node.extra_info:
                 logger.info(f"Debug: 'title' found in extra_info: {first_node.extra_info['title']}")
@@ -79,24 +86,22 @@ def list_indexed(
                 logger.warning("Debug: 'title' not found in first node's extra_info!")
 
         filtered_nodes = []
-        if title:
-            # 3. 打印过滤前的状态
+        if effective_title:
             logger.info("Debug: Applying title filter...")
             filtered_by_title = [
                 node for node in nodes 
-                if node.extra_info is not None and title.lower() in (node.extra_info.get("title", "") or "").lower()
+                if node.extra_info is not None and effective_title.lower() in (node.extra_info.get("title", "") or "").lower()
             ]
-            logger.info(f"Debug: Found {len(filtered_by_title)} nodes matching title '{title}'.")
+            logger.info(f"Debug: Found {len(filtered_by_title)} nodes matching title '{effective_title}'.")
             filtered_nodes.extend(filtered_by_title)
         
-        if file_name:
-            # 4. 打印过滤前的状态
+        if effective_file_name:
             logger.info("Debug: Applying file_name filter...")
             filtered_by_filename = [
                 node for node in nodes 
-                if node.extra_info is not None and file_name.lower() in (node.extra_info.get("file_name", "") or "").lower()
+                if node.extra_info is not None and effective_file_name.lower() in (node.extra_info.get("file_name", "") or "").lower()
             ]
-            logger.info(f"Debug: Found {len(filtered_by_filename)} nodes matching file_name '{file_name}'.")
+            logger.info(f"Debug: Found {len(filtered_by_filename)} nodes matching file_name '{effective_file_name}'.")
             filtered_nodes.extend(filtered_by_filename)
 
         unique_nodes = {node.id: node for node in filtered_nodes}.values()
@@ -105,7 +110,6 @@ def list_indexed(
             effective_node_id = node.extra_info.get("doc_id") or node.extra_info.get("ref_doc_id") or node.id
             
             items.append({
-                # 修复点：将 node.id_ 改为 node.id
                 "node_id": effective_node_id,
                 "chroma_id": node.id,
                 "metadata": node.extra_info,
@@ -116,7 +120,6 @@ def list_indexed(
         
         return items
 
-    # else 分支保持不变
     else:
         logger.info(f"Peeking into collection '{collection_name}' with limit {limit}...")
         peek_result = col.peek(limit=limit * 5)
@@ -137,10 +140,10 @@ def list_indexed(
             current_file_name = (meta.get("file_name") or node_content_meta.get("file_name") or "").lower()
             current_title = (meta.get("title") or node_content_meta.get("title") or "").lower()
 
-            if file_name and file_name.lower() not in current_file_name:
+            if effective_file_name and effective_file_name.lower() not in current_file_name:
                 continue
             
-            if title and title.lower() not in current_title:
+            if effective_title and effective_title.lower() not in current_title:
                 continue
                 
             effective_node_id = meta.get("doc_id") or meta.get("ref_doc_id") or _id
