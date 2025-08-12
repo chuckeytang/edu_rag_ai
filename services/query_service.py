@@ -25,7 +25,7 @@ from llama_index.embeddings.dashscope import DashScopeEmbedding, DashScopeTextEm
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core.llms import LLM
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.core.query_engine import RetrieverQueryEngine # Import RetrieverQueryEngine
+from llama_index.core.query_engine import RetrieverQueryEngine 
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.postprocessor import SentenceTransformerRerank 
 from llama_index.core.postprocessor import LLMRerank

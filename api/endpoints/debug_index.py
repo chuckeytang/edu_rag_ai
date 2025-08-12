@@ -1,18 +1,20 @@
 import logging
 import json
+import time
 
 from pydantic import BaseModel
-
+from llama_index.core.schema import QueryBundle
+from llama_index.core import PromptTemplate
 from api.dependencies import get_indexer_service, get_query_service
 from services.indexer_service import IndexerService
-
+from llama_index.core.query_engine import RetrieverQueryEngine 
 logger = logging.getLogger(__name__)
 
 from typing import Any, Dict, List, Optional
-from models.schemas import QueryRequest
+from models.schemas import ChatQueryRequest, QueryRequest
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 import numpy as np
-from services.query_service import QueryService  
+from services.query_service import CustomRetriever, QueryService  
 
 router = APIRouter()
 
@@ -232,14 +234,14 @@ def debug_retrieve_with_filters(request: QueryRequest,
             except Exception as debug_e:
                 logger.error(f"DEBUG: Failed to get latest metadata from DB for {node_with_score.node.node_id}: {debug_e}")
 
-            score_to_append = float(node_with_score.score) # <--- 将 score 强制转换为 Python float
+            score_to_append = float(node_with_score.score) 
             
             # 对 metadata 进行深度拷贝，并转换其中的 NumPy 类型
             cleaned_metadata = {}
             for key, value in current_node_metadata.items():
                 if isinstance(value, np.ndarray): # 如果是 NumPy 数组
                     cleaned_metadata[key] = value.tolist() # 转换为 Python 列表
-                elif isinstance(value, (np.float32, np.float64)): # <--- 移除 np.float
+                elif isinstance(value, (np.float32, np.float64)):
                     cleaned_metadata[key] = float(value) 
                 elif isinstance(value, (np.int32, np.int64)): 
                     cleaned_metadata[key] = int(value) 
@@ -263,10 +265,11 @@ def debug_retrieve_with_filters(request: QueryRequest,
 
 @router.post("/debug-rag-flow", summary="[DEBUG] 执行并展示完整的RAG流程（召回、重排、回复）")
 async def debug_rag_flow(
-    request: QueryRequest, 
+    request: ChatQueryRequest, 
     query_service: QueryService = Depends(get_query_service),
     indexer_service: IndexerService = Depends(get_indexer_service)
 ) -> DebugQueryResponse:
+    import numpy as np 
     """
     一个用于调试的端点，它会执行完整的 RAG 流程，并返回每个关键步骤的详细结果，包括：
     - 初始召回的节点列表
@@ -277,7 +280,12 @@ async def debug_rag_flow(
     """
     logger.info(f"Starting debug RAG flow for collection '{request.collection_name}' with query: '{request.question}'")
     
-    rag_config = query_service.rag_config
+    rag_config = request.rag_config
+    if not rag_config:
+        logger.warning("No rag_config found in request, using default from query_service.")
+        rag_config = query_service.rag_config
+        
+    effective_retrieval_top_k = rag_config.retrieval_top_k * rag_config.initial_retrieval_multiplier if rag_config.use_reranker else rag_config.retrieval_top_k
     
     try:
         # 1. 加载或获取索引
@@ -303,7 +311,7 @@ async def debug_rag_flow(
         # 3. 执行召回（Retrieval）
         retriever = rag_index.as_retriever(
             vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=rag_config.retrieval_top_k * rag_config.initial_retrieval_multiplier 
+            similarity_top_k=effective_retrieval_top_k
         )
         
         original_retrieved_nodes_with_score = await retriever.aretrieve(request.question)
@@ -323,6 +331,7 @@ async def debug_rag_flow(
         final_retrieved_nodes_with_score = []
 
         if rag_config.use_reranker and query_service.local_reranker:
+            query_service.local_reranker.top_n = rag_config.retrieval_top_k
             final_retrieved_nodes_with_score = query_service.local_reranker.postprocess_nodes(
                 original_retrieved_nodes_with_score,
                 query_bundle=query_bundle_for_rerank
@@ -359,22 +368,21 @@ async def debug_rag_flow(
             context_str=context_str_for_llm, 
             query_str=request.question
         )
-        logger.debug(f"Final Prompt for LLM: \n{final_prompt_for_llm[:500]}...")
-        
+        logger.info(f"Final Prompt for LLM: \n{final_prompt_for_llm[:500]}...")
+
         # 6. 调用 LLM 获取最终回复
         # 构造一个非流式的 QueryEngine
-        query_engine = rag_index.as_query_engine(
+        llm_start_time = time.time() # 新增日志：LLM调用开始时间
+        query_engine = RetrieverQueryEngine.from_args(
             llm=query_service.llm,
-            retriever=query_service._indexer_service.get_query_engine(
-                collection_name=request.collection_name, 
-                llm=query_service.llm, 
-                rag_config=rag_config
-            ).retriever # 复用 QueryService 中的 Retriever
+            retriever=CustomRetriever(final_retrieved_nodes_with_score),
+            streaming=False,
+            text_qa_template=PromptTemplate(final_prompt_for_llm) 
         )
-
-        response_obj = await query_engine.aquery(final_prompt_for_llm)
+        response_obj = await query_engine.aquery(request.question)
+        llm_end_time = time.time() # 新增日志：LLM调用结束时间
         final_response_content = response_obj.response if hasattr(response_obj, 'response') else ""
-        logger.info("Successfully got non-streaming LLM response.")
+        logger.info(f"Successfully got non-streaming LLM response. LLM inference took {llm_end_time - llm_start_time:.2f} seconds.")
 
         # 7. 提取引用信息 (与 query_service 中的逻辑类似)
         citations = []
@@ -388,11 +396,13 @@ async def debug_rag_flow(
             # 简化为直接在 debug-flow 中实现
             import re
             response_sentences = re.split(r'(?<=[.!?。！？])\s+', final_response_content)
+            logger.info(f"LLM response split into {len(response_sentences)} sentences.")
             
             referenced_chunk_texts = [n.node.text for n in final_retrieved_nodes_with_score]
             referenced_chunk_ids = [n.node.node_id for n in final_retrieved_nodes_with_score]
             
             if response_sentences and referenced_chunk_texts:
+                logger.info("Embedding LLM sentences and referenced chunks.")
                 all_text_to_embed = response_sentences + referenced_chunk_texts
                 all_embeddings = await query_service.embedding_model.aget_text_embedding_batch(all_text_to_embed, show_progress=False)
                 
@@ -422,6 +432,7 @@ async def debug_rag_flow(
                             best_match_id = referenced_chunk_ids[j]
 
                     if max_similarity > rag_config.citation_similarity_threshold:
+                        logger.debug(f"Sentence '{sentence[:30]}...' matched with chunk ID {best_match_id} (Similarity: {max_similarity:.2f}).")
                         source_node_with_score = next((n for n in final_retrieved_nodes_with_score if n.node.node_id == best_match_id), None)
                         if source_node_with_score:
                             source_meta = source_node_with_score.node.metadata
@@ -435,6 +446,12 @@ async def debug_rag_flow(
                                 "page_label": source_meta.get('page_label')
                             }
                             citations.append(citation_info)
+            else:
+                logger.warning("No sentences or referenced chunks available for citation matching.")
+        else:
+            logger.warning("Skipping citation extraction due to missing embedding model or empty response content.")
+        
+        logger.info(f"Citation extraction complete. Found {len(citations)} citations.")
         
         # 8. 封装并返回所有调试信息
         return DebugQueryResponse(

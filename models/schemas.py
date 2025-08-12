@@ -93,8 +93,8 @@ class ExtractionRequest(BaseModel):
                     "file_key": "path/to/your/document.pdf",
                     "is_public": True,
                     "user_provided_subject": "Mathematics",
-                    "user_provided_level": ["AS"], # 示例更新
-                    "subscribed_subjects": [ # 示例更新
+                    "user_provided_level": ["AS"], 
+                    "subscribed_subjects": [ 
                         {"subject": "Mathematics", "clazz": "A-Level", "exam": "CAIE"},
                         {"subject": "Physics", "clazz": "IB", "exam": "Edexcel"}
                     ]
@@ -102,7 +102,7 @@ class ExtractionRequest(BaseModel):
                 {
                     "content": "This is a sample document about IB Chemistry, focusing on redox reactions.",
                     "user_provided_clazz": "IB",
-                    "subscribed_subjects": [{"subject": "Chemistry", "clazz": "IB", "exam": ""}] # 示例更新
+                    "subscribed_subjects": [{"subject": "Chemistry", "clazz": "IB", "exam": ""}] 
                 }
             ]
         }
@@ -199,7 +199,7 @@ class QueryRequest(BaseModel):
     collection_name: str = Field(...) 
     filters: Optional[Dict] = Field(default_factory=dict)
     similarity_top_k: Optional[int] = 10
-    target_file_ids: Optional[List[str]] = None  # ✅ 使用 hash 列表代替文件名
+    target_file_ids: Optional[List[str]] = None 
     prompt: Optional[str] = None
 class ChatQueryRequest(BaseModel):
     question: str
