@@ -3,6 +3,7 @@ from services.ai_extraction_service import AIExtractionService
 from services.document_oss_service import DocumentOssService
 from services.document_service import DocumentService
 from services.indexer_service import IndexerService
+from services.mcp_service import MCPService
 from services.oss_service import OssService
 from services.query_service import QueryService
 from services.chat_history_service import ChatHistoryService
@@ -199,3 +200,10 @@ def get_document_oss_service() -> DocumentOssService:
         oss_service_instance=get_oss_service(),
         task_manager_service=get_task_manager_service()
     )
+
+@lru_cache(maxsize=1)
+def get_mcp_service() -> MCPService:
+    """提供 MCPService 的单例实例，用于处理功能调用"""
+    logger.info("Initializing MCPService...")
+    # 使用 DeepSeek LLM 作为支持 Function Calling 的 LLM
+    return MCPService(llm_for_function_calling=get_deepseek_llm_metadata())

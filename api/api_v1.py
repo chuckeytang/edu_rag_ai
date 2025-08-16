@@ -3,7 +3,7 @@ from logging import config
 from fastapi import APIRouter
 
 # 现有 endpoint
-from api.endpoints import chat_history, documents, extraction, queries, uploads, config
+from api.endpoints import chat_history, documents, extraction, queries, uploads, config, mcp
 # 新增调试 endpoint
 from api.endpoints import debug_index
 
@@ -29,4 +29,7 @@ api_router.include_router(
 )
 api_router.include_router(
     config.router, prefix="/config", tags=["config"]
+)
+api_router.include_router(
+    mcp.router, prefix="/mcp", tags=["mcp"]
 )

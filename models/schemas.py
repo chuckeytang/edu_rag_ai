@@ -233,3 +233,10 @@ class DeleteChatMessagesRequest(BaseModel):
     """
     session_id: str = Field(..., description="要删除的会话ID")
     account_id: int = Field(..., description="会话所属的用户ID")
+
+# MCPQueryRequest 模型
+class MCPQueryRequest(BaseModel):
+    question: str = Field(..., description="用户输入的查询问题。")
+    # 可以根据需要添加其他字段，如 sessionId, accountId 等
+    # session_id: str
+    # account_id: int
