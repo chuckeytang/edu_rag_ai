@@ -468,21 +468,58 @@ async def debug_rag_flow(
         logger.error(f"Failed to run debug RAG flow: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during debug RAG flow: {str(e)}")
 
-@router.post("/delete-material/{material_id}", summary="根据 material_id 删除所有相关文档块（chunk）")
-def delete_chunks_by_material_id(
-    material_id: int = Path(..., description="要删除的文档的 material_id"),
+@router.post("/delete-by-filter", summary="根据 material_id 或文档标题删除相关文档块")
+def delete_chunks_by_filter(
     collection_name: str = Query(..., description="目标Collection的名称"),
+    material_id: Optional[int] = Query(None, description="要删除的文档的 material_id"),
+    keyword: Optional[str] = Query(None, description="按文档标题进行模糊匹配的关键字"),
     indexer_service: IndexerService = Depends(get_indexer_service) # 依赖注入 IndexerService
 ) -> Dict[str, Any]:
     """
     根据给定的 material_id，从指定 Collection 中删除所有相关的文档块（chunk）。
+    如果同时提供了 material_id 和 keyword，将优先使用 material_id。
     """
+    if material_id is None and keyword is None:
+        raise HTTPException(status_code=400, detail="必须提供 material_id 或 keyword 中的一个。")
+
     logger.info(f"Received request to delete chunks for material_id: {material_id} in collection: '{collection_name}'")
     
-    try:
-        # IndexerService 中的 delete_nodes_by_metadata 方法已经处理了过滤逻辑
-        filters = {"material_id": material_id} # material_id 存储为整数，直接传递整数
+    filters = {}
+    if material_id:
+        # 如果提供了 material_id，则进行精确删除
+        filters = {"material_id": material_id}
+        logger.info(f"Deleting by material_id: {material_id}")
+    elif keyword:
+        # 如果提供了 keyword，则进行模糊匹配查找 material_id
+        # 注意：ChromaDB 的 where 子句不支持模糊匹配，我们必须先从数据库中查找
+        # 你的后端代码中没有提供直接通过 Title 模糊匹配查找 material_id 的方法。
+        # 这里为了演示，我们假设存在一个这样的方法，或者手动实现。
+        # 最简单且可行的方案是：先通过 get_nodes_by_metadata_filter 获取所有节点，然后在内存中过滤。
+        # 虽然效率不高，但对于调试工具是可接受的。
         
+        # 获取所有节点，然后在内存中过滤出匹配关键字的 material_id
+        all_nodes = indexer_service.get_nodes_by_metadata_filter(collection_name, {})
+        
+        matching_material_ids = set()
+        for node in all_nodes:
+            # 确保 extra_info 和 title 存在
+            if node.extra_info and 'title' in node.extra_info:
+                node_title = node.extra_info.get('title', '').lower()
+                if keyword.lower() in node_title:
+                    matching_material_ids.add(node.extra_info.get('material_id'))
+        
+        matching_material_ids.discard(None) # 移除可能存在的 None 值
+        
+        if not matching_material_ids:
+            message = f"No documents found matching keyword '{keyword}'. Nothing to delete."
+            logger.warning(message)
+            return {"status": "success", "message": message}
+
+        # 构建 $in 过滤器
+        filters = {"material_id": {"$in": list(matching_material_ids)}}
+        logger.info(f"Found {len(matching_material_ids)} material_ids matching keyword '{keyword}': {list(matching_material_ids)}")
+    
+    try:
         result = indexer_service.delete_nodes_by_metadata(collection_name=collection_name, filters=filters)
         
         # delete_nodes_by_metadata 已经返回了清晰的状态和信息

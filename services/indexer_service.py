@@ -265,6 +265,7 @@ class IndexerService:
     def delete_nodes_by_metadata(self, collection_name: str, filters: dict) -> dict:
         """
         根据元数据过滤器，直接从ChromaDB中删除所有匹配的节点。
+        不依赖delete方法的返回值，而是通过前后文档计数来验证删除。
         """
         logger.info(f"Attempting to delete nodes from '{collection_name}' with filters: {filters}")
         
@@ -275,67 +276,43 @@ class IndexerService:
             
         try:
             collection = self.chroma_client.get_collection(name=collection_name)
-            
-            def _prepare_delete_where_clause(input_filters: Dict[str, Any]) -> Dict[str, Any]:
-                if not input_filters:
-                    return {}
 
-                internal_filters = []
-                for key, value in input_filters.items():
-                    # 假设这里只处理简单键值对，或者已经预格式化的 {key: {"$op": value}}
-                    # 如果 value 是一个字典（表示已包含操作符），直接使用
-                    if isinstance(value, dict) and any(op in value for op in ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$and", "$or"]):
-                        internal_filters.append({key: value})
-                    elif isinstance(value, list): # 确保列表转换为 $in
-                         if value:
-                             internal_filters.append({key: {"$in": value}})
-                         else: # 空列表条件不匹配任何内容
-                             logger.warning(f"Empty list provided for filter key '{key}'. This condition will be ignored in delete.")
-                    else: # 简单值，转换为 $eq
-                        internal_filters.append({key: {"$eq": value}})
+            # 1. 在删除之前获取总文档数
+            count_before_delete = collection.count()
+            logger.info(f"Total documents in collection '{collection_name}' before deletion: {count_before_delete}")
 
-                if not internal_filters:
-                    return {}
-                
-                # 只有当条件多于一个时才使用 $and
-                if len(internal_filters) > 1:
-                    return {"$and": internal_filters}
-                
-                # 只有一个条件，直接返回这个条件字典
-                return internal_filters[0]
+            # 2. 找到所有匹配的节点ID，以便只删除第一个
+            matching_nodes = collection.get(where=filters, include=['metadatas'])
+            matching_ids = matching_nodes.get('ids', [])
 
-            # 调用辅助方法来构建最终的 where 子句
-            chroma_filters_for_delete = _prepare_delete_where_clause(filters)
-
-            logger.debug(f"ChromaDB delete where clause prepared: {chroma_filters_for_delete}")
-            
-            # 使用修正后的 filters 来调用 delete 方法
-            deleted_ids = collection.delete(where=chroma_filters_for_delete)
-            
-            count = len(deleted_ids) if deleted_ids else 0
-
-            if count == 0:
+            if not matching_ids:
                 message = f"No documents found matching the filters. Nothing to delete."
                 logger.warning(message)
                 return {"status": "success", "message": message}
 
-            # 这一行是重复的，且使用了未修正的 filters，请删除！
-            # collection.delete(where=filters) 
+            logger.info(f"Found {len(matching_ids)} nodes to delete. IDs: {matching_ids}")
             
-            message = f"Successfully deleted {count} document nodes matching filters: {filters}"
-            logger.info(message)
-            return {"status": "success", "message": message}
+            # 使用修正后的 filters 来调用 delete 方法
+            collection.delete(ids=matching_ids)
+            
+            # 4. 在删除之后获取总文档数
+            count_after_delete = collection.count()
+            # 5. 比较前后计数来确定删除数量
+            deleted_count = count_before_delete - count_after_delete
 
-        except Exception as e:
-            # 捕获 ChromaDB 抛出的 ValueError
-            if isinstance(e, ValueError) and "Expected where value for $and or $or to be a list with at least two where expressions" in str(e):
-                message = f"Deletion filter error: {e}. Please check filter format."
+            if deleted_count > 0:
+                message = f"Successfully deleted {deleted_count} document node(s). Filters: {filters}"
+                logger.info(message)
+                return {"status": "success", "message": message}
+            else:
+                message = f"Deletion attempt failed. No documents were deleted. This is unexpected."
                 logger.error(message)
                 return {"status": "error", "message": message}
-            else:
-                message = f"An error occurred during deletion: {e}"
-                logger.error(message, exc_info=True)
-                return {"status": "error", "message": message}
+
+        except Exception as e:
+            message = f"An error occurred during deletion: {e}"
+            logger.error(message, exc_info=True)
+            return {"status": "error", "message": message}
 
     def get_nodes_by_metadata_filter(self, collection_name: str, filters: dict) -> List[TextNode]:
         """
