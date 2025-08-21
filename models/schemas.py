@@ -240,3 +240,41 @@ class MCPQueryRequest(BaseModel):
     # 可以根据需要添加其他字段，如 sessionId, accountId 等
     # session_id: str
     # account_id: int
+
+class RagCallbackRequest(BaseModel):
+    """
+    用于 Python 服务向 Java 服务发送 RAG 任务结果的回调请求
+    """
+    material_type: str = Field(..., description="文档类型，例如 'paper' 或 'paper_cut'")
+    material_id: int = Field(..., description="材料在业务侧的唯一ID，例如 paper_cut_id")
+    status: str = Field(..., description="任务最终状态：'success', 'error', 'duplicate'")
+    message: str = Field(..., description="任务结果描述")
+    details: Optional[Any] = Field(None, description="任务结果的额外详情")
+
+class PaperCutMetadataPayload(BaseModel):
+    file_key: Optional[str] = None
+    type: Optional[str] = None
+    paper_type: Optional[str] = None
+    paper_id: Optional[int] = None
+    paper_cut_id: Optional[int] = None
+    clazz: Optional[str] = None
+    exam: Optional[str] = None
+    subject: Optional[str] = None
+    level_list: Optional[List[str]] = Field(None, alias="level_list")
+    title: Optional[str] = None
+    paper_title: Optional[str] = None
+    author_id: Optional[int] = None
+    author: Optional[str] = None
+    file_name: Optional[str] = None
+    gen_year: Optional[str] = None
+    is_vip: Optional[bool] = None
+    accessible_to: Optional[List[str]] = Field(None, alias="accessible_to")
+    label_list: Optional[List[str]] = Field(None, alias="label_list")
+    description: Optional[str] = None
+
+# 异步处理试题的请求模型
+class UploadFromTextRequest(BaseModel):
+    text_content: str
+    metadata: PaperCutMetadataPayload # 使用新的元数据模型
+    collection_name: Optional[str] = "public_collection"
+    rag_config: Optional[RagConfig] = None

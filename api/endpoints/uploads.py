@@ -1,11 +1,16 @@
 import os
 from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional
+
+import httpx
+from llama_cloud import TextNode
+from openai import BaseModel
 from core.rag_config import RagConfig
 from services.chat_history_service import ChatHistoryService
 from services.document_service import DocumentService
 from services.document_oss_service import DocumentOssService
-from models.schemas import AddChatMessageRequest, DeleteByMetadataRequest, TaskStatus, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
+from models.schemas import AddChatMessageRequest, DeleteByMetadataRequest, TaskStatus, UploadFromTextRequest, UploadResponse, UploadFromOssRequest, UpdateMetadataRequest, UpdateMetadataResponse
+from llama_index.core.schema import Document
 from services.query_service import QueryService
 from services.indexer_service import IndexerService 
 from api.dependencies import (
@@ -306,3 +311,95 @@ async def get_task_status(task_id: str,
     if status is None:
         raise HTTPException(status_code=404, detail=f"Task with ID '{task_id}' not found.")
     return status
+
+JAVA_CALLBACK_BASEURL = os.environ.get("JAVA_CALLBACK_BASEURL")
+JAVA_TEXTRAG_ENDPOINT = os.environ.get("JAVA_TEXTRAG_ENDPOINT")
+JAVA_CALLBACK_URL = f"{JAVA_CALLBACK_BASEURL}{JAVA_TEXTRAG_ENDPOINT}"
+
+# 新的后台任务处理函数，它将是异步回调的真正核心
+async def process_text_indexing_task(request: UploadFromTextRequest, task_id: str):
+    """
+    这是一个后台任务，负责处理文本内容的索引，并在完成后发送回调。
+    """
+    logger.info(f"[TASK_ID: {task_id}] Starting text indexing task for paper_cut_id: {request.metadata.paper_cut_id}")
+    
+    final_status = "error"
+    final_message = "An unexpected error occurred."
+    
+    try:
+        # 1. 组合元数据，并添加缺失的 page_label 字段
+        metadata_payload = request.metadata.model_dump(by_alias=True, exclude_none=True)
+        
+        # 关键修改点：手动添加 page_label 字段
+        # 可以设置为固定的字符串，也可以使用试题的 paper_cut_id 来确保唯一性
+        metadata_payload["page_label"] = "1" 
+        # 或者更具描述性：metadata_payload["page_label"] = f"PaperCut-{request.metadata.paper_cut_id}"
+
+        # 2. 将文本内容和元数据包装成一个 Document 对象
+        doc = Document(
+            text=request.text_content,
+            metadata=metadata_payload
+        )
+        
+        # 2. 调用索引服务
+        indexer_service = get_indexer_service()
+        indexer_service.add_documents_to_index(
+            [doc], 
+            collection_name=request.collection_name, 
+            rag_config=request.rag_config
+        )
+        
+        final_status = "success"
+        final_message = "试题索引成功。"
+        logger.info(f"[TASK_ID: {task_id}] Successfully indexed text content for paper_cut_id: {request.metadata.paper_cut_id}")
+
+    except Exception as e:
+        final_status = "error"
+        final_message = f"索引试题时发生错误: {str(e)}"
+        logger.error(f"[TASK_ID: {task_id}] Failed to index text content: {e}", exc_info=True)
+        
+    finally:
+        # 无论成功或失败，发送回调通知
+        callback_payload = {
+            "material_type": "paper_cut",
+            "material_id": request.metadata.paper_cut_id,
+            "status": final_status,
+            "message": final_message
+        }
+        
+        try:
+            if not JAVA_CALLBACK_URL:
+                logger.error("JAVA_CALLBACK_URL is not configured. Skipping callback.")
+                return
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(JAVA_CALLBACK_URL, json=callback_payload)
+                if response.status_code != 200:
+                    logger.error(f"Failed to send callback to Java. Status: {response.status_code}. Response: {response.text}")
+        except Exception as e:
+            logger.error(f"Failed to send callback to Java: {e}", exc_info=True)
+
+# 文本类异步端点，用于启动后台任务
+@router.post("/upload-from-text", status_code=202)
+async def upload_from_text_async(
+    request: UploadFromTextRequest,
+    background_tasks: BackgroundTasks,
+    task_manager_service: TaskManagerService = Depends(get_task_manager_service)
+):
+    """
+    启动一个后台任务，从文本内容创建RAG索引。
+    """
+    # 1. 创建任务ID，立即返回
+    initial_status = task_manager_service.create_task(
+        task_type="paper_cut_indexing",
+        initial_message=f"Task scheduled for paper_cut_id: {request.metadata.paper_cut_id}.",
+        initial_data={"paper_cut_id": request.metadata.paper_cut_id}
+    )
+    task_id = initial_status.task_id
+    logger.info(f"Received request to index text for paper_cut_id: {request.metadata.paper_cut_id}. Assigning Task ID: {task_id}.")
+
+    # 2. 启动后台任务
+    background_tasks.add_task(process_text_indexing_task, request, task_id)
+    logger.info(f"Task {task_id} successfully scheduled.")
+    
+    return initial_status
