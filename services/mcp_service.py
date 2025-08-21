@@ -16,13 +16,13 @@ class MCPService:
                 "type": "function",
                 "function": {
                     "name": "query_exam_questions",
-                    "description": "查询历年考试的真题，返回一个真题列表。在用户提及'真题'、'往年考题'、'试卷'等关键词并指定了具体科目或主题时调用。",
+                    "description": "这是一个用于查询**外部数据库**中历年考试真题的工具。当用户请求**获取**、**查找**或**查询**指定科目或主题（例如'数据结构'、'计算机网络'）的真题或试卷时，必须使用此工具。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "topic": {
                                 "type": "string",
-                                "description": "要查询的考试科目或主题，例如：数据结构、计算机网络、C语言等。"
+                                "description": "要查询的考试科目或主题，例如：数据结构、计算机网络、C语言等。",
                             }
                         },
                         "required": ["topic"]
@@ -62,17 +62,27 @@ class MCPService:
         try:
             # 2. 调用 LLM 并启用 function_calling
             response = await self.llm.achat(messages, tools=self.get_tool_for_llm(), tool_choice="auto")
-            
+            tool_calls = response.message.additional_kwargs.get("tool_calls", None)
+
             # 3. 解析 LLM 的响应
-            if response.tool_calls:
+            if tool_calls:
                 # LLM 选择了工具调用，提取其内容
-                tool_call = response.tool_calls[0] # 假设只返回一个工具调用
-                function_name = tool_call.name
-                parameters = tool_call.args
+                # 这里的 tool_call 是一个 `ChatCompletionMessageToolCall` 对象
+                tool_call = tool_calls[0]
                 
+                # 核心修改：使用 . 访问属性
+                function_name = tool_call.function.name
+                arguments_str = tool_call.function.arguments
+                
+                try:
+                    parameters = json.loads(arguments_str)
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse tool call arguments as JSON.")
+                    parameters = {}
+
                 logger.info(f"LLM decided to call function: {function_name} with parameters: {parameters}")
                 
-                # 4. 封装成 MCP 协议格式
+                # 5. 封装成 MCP 协议格式
                 mcp_command = {
                     "protocol": "mcp_v1",
                     "action": "function_call",
@@ -82,12 +92,12 @@ class MCPService:
                 return mcp_command
             
             else:
-                # LLM 没有选择工具，这是一个常规问题，返回一个特殊命令
+                # LLM 没有选择工具，返回一个特殊的 'general_query' 命令
                 logger.info("LLM did not choose any tool. This is a general query.")
                 return {
                     "protocol": "mcp_v1",
                     "action": "general_query",
-                    "parameters": {"question": user_question}
+                    "parameters": {"original_question": user_question, "llm_response_text": response.message.content}
                 }
 
         except Exception as e:
@@ -95,6 +105,9 @@ class MCPService:
             # 发生错误时，回退到常规查询，或者返回一个错误命令
             return {
                 "protocol": "mcp_v1",
-                "action": "error",
-                "parameters": {"error": "Failed to generate command.", "details": str(e)}
+                "action": "general_query",
+                "parameters": {
+                    "original_question": user_question,
+                    "llm_response_text": "抱歉，无法理解您的请求。"
+                }
             }

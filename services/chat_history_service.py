@@ -57,12 +57,27 @@ class ChatHistoryService:
             id_=doc_id,
             metadata=prepare_metadata_for_storage(metadata)
         )
-        
+
+        # 1. 检查传入的 rag_config 是否为 None 或字典类型
+        if rag_config and isinstance(rag_config, dict):
+            try:
+                # 2. 从字典反序列化为 RagConfig 实例
+                # RagConfig 的构造函数会检查并赋值，从而让它变成一个真正的对象
+                rag_config_obj = RagConfig(**rag_config)
+                logger.info("Successfully converted rag_config dict to RagConfig object.")
+            except Exception as e:
+                # 如果反序列化失败，记录错误并回退到 None
+                logger.error(f"Failed to convert rag_config dict to RagConfig object: {e}", exc_info=True)
+                rag_config_obj = None
+        else:
+            # 3. 如果 rag_config 已经是正确的对象实例（或为 None），则直接使用
+            rag_config_obj = rag_config
+            
         try:
             self._indexer_service.add_documents_to_index(
                 documents=[doc],
                 collection_name=self.chat_history_collection_name,
-                rag_config=rag_config
+                rag_config=rag_config_obj
             )
         except Exception as e:
             logger.error(f"Failed to add chat message '{doc.id_}' to ChromaDB via IndexerService: {e}", exc_info=True)
