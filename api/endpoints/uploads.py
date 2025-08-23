@@ -332,7 +332,7 @@ async def process_text_indexing_task(request: UploadFromTextRequest, task_id: st
         
         # 关键修改点：手动添加 page_label 字段
         # 可以设置为固定的字符串，也可以使用试题的 paper_cut_id 来确保唯一性
-        metadata_payload["page_label"] = "1" 
+        metadata_payload["page_label"] = f"PaperCut-{request.metadata.paper_cut_id}" 
         # 或者更具描述性：metadata_payload["page_label"] = f"PaperCut-{request.metadata.paper_cut_id}"
 
         # 2. 将文本内容和元数据包装成一个 Document 对象

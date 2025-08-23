@@ -6,6 +6,8 @@ from llama_index.llms.openai_like import OpenAILike
 from core.config import settings
 from llama_index.core.llms import ChatMessage, MessageRole
 
+from models.schemas import MCPResponse
+
 logger = logging.getLogger(__name__)
 
 class MCPService:
@@ -45,7 +47,7 @@ class MCPService:
         """返回LLM需要的tools格式"""
         return self.tool_definitions
 
-    async def generate_mcp_command(self, user_question: str) -> Dict[str, Any]:
+    async def generate_mcp_command(self, user_question: str) -> MCPResponse:
         """
         根据用户问题，调用LLM生成一个MCP协议命令。
         """
@@ -83,31 +85,28 @@ class MCPService:
                 logger.info(f"LLM decided to call function: {function_name} with parameters: {parameters}")
                 
                 # 5. 封装成 MCP 协议格式
-                mcp_command = {
-                    "protocol": "mcp_v1",
-                    "action": "function_call",
-                    "function_name": function_name,
-                    "parameters": parameters
-                }
-                return mcp_command
+                return MCPResponse(
+                    action="function_call",
+                    function_name=function_name,
+                    parameters=parameters
+                )
             
             else:
-                # LLM 没有选择工具，返回一个特殊的 'general_query' 命令
                 logger.info("LLM did not choose any tool. This is a general query.")
-                return {
-                    "protocol": "mcp_v1",
-                    "action": "general_query",
-                    "parameters": {"original_question": user_question, "llm_response_text": response.message.content}
-                }
+                return MCPResponse(
+                    action="general_query",
+                    function_name=None,
+                    parameters={"original_question": user_question, "llm_response_text": response.message.content}
+                )
 
         except Exception as e:
             logger.error(f"Error during MCP command generation: {e}", exc_info=True)
-            # 发生错误时，回退到常规查询，或者返回一个错误命令
-            return {
-                "protocol": "mcp_v1",
-                "action": "general_query",
-                "parameters": {
+            # 发生错误时，回退到常规查询
+            return MCPResponse(
+                action="general_query",
+                function_name=None,
+                parameters={
                     "original_question": user_question,
                     "llm_response_text": "抱歉，无法理解您的请求。"
                 }
-            }
+            )

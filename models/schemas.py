@@ -234,13 +234,6 @@ class DeleteChatMessagesRequest(BaseModel):
     session_id: str = Field(..., description="要删除的会话ID")
     account_id: int = Field(..., description="会话所属的用户ID")
 
-# MCPQueryRequest 模型
-class MCPQueryRequest(BaseModel):
-    question: str = Field(..., description="用户输入的查询问题。")
-    # 可以根据需要添加其他字段，如 sessionId, accountId 等
-    # session_id: str
-    # account_id: int
-
 class RagCallbackRequest(BaseModel):
     """
     用于 Python 服务向 Java 服务发送 RAG 任务结果的回调请求
@@ -255,6 +248,7 @@ class PaperCutMetadataPayload(BaseModel):
     file_key: Optional[str] = None
     type: Optional[str] = None
     paper_type: Optional[str] = None
+    question_type: Optional[str] = None 
     paper_id: Optional[int] = None
     paper_cut_id: Optional[int] = None
     clazz: Optional[str] = None
@@ -278,3 +272,16 @@ class UploadFromTextRequest(BaseModel):
     metadata: PaperCutMetadataPayload # 使用新的元数据模型
     collection_name: Optional[str] = "public_collection"
     rag_config: Optional[RagConfig] = None
+
+# --- MCP 调度相关的模型 ---
+class MCPRequest(BaseModel):
+    question: str = Field(..., description="用户输入的查询问题。")
+    # 可以根据需要添加其他字段，如 sessionId, accountId 等
+    # session_id: str
+    # account_id: int
+
+class MCPResponse(BaseModel):
+    action: str = Field(..., description="LLM 决定的操作类型，例如 'function_call' 或 'general_query'")
+    function_name: Optional[str] = Field(None, description="如果 action 是 'function_call'，则为工具的名称")
+    parameters: Optional[Dict[str, Any]] = Field(None, description="工具调用或通用回复的参数")
+    

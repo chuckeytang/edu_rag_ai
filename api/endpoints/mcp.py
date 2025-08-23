@@ -3,14 +3,14 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from services.mcp_service import MCPService
 import logging
 from api.dependencies import get_mcp_service
-from models.schemas import MCPQueryRequest # 稍后新增这个 Pydantic 模型
+from models.schemas import MCPRequest # 稍后新增这个 Pydantic 模型
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 @router.post("/dispatch-command")
-async def dispatch_mcp_command(request: MCPQueryRequest,
+async def dispatch_mcp_command(request: MCPRequest,
                                mcp_service: MCPService = Depends(get_mcp_service)):
     """
     一个通用的 MCP 调度接口，接收来自 Java 端的请求，并返回一个 MCP 指令。
