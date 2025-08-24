@@ -114,9 +114,9 @@ class MCPService:
                         )
                         
                         # 从返回的节点列表中提取 material_id
-                        retrieved_ids = [int(node.node.metadata.get("material_id")) 
+                        retrieved_ids = [int(node.node.metadata.get("paper_cut_id")) 
                                          for node in retrieved_nodes 
-                                         if node.node.metadata.get("material_id") is not None]
+                                         if node.node.metadata.get("paper_cut_id") is not None]
                         
                         logger.info(f"RAG recall for '{topic}' returned {len(retrieved_ids)} PaperCut IDs: {retrieved_ids}")
                         
