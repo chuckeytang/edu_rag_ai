@@ -3,6 +3,7 @@ from services.ai_extraction_service import AIExtractionService
 from services.document_oss_service import DocumentOssService
 from services.document_service import DocumentService
 from services.indexer_service import IndexerService
+from services.retrieval_service import RetrievalService
 from services.mcp_service import MCPService
 from services.oss_service import OssService
 from services.query_service import QueryService
@@ -139,13 +140,24 @@ def get_indexer_service() -> IndexerService:
     )
 
 @lru_cache(maxsize=1)
+def get_retrieval_service() -> RetrievalService:
+    """提供 RetrievalService 的单例实例，用于通用召回逻辑"""
+    logger.info("Initializing RetrievalService...")
+    return RetrievalService(
+        indexer_service=get_indexer_service(),
+        rag_config=get_rag_config(),
+        deepseek_llm_for_reranker=get_deepseek_llm_metadata() # 重排器LLM
+    )
+
+@lru_cache(maxsize=1)
 def get_chat_history_service() -> ChatHistoryService:
     """提供 ChatHistoryService 的单例实例"""
     logger.info("Initializing ChatHistoryService...")
     return ChatHistoryService(
         chroma_client=get_chroma_client(),
         embedding_model=get_embedding_model(),
-        indexer_service=get_indexer_service()
+        indexer_service=get_indexer_service(),
+        retrieval_service=get_retrieval_service(),
     )
 
 @lru_cache(maxsize=1)
@@ -160,6 +172,7 @@ def get_query_service() -> QueryService:
         llm=get_dashscope_rag_llm(),
         indexer_service=get_indexer_service(),
         chat_history_service=get_chat_history_service(),
+        retrieval_service=get_retrieval_service(),
         deepseek_llm_for_reranker=get_deepseek_llm_metadata()
     )
 
@@ -223,4 +236,5 @@ def get_mcp_service() -> MCPService:
     """提供 MCPService 的单例实例，用于处理功能调用"""
     logger.info("Initializing MCPService...")
     # 使用 DeepSeek LLM 作为支持 Function Calling 的 LLM
-    return MCPService(llm_for_function_calling=get_deepseek_llm_function_calling())
+    return MCPService(llm_for_function_calling=get_deepseek_llm_function_calling(),
+        retrieval_service=get_retrieval_service())

@@ -4,24 +4,23 @@ import json
 import logging
 import os
 import shutil
-from services.query_service import _tokenizer
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
 
 from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.program import LLMTextCompletionProgram
 from llama_index.core.output_parsers import PydanticOutputParser
 from llama_index.core import SimpleDirectoryReader
 
-from core.config import settings # 假设settings包含DeepSeek配置
+from core.config import settings 
 from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList, WxMineCollectSubjectList
 from services.oss_service import OssService
 from services.readers.camelot_pdf_reader import CamelotPDFReader
+from tools.tokenizer_utils import get_tokenizer
 
 logger = logging.getLogger(__name__)
-# 定义一个 LLM 输入的最大 token 限制 (可以放在 settings.py 中)
+
 MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION = 58000
 
 class AIExtractionService:
@@ -80,12 +79,13 @@ class AIExtractionService:
                 full_content = "\n".join([doc.text for doc in documents])
                 import unicodedata
                 cleaned_content = ''.join(c for c in full_content if unicodedata.category(c) != 'Cs')
-                if _tokenizer:
-                    tokens = _tokenizer.encode(cleaned_content)
+                tokenizer = get_tokenizer()
+                if tokenizer:
+                    tokens = tokenizer.encode(cleaned_content)
                     if len(tokens) > MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION:
                         logger.warning(f"File '{file_key}' content ({len(tokens)} tokens) exceeds LLM input limit ({MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION}). Truncating for AI extraction.")
                         truncated_tokens = tokens[:MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION]
-                        truncated_content = _tokenizer.decode(truncated_tokens)
+                        truncated_content = tokenizer.decode(truncated_tokens)
                         return truncated_content
                     return cleaned_content
                 else: 

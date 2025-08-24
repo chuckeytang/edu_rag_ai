@@ -316,7 +316,7 @@ JAVA_CALLBACK_BASEURL = os.environ.get("JAVA_CALLBACK_BASEURL")
 JAVA_TEXTRAG_ENDPOINT = os.environ.get("JAVA_TEXTRAG_ENDPOINT")
 JAVA_CALLBACK_URL = f"{JAVA_CALLBACK_BASEURL}{JAVA_TEXTRAG_ENDPOINT}"
 
-# 新的后台任务处理函数，它将是异步回调的真正核心
+# 后台任务处理函数，它将是异步回调的真正核心
 async def process_text_indexing_task(request: UploadFromTextRequest, task_id: str):
     """
     这是一个后台任务，负责处理文本内容的索引，并在完成后发送回调。
@@ -330,7 +330,7 @@ async def process_text_indexing_task(request: UploadFromTextRequest, task_id: st
         # 1. 组合元数据，并添加缺失的 page_label 字段
         metadata_payload = request.metadata.model_dump(by_alias=True, exclude_none=True)
         
-        # 关键修改点：手动添加 page_label 字段
+        # 手动添加 page_label 字段
         # 可以设置为固定的字符串，也可以使用试题的 paper_cut_id 来确保唯一性
         metadata_payload["page_label"] = f"PaperCut-{request.metadata.paper_cut_id}" 
         # 或者更具描述性：metadata_payload["page_label"] = f"PaperCut-{request.metadata.paper_cut_id}"

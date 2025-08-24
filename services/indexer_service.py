@@ -63,7 +63,7 @@ class IndexerService:
         else:
             logger.debug("RAG config for SentenceSplitter is unchanged. Skipping re-initialization.")
             
-    def _get_or_load_index(self, collection_name: str) -> Optional[VectorStoreIndex]:
+    def get_rag_index(self, collection_name: str) -> Optional[VectorStoreIndex]:
         if collection_name in self.indices:
             logger.info(f"Returning cached index for collection: '{collection_name}'.")
             return self.indices[collection_name]
@@ -153,7 +153,7 @@ class IndexerService:
         logger.info(f"Attempting to add {len(documents)} documents to index for collection: '{collection_name}'...")
         if not documents:
             logger.warning("No LlamaDocuments provided for indexing. Skipping.")
-            return self._get_or_load_index(collection_name) 
+            return self.get_rag_index(collection_name) 
         
         self._update_node_parser_if_needed(rag_config)
 
@@ -205,7 +205,7 @@ class IndexerService:
         logger.info(f" [Indexer] Document processing into nodes completed. Took {processing_end_time - processing_start_time:.2f} seconds. Original {len(documents)} documents processed into {len(all_nodes_to_add)} final nodes for indexing.")
 
         # 尝试获取现有索引
-        index = self._get_or_load_index(collection_name)
+        index = self.get_rag_index(collection_name)
 
         if index is None:
             logger.info(f" [Indexer] Index for '{collection_name}' not found/loadable. Initializing a new one.")

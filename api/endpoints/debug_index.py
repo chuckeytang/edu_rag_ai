@@ -263,6 +263,39 @@ def debug_retrieve_with_filters(request: QueryRequest,
         logger.error(f"Debug retrieval failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
+@router.delete("/delete-collection", summary="删除指定的整个Collection")
+def delete_entire_collection(
+    collection_name: str = Query(..., description="要删除的Collection名称"),
+    query_service: Any = Depends(get_query_service)
+) -> Dict[str, Any]:
+    """
+    永久删除 ChromaDB 中指定的整个 Collection 及其所有数据。
+    这个操作是不可逆的，请谨慎使用！
+    """
+    try:
+        # 获取 ChromaDB 客户端
+        client = query_service.chroma_client
+        
+        # 检查 Collection 是否存在
+        # ChromaDB 的 get_collection 如果不存在会抛出 ValueError
+        try:
+            client.get_collection(name=collection_name)
+        except ValueError:
+            logger.warning(f"Collection '{collection_name}' not found. No action taken.")
+            return {"status": "success", "message": f"Collection '{collection_name}' not found, no deletion necessary."}
+        
+        # 删除 Collection
+        logger.info(f"Attempting to delete collection: '{collection_name}'")
+        client.delete_collection(name=collection_name)
+        
+        message = f"Successfully deleted collection '{collection_name}'."
+        logger.info(message)
+        return {"status": "success", "message": message}
+    
+    except Exception as e:
+        logger.error(f"Failed to delete collection '{collection_name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete collection '{collection_name}': {str(e)}")
+    
 @router.post("/debug-rag-flow", summary="[DEBUG] 执行并展示完整的RAG流程（召回、重排、回复）")
 async def debug_rag_flow(
     request: ChatQueryRequest, 
@@ -289,7 +322,7 @@ async def debug_rag_flow(
     
     try:
         # 1. 加载或获取索引
-        rag_index = indexer_service._get_or_load_index(request.collection_name)
+        rag_index = indexer_service.get_rag_index(request.collection_name)
         if not rag_index:
             raise HTTPException(status_code=404, detail=f"RAG Collection '{request.collection_name}' does not exist or could not be loaded.")
             

@@ -1,28 +1,21 @@
 import json
 import logging
-import os
-import shutil
-import tiktoken
+from fastapi import Depends
 import asyncio
 
-from llama_cloud import TextNode
-
-from core.metadata_utils import prepare_metadata_for_storage
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from services.indexer_service import IndexerService
-if TYPE_CHECKING:
-    from services.chat_history_service import ChatHistoryService
+from services.retrieval_service import RetrievalService
+from tools.tokenizer_utils import get_tokenizer
+from services.chat_history_service import ChatHistoryService
 
 logger = logging.getLogger(__name__)
 
-from typing import Any, AsyncGenerator, List, Union
-from llama_index.core.schema import Document as LlamaDocument, NodeWithScore, TextNode as LlamaTextNode, QueryBundle
+from typing import Any, AsyncGenerator, List
+from llama_index.core.schema import Document as NodeWithScore, TextNode as LlamaTextNode, QueryBundle
 
-from llama_index.core import VectorStoreIndex, PromptTemplate, StorageContext, load_index_from_storage
-from llama_index.llms.dashscope import DashScope, DashScopeGenerationModels
-from llama_index.embeddings.dashscope import DashScopeEmbedding, DashScopeTextEmbeddingModels
-from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.core import VectorStoreIndex, PromptTemplate
 from llama_index.core.llms import LLM
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.query_engine import RetrieverQueryEngine 
@@ -38,13 +31,6 @@ from typing import List, Dict
 import chromadb
 
 PERSIST_DIR = settings.INDEX_PATH
-
-try:
-    _tokenizer = tiktoken.get_encoding("cl100k_base") 
-    logger.info("Using tiktoken 'cl100k_base' for token counting estimation.")
-except Exception as e:
-    logger.warning(f"Could not load tiktoken tokenizer 'cl100k_base', token counting may be inaccurate: {e}")
-    _tokenizer = None
 
 class CustomRetriever(BaseRetriever):
     """
@@ -69,8 +55,9 @@ class QueryService:
                  embedding_model: BaseEmbedding,
                  llm: LLM, 
                  indexer_service: IndexerService,
-                 rag_config: RagConfig,
-                 chat_history_service: Optional['ChatHistoryService'] = None,
+                 rag_config: RagConfig, 
+                 retrieval_service: RetrievalService,
+                 chat_history_service: Optional[ChatHistoryService] = None,
                  deepseek_llm_for_reranker: Optional[LLM] = None):
         """
         构造函数 - 实现“按需加载”策略
@@ -80,6 +67,7 @@ class QueryService:
         self.embedding_model = embedding_model   # 使用传入的 embedding model
         self.llm = llm                           # 使用传入的 LLM
         
+        self.retrieval_service = retrieval_service
         self.indices: Dict[str, VectorStoreIndex] = {}
         self._indexer_service = indexer_service
 
@@ -115,37 +103,32 @@ class QueryService:
         """
         重定向到 IndexerService 的按需加载方法。
         """
-        return self._indexer_service._get_or_load_index(collection_name)
+        return self._indexer_service.get_rag_index(collection_name)
 
     def retrieve_with_filters(self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5):
         """
         [DEBUG METHOD] 仅执行带过滤的召回，并返回召回的节点列表。
+        此方法现在使用通用的 RetrievalService。
         """
         logger.info(f"[DEBUG] Retrieving from collection '{collection_name}' with filters: {filters}")
         
-        index = self._get_or_load_index(collection_name)
-        if not index:
-            raise ValueError(f"Collection '{collection_name}' does not exist or could not be loaded.")
-
-        chroma_where_clause = self._build_chroma_where_clause(filters)
-
-        # 1. 创建一个Retriever，配置和查询时完全一样
-        retriever = index.as_retriever(
-            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=similarity_top_k * 3
-        )
+        # 直接调用 RetrievalService 的通用召回方法
         
-        retrieved_nodes = retriever.retrieve(question)
-        logger.info(f"[DEBUG] Retriever found {len(retrieved_nodes)} nodes matching the criteria.")
-
-        query_bundle_for_rerank = QueryBundle(query_str=question)
-        final_retrieved_nodes = self.reranker.postprocess_nodes(
-            retrieved_nodes, 
-            query_bundle=query_bundle_for_rerank
-        )
-        logger.info(f"[DEBUG] Reranker returned {len(final_retrieved_nodes)} nodes after reranking.")
-
-        return final_retrieved_nodes
+        try:
+            # 遵照你的原始代码格式，我们暂时假设存在一个同步版本或者在调用时进行异步处理
+            final_retrieved_nodes = self.retrieval_service.retrieve_documents_sync(
+                query_text=question,
+                collection_name=collection_name,
+                filters=filters,
+                top_k=similarity_top_k,
+                use_reranker=False # 此处不需要重排器
+            )
+            
+            logger.info(f"[DEBUG] RetrievalService returned {len(final_retrieved_nodes)} nodes.")
+            return final_retrieved_nodes
+        except Exception as e:
+            logger.error(f"[DEBUG] Error during retrieval: {e}", exc_info=True)
+            raise ValueError(f"Retrieval failed: {e}")
 
     def _build_chroma_where_clause(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -186,10 +169,36 @@ class QueryService:
         # 只有一个条件，直接返回
         return chroma_filters[0]
     
+    async def retrieve_only_for_function_calling(self,
+                                                 query_text: str,
+                                                 collection_name: str,
+                                                 filters: Optional[Dict[str, Any]] = None,
+                                                 top_k: int = 15) -> List[int]:
+        """
+        专为 Function Calling 提供的纯文档召回方法，只返回 material_id 列表。
+        此方法**不应用重排器**。
+        """
+        retrieved_nodes = await self.retrieval_service.retrieve_documents(
+            query_text=query_text,
+            collection_name=collection_name,
+            filters=filters,
+            top_k=top_k,
+            use_reranker=False # 核心：在这里禁用重排器
+        )
+        
+        material_ids = []
+        for node_with_score in retrieved_nodes:
+            node = node_with_score.node
+            material_id = node.metadata.get("material_id")
+            if material_id:
+                material_ids.append(int(material_id))
+        
+        return list(set(material_ids))
+
     async def rag_query_with_context(
         self,
         request: ChatQueryRequest,
-        rag_config: RagConfig
+        rag_config: RagConfig,
     ) -> AsyncGenerator[bytes, None]:
         
         logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
@@ -199,7 +208,7 @@ class QueryService:
         chat_history_context_string = ""
         try:
             if self._chat_history_service: 
-                chat_history_context_nodes = self._chat_history_service.retrieve_chat_history_context( 
+                chat_history_context_nodes = await self._chat_history_service.retrieve_chat_history_context( 
                     session_id=request.session_id,
                     account_id=request.account_id,
                     query_text=request.context_retrieval_query,
@@ -216,7 +225,7 @@ class QueryService:
         except Exception as e:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
             chat_history_context_string = ""
-
+        
         rag_index = self._get_or_load_index(request.collection_name)
         if not rag_index:
             logger.error(f"RAG collection '{request.collection_name}' does not exist or could not be loaded.")
@@ -270,59 +279,20 @@ class QueryService:
 
         # --- 主 RAG 查询 ---
         max_retries = 3
-        
         # --- 召回文档 ---
-        retriever = rag_index.as_retriever(
-            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=self.rag_config.retrieval_top_k
+        final_retrieved_nodes = await self.retrieval_service.retrieve_documents(
+            query_text=request.question,
+            collection_name=request.collection_name,
+            filters=combined_rag_filters,
+            top_k=request.similarity_top_k,
+            use_reranker=True # 主RAG查询流程需要使用重排器
         )
-        logger.info(f"RAG Retriever query clause: {chroma_where_clause}") 
 
-        retrieved_nodes = await retriever.aretrieve(request.question)
-        original_retrieved_nodes_count = len(retrieved_nodes) 
-        logger.info(f"Retrieved {original_retrieved_nodes_count} chunks for query: '{request.question[:50]}...'")
-
-        current_retrieved_nodes = list(retrieved_nodes) 
-        
-        if original_retrieved_nodes_count == 0:
-            logger.info("No documents retrieved. Adding a virtual 'NO_RELEVANT_DOCUMENTS_FOUND' node for LLM context.")
-            virtual_node_content = "NO_RELEVANT_DOCUMENTS_FOUND"
-            virtual_node = LlamaTextNode(text=virtual_node_content, metadata={"source": "virtual_fallback", "type": "no_document_found"})
-            virtual_node_with_score = NodeWithScore(node=virtual_node, score=0.0)
-            current_retrieved_nodes.append(virtual_node_with_score) 
-            
-        final_retrieved_nodes = []
-        # 确保 reranker_top_n 是最终需要返回的数量
-        effective_reranker_top_n = self.rag_config.retrieval_top_k * self.rag_config.initial_retrieval_multiplier or 5
-        query_bundle_for_rerank = QueryBundle(query_str=request.question)
-
-        if self.rag_config.use_reranker:
-            if self.rag_config.reranker_type == "llm" and self.llm_reranker:
-                logger.info(f"Applying LLM Reranker to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
-                # LLMRerank 的 aretrieve 方法接收 QueryBundle 和 NodeWithScore 列表
-                # LLMRerank 内部会自动处理 top_n 过滤
-                self.llm_reranker.top_n = effective_reranker_top_n # 动态设置 LLM Reranker 的 top_n
-                final_retrieved_nodes = self.llm_reranker._postprocess_nodes(
-                    nodes=current_retrieved_nodes, 
-                    query_bundle=query_bundle_for_rerank
-                )
-                logger.info(f"LLM Reranker returned {len(final_retrieved_nodes)} nodes.")
-            elif self.rag_config.reranker_type == "local" and self.local_reranker:
-                logger.info(f"Applying Local Reranker (SentenceTransformerRerank) to {len(current_retrieved_nodes)} nodes (top_n={effective_reranker_top_n})...")
-                # SentenceTransformerRerank 的 postprocess_nodes 方法接收 QueryBundle 和 NodeWithScore 列表
-                # SentenceTransformerRerank 内部会自动处理 top_n 过滤
-                self.local_reranker.top_n = effective_reranker_top_n # 动态设置本地 Reranker 的 top_n
-                final_retrieved_nodes = self.local_reranker.postprocess_nodes(
-                    current_retrieved_nodes, 
-                    query_bundle=query_bundle_for_rerank
-                )
-                logger.info(f"Local Reranker returned {len(final_retrieved_nodes)} nodes.")
-            else:
-                logger.warning("Reranker is enabled but no Reranker (LLM or Local) is initialized. Skipping reranking.")
-                final_retrieved_nodes = current_retrieved_nodes[:self.rag_config.post_rerank_top_n] # 截断到 top_n
-        else:
-            logger.info("Reranker is disabled by request. Skipping reranking.")
-            final_retrieved_nodes = current_retrieved_nodes[:effective_reranker_top_n] # 确保即使不 Rerank 也只取 top_n
+        # 检查是否召回了文档
+        if not final_retrieved_nodes:
+            logger.info("No documents retrieved for the main query. Adding virtual node.")
+            virtual_node = LlamaTextNode(text="NO_RELEVANT_DOCUMENTS_FOUND", metadata={"source": "virtual_fallback"})
+            final_retrieved_nodes.append(NodeWithScore(node=virtual_node, score=0.0))
 
          # --- 构建发送给 LLM 的 context_str，现在包含类型信息 ---
         context_parts = []
@@ -352,8 +322,9 @@ class QueryService:
                 )
                 logger.info(f"final_prompt_for_llm {final_prompt_for_llm}.")
 
-                if _tokenizer:
-                    token_count = len(_tokenizer.encode(final_prompt_for_llm))
+                tokenizer = get_tokenizer()
+                if tokenizer:
+                    token_count = len(tokenizer.encode(final_prompt_for_llm))
                     logger.info(f"Attempt {attempt + 1}: Total input tokens for LLM query: {token_count}. Query: '{request.question[:50]}...'")
                 else:
                     logger.warning("Tokenizer not available, skipping token count for LLM query.")
@@ -463,7 +434,7 @@ class QueryService:
 
         if not full_response_content or full_response_content.strip() == "NO_RELEVANT_DOCUMENTS_FOUND":
              # 处理LLM找不到答案的情况
-             # ... (你的 fallback 逻辑) ...
+             # ... ( fallback 逻辑) ...
              return
     
         # 获取所有被引用的 chunk 的文本列表和 ID 列表

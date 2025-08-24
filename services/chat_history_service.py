@@ -11,7 +11,8 @@ import chromadb
 from core.config import settings
 from core.metadata_utils import prepare_metadata_for_storage
 from core.rag_config import RagConfig
-from services.indexer_service import IndexerService # 假设你的这个工具函数存在
+from services.indexer_service import IndexerService
+from services.retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +20,14 @@ class ChatHistoryService:
     def __init__(self, 
                  chroma_client: chromadb.PersistentClient,
                  embedding_model: Optional[BaseEmbedding],
-                 indexer_service: IndexerService):
+                 indexer_service: IndexerService, 
+                 retrieval_service: RetrievalService):
         self.chroma_path = settings.CHROMA_PATH
         self.chroma_client = chroma_client
         self._embedding_model = embedding_model 
         self.chat_history_collection_name = "chat_history_collection"
         self._indexer_service = indexer_service
+        self.retrieval_service = retrieval_service
         self._collection = self.chroma_client.get_or_create_collection(name=self.chat_history_collection_name)
         self._initialize_chat_history_collection()
 
@@ -105,16 +108,11 @@ class ChatHistoryService:
             logger.error(f"Failed to delete chat messages from ChromaDB for session {session_id}: {e}", exc_info=True)
             raise
 
-    def retrieve_chat_history_context(self, session_id: str, account_id: int, query_text: str, top_k: int = 5) -> List[TextNode]:
+    async def retrieve_chat_history_context(self, session_id: str, account_id: int, query_text: str, top_k: int = 5) -> List[TextNode]:
         """
         从聊天历史Collection中语义检索相关上下文。
         """
         try:
-            chat_history_index = self._indexer_service._get_or_load_index(self.chat_history_collection_name)
-            if not chat_history_index:
-                logger.error(f"Chat history index for collection '{self.chat_history_collection_name}' could not be loaded.")
-                return [] # 无法加载索引，返回空列表
-
             chat_context_filters = {
                 "$and": [
                     {"session_id": {"$eq": session_id}},
@@ -123,13 +121,19 @@ class ChatHistoryService:
             }
             logger.info(f"Retrieving chat history context with filters: {chat_context_filters}")
             
-            chat_retriever = chat_history_index.as_retriever(
-                vector_store_kwargs={"where": chat_context_filters},
-                similarity_top_k=top_k
+            # 调用 QueryService 的通用召回方法，并禁用重排器（聊天历史通常不需要）
+            retrieved_nodes = await self.retrieval_service.retrieve_documents(
+                query_text=query_text,
+                collection_name=self.chat_history_collection_name,
+                filters=chat_context_filters,
+                top_k=top_k,
+                use_reranker=False # 聊天历史召回不需要重排，因为它本身就是时序的
             )
-            chat_history_context_nodes = chat_retriever.retrieve(query_text)
-            logger.info(f"Retrieved {len(chat_history_context_nodes)} relevant chat history nodes.")
-            return chat_history_context_nodes
+            
+            # 将 LlamaIndex 的 NodeWithScore 对象转换为 TextNode
+            text_nodes = [node_with_score.node for node_with_score in retrieved_nodes]
+            logger.info(f"Retrieved {len(text_nodes)} relevant chat history nodes.")
+            return text_nodes
 
         except Exception as e:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
