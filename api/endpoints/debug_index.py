@@ -5,9 +5,11 @@ import time
 from pydantic import BaseModel
 from llama_index.core.schema import QueryBundle
 from llama_index.core import PromptTemplate
-from api.dependencies import get_indexer_service, get_query_service
+from api.dependencies import get_indexer_service, get_query_service, get_retrieval_service
 from services.indexer_service import IndexerService
-from llama_index.core.query_engine import RetrieverQueryEngine 
+from llama_index.core.query_engine import RetrieverQueryEngine
+
+from services.retrieval_service import RetrievalService 
 logger = logging.getLogger(__name__)
 
 from typing import Any, Dict, List, Optional
@@ -192,9 +194,8 @@ def get_node(chroma_id: str,
     }
 
 @router.post("/retrieve-with-filters", summary="[DEBUG] 测试带过滤的节点召回")
-def debug_retrieve_with_filters(request: QueryRequest, 
-                            query_service: QueryService = Depends(get_query_service),
-                            indexer_service: IndexerService = Depends(get_indexer_service)):
+async def debug_retrieve_with_filters(request: QueryRequest, 
+                            retrieval_service: RetrievalService = Depends(get_retrieval_service)):
     """
     一个用于调试的端点。
     它只执行召回步骤，并返回召回的节点列表及其元数据，
@@ -216,31 +217,23 @@ def debug_retrieve_with_filters(request: QueryRequest,
             except ValueError:
                 logger.warning("Debug endpoint: Invalid material_id in target_file_ids. Ignoring file filter.")
 
-        retrieved_nodes = query_service.retrieve_with_filters(
-            question=request.question,
+        retrieved_nodes = await retrieval_service.retrieve_documents(
+            query_text=request.question,
             collection_name=request.collection_name,
             filters=combined_filters, 
-            similarity_top_k=request.similarity_top_k
+            top_k=request.similarity_top_k,
+            use_reranker=True # 调试时通常需要看重排效果
         )
 
         results = []
         for node_with_score in retrieved_nodes:
             current_node_metadata = node_with_score.node.metadata 
-
-            try:
-                col = indexer_service.chroma_client.get_collection(name=request.collection_name)
-                latest_meta_from_db = col.get(ids=[node_with_score.node.node_id], include=["metadatas"])['metadatas'][0]
-                current_node_metadata = latest_meta_from_db
-            except Exception as debug_e:
-                logger.error(f"DEBUG: Failed to get latest metadata from DB for {node_with_score.node.node_id}: {debug_e}")
-
             score_to_append = float(node_with_score.score) 
             
-            # 对 metadata 进行深度拷贝，并转换其中的 NumPy 类型
             cleaned_metadata = {}
             for key, value in current_node_metadata.items():
-                if isinstance(value, np.ndarray): # 如果是 NumPy 数组
-                    cleaned_metadata[key] = value.tolist() # 转换为 Python 列表
+                if isinstance(value, np.ndarray):
+                    cleaned_metadata[key] = value.tolist()
                 elif isinstance(value, (np.float32, np.float64)):
                     cleaned_metadata[key] = float(value) 
                 elif isinstance(value, (np.int32, np.int64)): 
@@ -300,7 +293,7 @@ def delete_entire_collection(
 async def debug_rag_flow(
     request: ChatQueryRequest, 
     query_service: QueryService = Depends(get_query_service),
-    indexer_service: IndexerService = Depends(get_indexer_service)
+    retrieval_service: RetrievalService = Depends(get_retrieval_service)
 ) -> DebugQueryResponse:
     import numpy as np 
     """
@@ -318,36 +311,27 @@ async def debug_rag_flow(
         logger.warning("No rag_config found in request, using default from query_service.")
         rag_config = query_service.rag_config
         
-    effective_retrieval_top_k = rag_config.retrieval_top_k * rag_config.initial_retrieval_multiplier if rag_config.use_reranker else rag_config.retrieval_top_k
-    
     try:
-        # 1. 加载或获取索引
-        rag_index = indexer_service.get_rag_index(request.collection_name)
-        if not rag_index:
-            raise HTTPException(status_code=404, detail=f"RAG Collection '{request.collection_name}' does not exist or could not be loaded.")
-            
-        # 2. 构建 ChromaDB 的 where 子句
-        combined_rag_filters = request.filters if request.filters else {}
-        if request.target_file_ids and len(request.target_file_ids) > 0:
-            try:
-                material_ids_int = [int(mid) for mid in request.target_file_ids]
-                if "material_id" in combined_rag_filters and isinstance(combined_rag_filters["material_id"], dict) and "$in" in combined_rag_filters["material_id"]:
-                    current_material_ids = combined_rag_filters["material_id"]["$in"]
-                    combined_rag_filters["material_id"]["$in"] = list(set(current_material_ids + material_ids_int))
-                else:
-                    combined_rag_filters["material_id"] = {"$in": material_ids_int}
-            except ValueError:
-                logger.warning("Debug endpoint: Invalid material_id in target_file_ids. Ignoring file filter.")
-
-        chroma_where_clause = query_service._build_chroma_where_clause(combined_rag_filters)
-        
-        # 3. 执行召回（Retrieval）
-        retriever = rag_index.as_retriever(
-            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-            similarity_top_k=effective_retrieval_top_k
+        # 直接调用 RetrievalService 的通用方法，获取最终重排后的节点
+        final_retrieved_nodes_with_score = await retrieval_service.retrieve_documents(
+            query_text=request.question,
+            collection_name=request.collection_name,
+            filters=request.filters,
+            top_k=request.similarity_top_k,
+            use_reranker=True
         )
         
-        original_retrieved_nodes_with_score = await retriever.aretrieve(request.question)
+        # 为了获取初始召回的节点列表（用于调试），我们需要额外调用 RetrievalService 的底层方法
+        # 这有点冗余，但对于调试端点是合理的
+        initial_retrieval_top_k = request.similarity_top_k * rag_config.initial_retrieval_multiplier
+        original_retrieved_nodes_with_score = await retrieval_service.retrieve_documents(
+            query_text=request.question,
+            collection_name=request.collection_name,
+            filters=request.filters,
+            top_k=initial_retrieval_top_k,
+            use_reranker=False
+        )
+
         original_retrieved_nodes = [
             {
                 "score": float(n.score), 
@@ -359,19 +343,6 @@ async def debug_rag_flow(
         ]
         logger.info(f"Initial retrieval found {len(original_retrieved_nodes)} nodes.")
         
-        # 4. 执行重排（Reranking）
-        query_bundle_for_rerank = QueryBundle(query_str=request.question)
-        final_retrieved_nodes_with_score = []
-
-        if rag_config.use_reranker and query_service.local_reranker:
-            query_service.local_reranker.top_n = rag_config.retrieval_top_k
-            final_retrieved_nodes_with_score = query_service.local_reranker.postprocess_nodes(
-                original_retrieved_nodes_with_score,
-                query_bundle=query_bundle_for_rerank
-            )
-        else:
-            final_retrieved_nodes_with_score = original_retrieved_nodes_with_score[:rag_config.post_rerank_top_n]
-
         final_retrieved_nodes = [
             {
                 "score": float(n.score), 
@@ -397,15 +368,14 @@ async def debug_rag_flow(
         context_str_for_llm = "\n\n".join(context_parts)
         
         final_prompt_for_llm = query_service.qa_prompt.format(
-            chat_history_context="", # 调试接口暂不考虑聊天历史
+            chat_history_context="",
             context_str=context_str_for_llm, 
             query_str=request.question
         )
         logger.info(f"Final Prompt for LLM: \n{final_prompt_for_llm[:500]}...")
 
         # 6. 调用 LLM 获取最终回复
-        # 构造一个非流式的 QueryEngine
-        llm_start_time = time.time() # 新增日志：LLM调用开始时间
+        llm_start_time = time.time()
         query_engine = RetrieverQueryEngine.from_args(
             llm=query_service.llm,
             retriever=CustomRetriever(final_retrieved_nodes_with_score),
@@ -413,20 +383,13 @@ async def debug_rag_flow(
             text_qa_template=PromptTemplate(final_prompt_for_llm) 
         )
         response_obj = await query_engine.aquery(request.question)
-        llm_end_time = time.time() # 新增日志：LLM调用结束时间
+        llm_end_time = time.time()
         final_response_content = response_obj.response if hasattr(response_obj, 'response') else ""
         logger.info(f"Successfully got non-streaming LLM response. LLM inference took {llm_end_time - llm_start_time:.2f} seconds.")
 
-        # 7. 提取引用信息 (与 query_service 中的逻辑类似)
+        # 7. 提取引用信息
         citations = []
         if query_service.embedding_model and final_response_content:
-            from llama_index.core.schema import TextNode as LlamaTextNode
-            from services.query_service import _tokenizer
-            from core.rag_config import RagConfig # 确保导入了 RagConfig
-            from services.query_service import SentenceTransformerRerank
-
-            # 这里我们重用query_service.rag_query_with_context中的引用逻辑，但需要一些调整
-            # 简化为直接在 debug-flow 中实现
             import re
             response_sentences = re.split(r'(?<=[.!?。！？])\s+', final_response_content)
             logger.info(f"LLM response split into {len(response_sentences)} sentences.")

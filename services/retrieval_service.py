@@ -38,10 +38,44 @@ class RetrievalService:
             else:
                 logger.warning("Reranker type is set to an unknown value. Reranking disabled.")
 
-    def _build_chroma_where_clause(self, filters: Optional[Dict[str, Any]]):
+
+    # 将更健壮的 _build_chroma_where_clause 方法移到这里
+    def _build_chroma_where_clause(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        为 ChromaDB 构建原生 where 子句。
+        此版本根据值的类型，自动使用 $in 或 $eq。
+        它能处理复杂过滤器（如 {"field": {"$in": [val1, val2]}}）或简单过滤器（如 {"field": val}）。
+        """
         if not filters:
-            return None
-        return filters
+            return {}
+
+        chroma_filters = []
+
+        for key, value in filters.items():
+            # 情况 1: 值本身是一个字典，并且包含 ChromaDB 支持的操作符 (如 "$in")
+            # 这表示调用方已经提供了复杂的过滤条件，直接使用即可。
+            if isinstance(value, dict) and any(op in value for op in ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin"]):
+                chroma_filters.append({key: value})
+            # 情况 2: 值是一个列表，我们应使用 "$in" 操作符
+            elif isinstance(value, list):
+                # 检查列表是否为空，避免生成 {"key": {"$in": []}} 这种可能导致问题的情况
+                if value:
+                    chroma_filters.append({key: {"$in": value}})
+                else:
+                    logger.warning(f"Empty list provided for filter key '{key}'. This condition will be ignored.")
+            # 情况 3: 其他所有简单类型的值 (str, int, float)，使用默认的相等比较
+            else:
+                chroma_filters.append({key: {"$eq": value}})
+
+        if not chroma_filters:
+            return {}
+        
+        # 如果有多个过滤条件，用 $and 连接
+        if len(chroma_filters) > 1:
+            return {"$and": chroma_filters}
+        
+        # 只有一个条件，直接返回
+        return chroma_filters[0]
 
     async def retrieve_documents(self,
                                   query_text: str,

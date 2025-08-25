@@ -129,45 +129,6 @@ class QueryService:
         except Exception as e:
             logger.error(f"[DEBUG] Error during retrieval: {e}", exc_info=True)
             raise ValueError(f"Retrieval failed: {e}")
-
-    def _build_chroma_where_clause(self, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        为 ChromaDB 构建原生 where 子句。
-        此版本根据值的类型，自动使用 $in 或 $eq。
-        它能处理复杂过滤器（如 {"field": {"$in": [val1, val2]}}）或简单过滤器（如 {"field": val}）。
-        """
-        if not filters:
-            return {}
-
-        chroma_filters = []
-
-        for key, value in filters.items():
-            # 情况 1: 值本身是一个字典，并且包含 ChromaDB 支持的操作符 (如 "$in")
-            # 这表示调用方已经提供了复杂的过滤条件，直接使用即可。
-            if isinstance(value, dict) and any(op in value for op in ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin"]):
-                chroma_filters.append({key: value})
-            # 情况 2: 值是一个列表，我们应使用 "$in" 操作符
-            elif isinstance(value, list):
-                # 检查列表是否为空，避免生成 {"key": {"$in": []}} 这种可能导致问题的情况
-                if value:
-                    chroma_filters.append({key: {"$in": value}})
-                else:
-                    # 如果列表为空，则该条件不会匹配任何文档，可以忽略或根据业务逻辑处理
-                    logger.warning(f"Empty list provided for filter key '{key}'. This condition will be ignored.")
-            # 情况 3: 其他所有简单类型的值 (str, int, float)，使用默认的相等比较
-            # ChromaDB 对于 {"key": value} 形式，默认就是相等比较，不需要显式写 "$eq"
-            else:
-                chroma_filters.append({key: {"$eq": value}})
-
-        if not chroma_filters:
-            return {}
-        
-        # 如果有多个过滤条件，用 $and 连接
-        if len(chroma_filters) > 1:
-            return {"$and": chroma_filters}
-        
-        # 只有一个条件，直接返回
-        return chroma_filters[0]
     
     async def retrieve_only_for_function_calling(self,
                                                  query_text: str,
@@ -252,7 +213,7 @@ class QueryService:
             except ValueError:
                 logger.warning("Invalid material_id in target_file_ids. Ignoring file filter.")
         
-        chroma_where_clause = self._build_chroma_where_clause(combined_rag_filters)
+        chroma_where_clause = self.retrieval_service._build_chroma_where_clause(combined_rag_filters)
         logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
 
 
