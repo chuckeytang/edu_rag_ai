@@ -48,6 +48,9 @@ class RetrievalService:
         """
         if not filters:
             return {}
+        
+        if any(op in filters for op in ["$and", "$or"]):
+            return filters
 
         chroma_filters = []
 
