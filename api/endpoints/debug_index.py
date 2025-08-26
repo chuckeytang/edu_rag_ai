@@ -312,13 +312,14 @@ async def debug_rag_flow(
         rag_config = query_service.rag_config
         
     try:
+        logger.info(f"rag_config.use_reranker: {rag_config.use_reranker}.")
         # 直接调用 RetrievalService 的通用方法，获取最终重排后的节点
         final_retrieved_nodes_with_score = await retrieval_service.retrieve_documents(
             query_text=request.question,
             collection_name=request.collection_name,
             filters=request.filters,
             top_k=request.similarity_top_k,
-            use_reranker=True
+            use_reranker=rag_config.use_reranker
         )
         
         # 为了获取初始召回的节点列表（用于调试），我们需要额外调用 RetrievalService 的底层方法
