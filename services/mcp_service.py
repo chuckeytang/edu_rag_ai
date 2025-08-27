@@ -150,7 +150,7 @@ class MCPService:
                 return MCPResponse(
                     action="general_query",
                     function_name=None,
-                    parameters={"original_question": user_question, "llm_response_text": response.message.content}
+                    parameters={"original_question": user_question, "llm_response_text": None}
                 )
 
         except Exception as e:
