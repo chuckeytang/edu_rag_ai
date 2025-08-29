@@ -49,6 +49,11 @@ class RagConfig(BaseModel):
         3,
         description="LLM请求的最大重试次数。设为0则不重试。"
     )
+
+    retry_base_delay: confloat(ge=0.0) = Field(
+        1.0,
+        description="LLM请求重试的基础等待时间（秒）。"
+    )
     
     # 引用相似度阈值
     citation_similarity_threshold: confloat(ge=0.0, le=1.0) = Field(
@@ -126,5 +131,6 @@ class RagConfig(BaseModel):
             chunk_overlap=50,
             table_chunk_size=600,
             llm_max_retries=3,
+            retry_base_delay=1.0,
             citation_similarity_threshold=0.3
         )

@@ -48,7 +48,10 @@ class ChatHistoryService:
             # Fallback for ID, though Spring should provide a unique one
             doc_id = f"chat_msg_{message_data['session_id']}_{message_data['timestamp']}_{message_data['role']}"
 
-        metadata = message_data.get("metadata", {})
+        metadata = message_data.get("metadata")
+        if metadata is None:
+            metadata = {}
+            
         metadata["session_id"] = message_data.get("session_id")
         metadata["account_id"] = message_data.get("account_id")
         metadata["role"] = message_data.get("role")

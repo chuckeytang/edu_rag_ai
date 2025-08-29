@@ -100,7 +100,8 @@ def get_dashscope_rag_llm() -> LlamaLLM: # 类型提示为 LlamaIndex 的 LLM
         api_key=settings.DASHSCOPE_API_KEY,
         max_tokens=4096,
         temperature=0.1,
-        similarity_cutoff=0.4
+        similarity_cutoff=0.4,
+        streaming=True
     )
 
 @lru_cache(maxsize=1)

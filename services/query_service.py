@@ -22,6 +22,7 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.postprocessor import SentenceTransformerRerank 
 from llama_index.core.postprocessor import LLMRerank
+from llama_index.core.llms import ChatMessage
 from core.rag_config import RagConfig
 import torch 
 
@@ -167,6 +168,8 @@ class QueryService:
         
         # --- 语义检索历史聊天上下文 ---
         chat_history_context_string = ""
+        chat_history_chunk_texts = []
+        chat_history_chunk_ids = []
         try:
             if self._chat_history_service: 
                 chat_history_context_nodes = await self._chat_history_service.retrieve_chat_history_context( 
@@ -179,6 +182,11 @@ class QueryService:
                     chat_history_context_string = "The following are excerpts from a historical conversation relevant to your current problem:\n" + \
                                                   "\n".join([f"[{node.metadata.get('role', '未知')}]: {node.text}" for node in chat_history_context_nodes]) + \
                                                   "\n---\n"
+                    # 准备聊天历史chunk的文本和ID
+                    chat_history_chunk_texts = [node.text for node in chat_history_context_nodes]
+                    # 使用node.id_作为唯一标识符
+                    chat_history_chunk_ids = [node.id_ for node in chat_history_context_nodes]
+                     
                 logger.info(f"Chat history context: \n{chat_history_context_string}")
             else:
                 logger.warning("ChatHistoryService instance not available in QueryService. Skipping chat history retrieval.")
@@ -187,17 +195,10 @@ class QueryService:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)
             chat_history_context_string = ""
         
-        rag_index = self._get_or_load_index(request.collection_name)
-        if not rag_index:
-            logger.error(f"RAG collection '{request.collection_name}' does not exist or could not be loaded.")
-            error_chunk_json = StreamChunk(content="抱歉，知识库未准备好，请稍后再试。", is_last=True).json()
-            yield f"data: {error_chunk_json}\n\n".encode("utf-8") 
-            return
-
         combined_rag_filters = request.filters if request.filters else {}
         # Initialize the list to store the material_ids that were actually requested by the user
         final_referenced_material_ids = [] 
-
+        rag_sources_info = []
         if request.target_file_ids and len(request.target_file_ids) > 0:
             try:
                 material_ids_int = [int(mid) for mid in request.target_file_ids]
@@ -213,25 +214,26 @@ class QueryService:
             except ValueError:
                 logger.warning("Invalid material_id in target_file_ids. Ignoring file filter.")
         
-        chroma_where_clause = self.retrieval_service._build_chroma_where_clause(combined_rag_filters)
-        logger.info(f"Main RAG ChromaDB `where` clause: {chroma_where_clause}")
-
-
         generated_title = ""
         # 直接使用 Java 侧传递的 is_first_query 字段来判断是否生成标题
         if request.is_first_query: 
             logger.info("Attempting to generate session title as requested by Java side (is_first_query is True).")
             try:
-                title_query_engine = rag_index.as_query_engine(
-                    llm=self.llm,
-                    vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
-                    similarity_top_k=3,
-                    text_qa_template=self.title_generation_prompt
-                )
-                title_response = await title_query_engine.aquery(request.question)
-                generated_title = title_response.response.strip()
-                logger.info(f"Generated session title: '{generated_title}'")
-                logger.debug(f"DEBUG: Raw title response from LLM: '{title_response.response}'")
+                chroma_where_clause_for_title = self.retrieval_service._build_chroma_where_clause(combined_rag_filters)
+                rag_index = self._get_or_load_index(request.collection_name)
+                if rag_index:
+                    title_query_engine = rag_index.as_query_engine(
+                        llm=self.llm,
+                        vector_store_kwargs={"where": chroma_where_clause_for_title} if chroma_where_clause_for_title else {},
+                        similarity_top_k=3,
+                        text_qa_template=self.title_generation_prompt
+                    )
+                    title_response = await title_query_engine.aquery(request.question)
+                    generated_title = title_response.response.strip()
+                    logger.info(f"Generated session title: '{generated_title}'")
+                    logger.debug(f"DEBUG: Raw title response from LLM: '{title_response.response}'")
+                else:
+                    logger.warning(f"Could not get index for {request.collection_name}, skipping title generation.")
             except Exception as e:
                 logger.error(f"Failed to generate session title: {e}", exc_info=True)
                 generated_title = ""
@@ -246,18 +248,41 @@ class QueryService:
             collection_name=request.collection_name,
             filters=combined_rag_filters,
             top_k=request.similarity_top_k,
-            use_reranker=True # 主RAG查询流程需要使用重排器
+            use_reranker=self.rag_config.use_reranker,
         )
 
         # 检查是否召回了文档
         if not final_retrieved_nodes:
-            logger.info("No documents retrieved for the main query. Adding virtual node.")
-            virtual_node = LlamaTextNode(text="NO_RELEVANT_DOCUMENTS_FOUND", metadata={"source": "virtual_fallback"})
-            final_retrieved_nodes.append(NodeWithScore(node=virtual_node, score=0.0))
+            logger.info("No documents retrieved for the main query. Directly calling LLM.")
+            # 建立新的逻辑分支，直接调用 LLM
+            async for chunk in self._stream_llm_without_rag_context(
+                request.question,
+                chat_history_context_string,
+                generated_title,
+                final_referenced_material_ids
+            ):
+                yield chunk
+            return
+
+        retrieved_node_map = {}
 
          # --- 构建发送给 LLM 的 context_str，现在包含类型信息 ---
         context_parts = []
         for n in final_retrieved_nodes: # 使用重排后的节点列表
+            # 检查节点类型，确保代码健壮性
+            if isinstance(n, NodeWithScore):
+                node = n.node
+                retrieved_node_map[node.id_] = node
+            else:
+                # 假设它是一个直接的文档或文本节点
+                node = n
+                retrieved_node_map[node.id_] = node
+            
+            # 过滤掉虚拟节点
+            if node.metadata.get("source") == "virtual_fallback" or \
+               node.metadata.get("document_type") == "no_document_found":
+                continue
+
             doc_type = n.node.metadata.get("document_type", "Unknown")
             page_label = n.node.metadata.get("page_label", "N/A")
             file_name = n.node.metadata.get("file_name", "N/A")
@@ -266,10 +291,26 @@ class QueryService:
                 f"{n.get_content()}\n"
                 f"--------------------------------------------------------------------------------"
             )
+
+            # 构建来源信息
+            material_id = node.metadata.get("material_id")
+            if '_node_content' in node.metadata and isinstance(node.metadata['_node_content'], str):
+                try:
+                    node_content_data = json.loads(node.metadata['_node_content'])
+                    node_content_meta = node_content_data.get('metadata', {})
+                    file_name = node_content_meta.get('file_name', file_name)
+                    page_label = node_content_meta.get('page_label', page_label)
+                except json.JSONDecodeError:
+                    pass
+
+            rag_sources_info.append({
+                "file_name": file_name,
+                "page_number": page_label,
+                "material_id": material_id
+            })
+
         context_str_for_llm = "\n\n".join(context_parts)
 
-        # --- 创建一个节点ID到完整节点对象的映射 ---
-        retrieved_node_map: Dict[str, LlamaTextNode] = {node_with_score.node.id_: node_with_score.node for node_with_score in final_retrieved_nodes}
         logger.debug(f"Created map of {len(retrieved_node_map)} retrieved nodes for lookup.")
 
         # --- 主 RAG 查询 LLM ---
@@ -402,6 +443,10 @@ class QueryService:
         referenced_chunk_texts = [node.text for node in retrieved_node_map.values()]
         referenced_chunk_ids = list(retrieved_node_map.keys())
 
+        # 新增逻辑：合并文档 chunk 和聊天历史 chunk
+        combined_referenced_texts = referenced_chunk_texts + chat_history_chunk_texts
+        combined_referenced_ids = referenced_chunk_ids + chat_history_chunk_ids
+
         # 步骤 3.1: 将回答分割成句子
         import re
         # 使用正则表达式进行句子分割
@@ -416,7 +461,7 @@ class QueryService:
         
         if self.embedding_model:
             # 批量获取句子和 chunk 的 embeddings，效率更高
-            all_text_to_embed = response_sentences + referenced_chunk_texts
+            all_text_to_embed = response_sentences + combined_referenced_texts
             all_embeddings = await self.embedding_model.aget_text_embedding_batch(all_text_to_embed, show_progress=False)
             
             response_sentence_embeddings = all_embeddings[:len(response_sentences)]
@@ -438,29 +483,57 @@ class QueryService:
                 sentence_embedding = response_sentence_embeddings[i]
                 best_match_id = None
                 max_similarity = -1.0
+                best_match_type = "" # 标记引用来源类型
+                citation_info = {}
                 
                 for j, chunk_embedding in enumerate(referenced_chunk_embeddings):
                     similarity = cosine_similarity(sentence_embedding, chunk_embedding)
                     if similarity > max_similarity:
                         max_similarity = similarity
-                        best_match_id = referenced_chunk_ids[j]
+                        best_match_id = combined_referenced_ids[j]
+                        # 根据索引判断来源类型
+                        if j < len(referenced_chunk_ids):
+                            best_match_type = "document"
+                        else:
+                            best_match_type = "chat_history"
+
 
                 # 阈值判断：如果最高相似度低于某个阈值，可能就不认为是引用
                 if max_similarity > self.rag_config.citation_similarity_threshold: 
-                    source_node = retrieved_node_map.get(best_match_id)
-                    if source_node:
-                        # 确保元数据存在
-                        source_meta = source_node.metadata
-                        citation_info = {
-                            "sentence": sentence,
-                            "referenced_chunk_id": best_match_id,
-                            "referenced_chunk_text": source_node.text,
-                            "document_id": source_meta.get('document_id'), # 或其他你希望引用的 ID
-                            "material_id": source_meta.get('material_id'),
-                            "file_name": source_meta.get('file_name'),
-                            "page_label": source_meta.get('page_label')
-                        }
-                        sentence_citations.append(citation_info)
+                    citation_info = { 
+                        "sentence": sentence,
+                        "referenced_chunk_id": best_match_id,
+                        "referenced_chunk_text": combined_referenced_texts[combined_referenced_ids.index(best_match_id)],
+                        "source_type": best_match_type, # 新增字段
+                        "document_id": None,
+                        "material_id": None,
+                        "file_name": None,
+                        "page_label": None
+                    }
+                    
+                    if best_match_type == "document":
+                        source_node = retrieved_node_map.get(best_match_id)
+                        if source_node:
+                            source_meta = source_node.metadata
+                            # 使用 .update() 方法安全地更新字典
+                            citation_info.update({
+                                "document_id": source_meta.get('document_id'),
+                                "material_id": source_meta.get('material_id'),
+                                "file_name": source_meta.get('file_name'),
+                                "page_label": source_meta.get('page_label')
+                            })
+                    else: # 聊天历史
+                        source_node = next((node for node in chat_history_context_nodes if node.id_ == best_match_id), None)
+                        if source_node:
+                            citation_info.update({
+                                "document_id": None,
+                                "material_id": None,
+                                "file_name": "聊天历史",
+                                "page_label": source_node.metadata.get('role', '未知')
+                            })
+                    
+                    # 只有在满足阈值时才添加引用
+                    sentence_citations.append(citation_info)
                         
         else:
             logger.warning("Embedding model not available for sentence-level citation.")
@@ -491,3 +564,63 @@ class QueryService:
 
         logger.debug(f"Yielding final raw JSON chunk: {final_sse_event_json}")
         yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
+
+    # 在没有召回文档时，直接调用LLM
+    async def _stream_llm_without_rag_context(self, 
+                                              question: str, 
+                                              chat_history_context_string: str, 
+                                              generated_title: Optional[str] = None,
+                                              final_referenced_material_ids: Optional[List[str]] = None) -> AsyncGenerator[bytes, None]:
+        """
+        在召回文档为空时，直接调用LLM生成回复。
+        """
+        logger.info(f"RAG context is empty. Calling LLM directly for question: '{question}'")
+        
+        # 使用通用的 LLM 聊天模板，或者一个简单的无上下文模板
+        final_prompt_for_llm = self.general_chat_prompt.format(
+            chat_history_context=chat_history_context_string,
+            query_str=question
+        )
+        
+        llm_response_gen = None 
+        max_retries = self.rag_config.llm_max_retries
+        for attempt in range(max_retries):
+            try:
+                response_gen = await self.llm.astream_chat(messages=[ 
+                     ChatMessage(role="system", content=final_prompt_for_llm), 
+                     ChatMessage(role="user", content=question) 
+                 ])
+
+                llm_response_gen = response_gen
+                break
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}: Error calling LLM without RAG context for '{question}': {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(self.rag_config.retry_base_delay * (2 ** attempt))
+                    continue
+                else:
+                    error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请稍后再试。", is_last=True).json()
+                    yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+                    return
+        if not llm_response_gen:
+            error_chunk_json = StreamChunk(content="AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+            yield f"data: {error_chunk_json}\n\n".encode("utf-8")
+            return
+
+        full_response_content = ""
+        async for chunk_resp in llm_response_gen:
+            chunk_text = chunk_resp.delta
+            full_response_content += chunk_text
+            sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
+            yield f"data: {sse_event_json}\n\n".encode("utf-8")
+        
+        # 封装最终的元数据，不包含任何来源信息
+        final_metadata = {
+            "rag_sources": [],
+            "referenced_docs": final_referenced_material_ids,
+            "session_title": generated_title
+        }
+        final_sse_event_json = StreamChunk(content="", is_last=True, metadata=final_metadata).json()
+        yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
+
+        return
