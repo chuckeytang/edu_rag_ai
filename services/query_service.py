@@ -252,7 +252,7 @@ class QueryService:
         )
 
         # 检查是否召回了文档
-        if not final_retrieved_nodes:
+        if not final_retrieved_nodes or len(final_retrieved_nodes) == 0:
             logger.info("No documents retrieved for the main query. Directly calling LLM.")
             # 建立新的逻辑分支，直接调用 LLM
             async for chunk in self._stream_llm_without_rag_context(
