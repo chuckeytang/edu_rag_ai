@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Any, Optional, List, Dict
 from datetime import datetime, timezone
 
@@ -58,8 +58,17 @@ class DebugRequest(BaseModel):
 
 class WxMineCollectSubjectList(BaseModel):
     subject: str
-    clazz: Optional[str] = None # Optional 因为Java端可能为null
-    exam: Optional[str] = None   # Optional 因为Java端可能为null
+    clazz: Optional[str] = None
+    exam: Optional[str] = None
+
+    @field_validator('subject', mode='before')
+    def subject_to_string(cls, v):
+        """
+        在验证'subject'字段之前，将'None'值转换为空字符串""。
+        """
+        if v is None:
+            return ""
+        return v
 
 # 请求体模型，用于接收文本内容或 OSS file_key，并新增用户上下文信息
 class ExtractionRequest(BaseModel):

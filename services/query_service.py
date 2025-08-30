@@ -82,12 +82,12 @@ class QueryService:
         self.general_chat_prompt = PromptTemplate(rag_config.general_chat_prompt_template)
         
         # 1. 本地模型 SentenceTransformer Reranker
-        self.local_reranker = SentenceTransformerRerank(
-            model="BAAI/bge-reranker-base", 
-            top_n=rag_config.retrieval_top_k*rag_config.initial_retrieval_multiplier, 
-            device="cuda" if torch.cuda.is_available() else "cpu" 
-        )
-        logger.info(f"Initialized Local Reranker: SentenceTransformerRerank with model '{self.local_reranker.model}' on device '{self.local_reranker.device}' and fixed top_n={self.local_reranker.top_n}.")
+        # self.local_reranker = SentenceTransformerRerank(
+        #     model="BAAI/bge-reranker-base", 
+        #     top_n=rag_config.retrieval_top_k*rag_config.initial_retrieval_multiplier, 
+        #     device="cuda" if torch.cuda.is_available() else "cpu" 
+        # )
+        # logger.info(f"Initialized Local Reranker: SentenceTransformerRerank with model '{self.local_reranker.model}' on device '{self.local_reranker.device}' and fixed top_n={self.local_reranker.top_n}.")
 
         # 2. 基于 LLM 的 Reranker (使用 DeepSeek)
         self.llm_reranker = None

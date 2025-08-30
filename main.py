@@ -45,10 +45,10 @@ async def lifespan(app: FastAPI):
         
         # 步骤 2: 强制初始化所有核心服务。
         # 通过调用这些函数的依赖注入链，它们会按需获取已初始化的 ChromaDB 客户端和LLM/Embedding模型。
-        get_query_service()
         get_chat_history_service()
         get_indexer_service()
         get_ai_extraction_service()
+        get_query_service()
         get_document_oss_service()
         # 请根据你的应用逻辑，确保所有在第一个请求到来前需要就绪的服务都在这里被调用一次。
         # 否则，第一次请求仍可能触发初始化。
