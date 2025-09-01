@@ -214,6 +214,10 @@ class QueryService:
             collection_names_to_query = [request.collection_name, "paper_cut_collection"]
             logger.info("Query type not specified, retrieving from 'public_collection' and 'paper_cut_collection'.")
         
+        # 在使用 request.similarity_top_k 之前，为其提供一个默认值
+        # 例如，如果 request.similarity_top_k 为 None，则使用 rag_config.retrieval_top_k 作为默认值
+        final_top_k = request.similarity_top_k if request.similarity_top_k is not None else rag_config.retrieval_top_k
+        
         # --- 流程2: 异步并行召回 ---
         retrieve_tasks = []
         for collection_name in collection_names_to_query:
@@ -223,7 +227,7 @@ class QueryService:
                 collection_name=collection_name,
                 # 在这里，我们将 filters 设置为 None，因为所有过滤都将后置处理
                 filters=None,
-                top_k=request.similarity_top_k * rag_config.initial_retrieval_multiplier,
+                top_k=final_top_k * rag_config.initial_retrieval_multiplier,
                 use_reranker=False, # 禁用重排器，重排将在合并后进行
             )
             retrieve_tasks.append(task)
