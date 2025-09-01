@@ -491,12 +491,6 @@ def delete_chunks_by_filter(
         filters["type"] = doc_type
         logger.info(f"Deleting by doc_type: {doc_type}")
     elif keyword:
-        # 如果提供了 keyword，则进行模糊匹配查找 material_id
-        # 注意：ChromaDB 的 where 子句不支持模糊匹配，我们必须先从数据库中查找
-        # 你的后端代码中没有提供直接通过 Title 模糊匹配查找 material_id 的方法。
-        # 这里为了演示，我们假设存在一个这样的方法，或者手动实现。
-        # 最简单且可行的方案是：先通过 get_nodes_by_metadata_filter 获取所有节点，然后在内存中过滤。
-        # 虽然效率不高，但对于调试工具是可接受的。
         
         # 获取所有节点，然后在内存中过滤出匹配关键字的 material_id
         all_nodes = indexer_service.get_nodes_by_metadata_filter(collection_name, {})

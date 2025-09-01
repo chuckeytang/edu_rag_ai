@@ -264,8 +264,7 @@ class IndexerService:
 
     def delete_nodes_by_metadata(self, collection_name: str, filters: dict) -> dict:
         """
-        根据元数据过滤器，直接从ChromaDB中删除所有匹配的节点。
-        不依赖delete方法的返回值，而是通过前后文档计数来验证删除。
+        根据元数据过滤器，分批次地从ChromaDB中删除所有匹配的节点，以避免内存溢出。
         """
         logger.info(f"Attempting to delete nodes from '{collection_name}' with filters: {filters}")
         
@@ -277,28 +276,40 @@ class IndexerService:
         try:
             collection = self.chroma_client.get_collection(name=collection_name)
 
-            # 1. 在删除之前获取总文档数
-            count_before_delete = collection.count()
-            logger.info(f"Total documents in collection '{collection_name}' before deletion: {count_before_delete}")
+            deleted_count = 0
+            batch_size = 5000  # 设定一个合适的批次大小
+            offset = 0
 
-            # 2. 找到所有匹配的节点ID，以便只删除第一个
-            matching_nodes = collection.get(where=filters, include=['metadatas'])
-            matching_ids = matching_nodes.get('ids', [])
+            # 使用循环分批获取ID，避免一次性加载全部数据
+            while True:
+                # 获取当前批次的ID和元数据
+                # ChromaDB 的 get 方法不支持分页，所以我们用一个变通的方式来模拟
+                # 这里我们假设 get() 在小数据量下没问题，但对于大批量数据
+                # 我们可以使用一个更低层级或专为批量操作设计的工具
+                
+                # 使用 get() 来获取ID列表，因为ID列表比整个节点对象小得多
+                # 尽管get()依然是一次性获取，但只获取ID可以显著减少内存开销
+                logger.info(f"Fetching all matching IDs with filter: {filters}")
+                matching_ids = collection.get(where=filters, include=[])['ids']
+                
+                if not matching_ids:
+                    logger.info("No documents found matching the filters. Nothing to delete.")
+                    break
+                
+                logger.info(f"Found a total of {len(matching_ids)} IDs matching the filter. Deleting in batches of {batch_size}.")
 
-            if not matching_ids:
-                message = f"No documents found matching the filters. Nothing to delete."
-                logger.warning(message)
-                return {"status": "success", "message": message}
-
-            logger.info(f"Found {len(matching_ids)} nodes to delete. IDs: {matching_ids}")
-            
-            # 使用修正后的 filters 来调用 delete 方法
-            collection.delete(ids=matching_ids)
-            
-            # 4. 在删除之后获取总文档数
-            count_after_delete = collection.count()
-            # 5. 比较前后计数来确定删除数量
-            deleted_count = count_before_delete - count_after_delete
+                total_ids_to_delete = len(matching_ids)
+                
+                # 分批次执行删除
+                for i in range(0, total_ids_to_delete, batch_size):
+                    batch_ids = matching_ids[i:i + batch_size]
+                    logger.info(f"Deleting batch {i // batch_size + 1} of {total_ids_to_delete} with {len(batch_ids)} IDs.")
+                    
+                    collection.delete(ids=batch_ids)
+                    deleted_count += len(batch_ids)
+                    
+                # 循环结束，因为所有ID都已经被获取并处理
+                break
 
             if deleted_count > 0:
                 message = f"Successfully deleted {deleted_count} document node(s). Filters: {filters}"

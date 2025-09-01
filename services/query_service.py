@@ -333,6 +333,7 @@ class QueryService:
 
         logger.debug(f"Created map of {len(retrieved_node_map)} retrieved nodes for lookup.")
 
+        max_retries = 3
         # --- 主 RAG 查询 LLM ---
         llm_response_obj = None 
         for attempt in range(max_retries):
