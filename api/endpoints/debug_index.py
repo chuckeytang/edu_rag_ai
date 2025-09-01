@@ -470,13 +470,14 @@ def delete_chunks_by_filter(
     collection_name: str = Query(..., description="目标Collection的名称"),
     material_id: Optional[int] = Query(None, description="要删除的文档的 material_id"),
     keyword: Optional[str] = Query(None, description="按文档标题进行模糊匹配的关键字"),
+    doc_type: Optional[str] = Query(None, description="按文档类型进行精确匹配的关键字，例如 'PaperCut'"),
     indexer_service: IndexerService = Depends(get_indexer_service) # 依赖注入 IndexerService
 ) -> Dict[str, Any]:
     """
-    根据给定的 material_id，从指定 Collection 中删除所有相关的文档块（chunk）。
-    如果同时提供了 material_id 和 keyword，将优先使用 material_id。
+    根据给定的过滤器（material_id, keyword, 或 doc_type），从指定 Collection 中删除所有相关的文档块。
+    如果提供了多个过滤器，它们会以 AND 逻辑组合。
     """
-    if material_id is None and keyword is None:
+    if material_id is None and keyword is None and doc_type is None:
         raise HTTPException(status_code=400, detail="必须提供 material_id 或 keyword 中的一个。")
 
     logger.info(f"Received request to delete chunks for material_id: {material_id} in collection: '{collection_name}'")
@@ -486,6 +487,9 @@ def delete_chunks_by_filter(
         # 如果提供了 material_id，则进行精确删除
         filters = {"material_id": material_id}
         logger.info(f"Deleting by material_id: {material_id}")
+    if doc_type:
+        filters["type"] = doc_type
+        logger.info(f"Deleting by doc_type: {doc_type}")
     elif keyword:
         # 如果提供了 keyword，则进行模糊匹配查找 material_id
         # 注意：ChromaDB 的 where 子句不支持模糊匹配，我们必须先从数据库中查找

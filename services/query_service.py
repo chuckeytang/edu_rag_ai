@@ -4,6 +4,7 @@ from fastapi import Depends
 import asyncio
 
 from typing import Optional
+from memory_profiler import profile
 
 from services.indexer_service import IndexerService
 from services.retrieval_service import RetrievalService
@@ -157,6 +158,7 @@ class QueryService:
         
         return list(set(material_ids))
 
+    @profile
     async def rag_query_with_context(
         self,
         request: ChatQueryRequest,
@@ -196,73 +198,91 @@ class QueryService:
             chat_history_context_string = ""
         
         combined_rag_filters = request.filters if request.filters else {}
-        # Initialize the list to store the material_ids that were actually requested by the user
-        final_referenced_material_ids = [] 
-        rag_sources_info = []
-        if request.target_file_ids and len(request.target_file_ids) > 0:
-            try:
-                material_ids_int = [int(mid) for mid in request.target_file_ids]
-                # Store the original string IDs for the metadata
-                final_referenced_material_ids = request.target_file_ids 
-                
-                if "material_id" in combined_rag_filters and isinstance(combined_rag_filters["material_id"], dict) and "$in" in combined_rag_filters["material_id"]:
-                    current_material_ids = combined_rag_filters["material_id"]["$in"]
-                    # 确保不重复添加
-                    combined_rag_filters["material_id"]["$in"] = list(set(current_material_ids + material_ids_int))
-                else:
-                    combined_rag_filters["material_id"] = {"$in": material_ids_int}
-            except ValueError:
-                logger.warning("Invalid material_id in target_file_ids. Ignoring file filter.")
-        
-        generated_title = ""
-        # 直接使用 Java 侧传递的 is_first_query 字段来判断是否生成标题
-        if request.is_first_query: 
-            logger.info("Attempting to generate session title as requested by Java side (is_first_query is True).")
-            try:
-                chroma_where_clause_for_title = self.retrieval_service._build_chroma_where_clause(combined_rag_filters)
-                rag_index = self._get_or_load_index(request.collection_name)
-                if rag_index:
-                    title_query_engine = rag_index.as_query_engine(
-                        llm=self.llm,
-                        vector_store_kwargs={"where": chroma_where_clause_for_title} if chroma_where_clause_for_title else {},
-                        similarity_top_k=3,
-                        text_qa_template=self.title_generation_prompt
-                    )
-                    title_response = await title_query_engine.aquery(request.question)
-                    generated_title = title_response.response.strip()
-                    logger.info(f"Generated session title: '{generated_title}'")
-                    logger.debug(f"DEBUG: Raw title response from LLM: '{title_response.response}'")
-                else:
-                    logger.warning(f"Could not get index for {request.collection_name}, skipping title generation.")
-            except Exception as e:
-                logger.error(f"Failed to generate session title: {e}", exc_info=True)
-                generated_title = ""
-        else:
-            logger.info("Skipping session title generation as not requested by Java side (is_first_query is False).") 
+        query_type = combined_rag_filters.pop("type", None)
+        generated_title = "" 
 
-        # --- 主 RAG 查询 ---
-        max_retries = 3
-        # --- 召回文档 ---
-        final_retrieved_nodes = await self.retrieval_service.retrieve_documents(
-            query_text=request.question,
-            collection_name=request.collection_name,
-            filters=combined_rag_filters,
-            top_k=request.similarity_top_k,
-            use_reranker=self.rag_config.use_reranker,
-        )
+        # --- 流程1: 根据 type 分流召回 ---
+        collection_names_to_query = []
+        if query_type == "PaperCut":
+            collection_names_to_query = ["paper_cut_collection"]
+            logger.info("Query type is 'PaperCut', retrieving from 'paper_cut_collection'.")
+        elif query_type and query_type != "PaperCut":
+            # 假设其他所有类型都在 public_collection
+            collection_names_to_query = [request.collection_name]
+            logger.info(f"Query type is '{query_type}', retrieving from '{request.collection_name}'.")
+        else: # type 为空或未指定
+            collection_names_to_query = [request.collection_name, "paper_cut_collection"]
+            logger.info("Query type not specified, retrieving from 'public_collection' and 'paper_cut_collection'.")
+        
+        # --- 流程2: 异步并行召回 ---
+        retrieve_tasks = []
+        for collection_name in collection_names_to_query:
+            # 这里的 filters 已经移除了 'type'
+            task = self.retrieval_service.retrieve_documents(
+                query_text=request.question,
+                collection_name=collection_name,
+                # 在这里，我们将 filters 设置为 None，因为所有过滤都将后置处理
+                filters=None,
+                top_k=request.similarity_top_k * rag_config.initial_retrieval_multiplier,
+                use_reranker=False, # 禁用重排器，重排将在合并后进行
+            )
+            retrieve_tasks.append(task)
+
+        # 使用 asyncio.gather 并行执行所有召回任务
+        results_from_collections = await asyncio.gather(*retrieve_tasks)
+
+        # --- 流程3: 合并结果集 ---
+        combined_retrieved_nodes = []
+        for result_list in results_from_collections:
+            combined_retrieved_nodes.extend(result_list)
+        
+        logger.info(f"Retrieved {len(combined_retrieved_nodes)} chunks from all collections combined.")
 
         # 检查是否召回了文档
-        if not final_retrieved_nodes or len(final_retrieved_nodes) == 0:
+        if not combined_retrieved_nodes:
             logger.info("No documents retrieved for the main query. Directly calling LLM.")
-            # 建立新的逻辑分支，直接调用 LLM
             async for chunk in self._stream_llm_without_rag_context(
                 request.question,
                 chat_history_context_string,
-                generated_title,
-                final_referenced_material_ids
+                generated_title
             ):
                 yield chunk
             return
+        
+        # --- 流程4: 后置元数据过滤 ---
+        final_filtered_nodes = []
+        # 使用 _build_chroma_where_clause 方法来处理复杂的过滤器
+        filter_fn = self.retrieval_service._build_chroma_where_clause(combined_rag_filters)
+        if filter_fn:
+            logger.info(f"Applying post-retrieval filters: {combined_rag_filters}")
+            for node_with_score in combined_retrieved_nodes:
+                if self._check_node_with_filter(node_with_score.node, combined_rag_filters):
+                    final_filtered_nodes.append(node_with_score)
+        else:
+            final_filtered_nodes = combined_retrieved_nodes
+            logger.info("No metadata filters to apply, skipping post-retrieval filtering.")
+
+        # --- 流程5: 后置重排 ---
+        if self.rag_config.use_reranker and len(final_filtered_nodes) > 0:
+            logger.info("Applying reranker on the filtered nodes.")
+            query_bundle_for_rerank = QueryBundle(query_str=request.question)
+            if self.rag_config.reranker_type == "llm" and self.llm_reranker:
+                final_retrieved_nodes = self.llm_reranker._postprocess_nodes(
+                    nodes=final_filtered_nodes, query_bundle=query_bundle_for_rerank
+                )
+            elif self.rag_config.reranker_type == "local" and self.local_reranker:
+                final_retrieved_nodes = self.local_reranker.postprocess_nodes(
+                    final_filtered_nodes, query_bundle=query_bundle_for_rerank
+                )
+            else:
+                logger.warning("Reranker type is unknown. Skipping reranking.")
+                final_retrieved_nodes = final_filtered_nodes
+        else:
+            final_retrieved_nodes = final_filtered_nodes
+            logger.info("Reranking disabled or no nodes to rerank.")
+        
+        # 确保最终返回的节点数量不超过 top_k
+        final_retrieved_nodes = final_retrieved_nodes[:request.similarity_top_k]
 
         retrieved_node_map = {}
 
@@ -624,3 +644,28 @@ class QueryService:
         yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
 
         return
+    
+
+    def _check_node_with_filter(self, node, filters: Dict[str, Any]) -> bool:
+        """
+        根据复杂的过滤器字典，检查单个节点的元数据是否匹配。
+        此方法需要你自己实现，以处理 '$and' 和 '$in' 等逻辑。
+        """
+        # 这是一个简化的示例，你需要根据你的 _build_chroma_where_clause 逻辑来实现
+        # 更健壮的过滤检查。
+        if not filters:
+            return True
+        
+        # 如果是简单的 {"key": "value"} 格式
+        if all(isinstance(v, (str, int, float)) for v in filters.values()):
+            return all(node.metadata.get(k) == v for k, v in filters.items())
+
+        # 如果是复杂格式，例如 {"$and": [...]}
+        if "$and" in filters:
+            return all(self._check_node_with_filter(node, sub_filter) for sub_filter in filters["$and"])
+        if "$in" in filters and len(filters) == 1:
+            key, values = next(iter(filters.items()))
+            return node.metadata.get(key) in values
+            
+        # 简化示例，需要更详细的实现
+        return True

@@ -7,3 +7,5 @@ storage
 .config
 data/pdf
 logs/
+
+mprofile*
