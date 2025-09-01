@@ -107,7 +107,7 @@ class MCPService:
                         # 直接调用 RetrievalService 的通用召回方法
                         retrieved_nodes: List[NodeWithScore] = await self.retrieval_service.retrieve_documents(
                             query_text=user_question, 
-                            collection_name="public_collection", 
+                            collection_name="paper_cut_collection", 
                             filters={"type": "PaperCut"}, 
                             top_k=10,
                             use_reranker=False # 此处不需要重排器
