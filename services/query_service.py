@@ -290,10 +290,37 @@ class QueryService:
         # 确保最终返回的节点数量不超过 top_k
         final_retrieved_nodes = final_retrieved_nodes[:request.similarity_top_k]
 
+        # --- 计算并限制发送给 LLM 的总 token 数量 ---
+        tokenizer = get_tokenizer()
+        if not tokenizer:
+            logger.warning("Tokenizer not available, cannot perform token-based content trimming.")
+        
+        # 定义LLM的最大上下文长度，这通常在 rag_config 中配置
+        llm_max_context_tokens = rag_config.llm_max_context_tokens
+        
+        # 计算固定部分的 token 数量
+        static_prompt_tokens = 0
+        if tokenizer:
+            # 这里的 qa_prompt 是一个模板，我们只计算它的占位符以外的部分
+            # 这只是一个粗略估算，更精确的方法是计算 chat_history_context_string 和 question 的 token
+            static_prompt_tokens = len(tokenizer.encode(self.qa_prompt.format(
+                chat_history_context="", context_str="", query_str=""
+            )))
+            static_prompt_tokens += len(tokenizer.encode(chat_history_context_string))
+            static_prompt_tokens += len(tokenizer.encode(request.question))
+        
+        remaining_context_tokens = llm_max_context_tokens - static_prompt_tokens
+        
+        logger.info(f"LLM max context: {llm_max_context_tokens}, static prompt tokens: {static_prompt_tokens}, remaining for RAG content: {remaining_context_tokens}")
+        
+
         retrieved_node_map = {}
 
          # --- 构建发送给 LLM 的 context_str，现在包含类型信息 ---
         context_parts = []
+        current_context_tokens = 0
+        rag_sources_info = [] # 重新初始化，确保只包含最终选择的文档
+        retrieved_node_map = {} # 重新初始化
         for n in final_retrieved_nodes: # 使用重排后的节点列表
             # 检查节点类型，确保代码健壮性
             if isinstance(n, NodeWithScore):
@@ -308,6 +335,14 @@ class QueryService:
             if node.metadata.get("source") == "virtual_fallback" or \
                node.metadata.get("document_type") == "no_document_found":
                 continue
+
+            node_content = n.get_content()
+            if tokenizer:
+                node_tokens = len(tokenizer.encode(node_content))
+                if current_context_tokens + node_tokens > remaining_context_tokens:
+                    logger.warning(f"Exceeding LLM context window. Truncating RAG content. Remaining tokens: {remaining_context_tokens}, trying to add {node_tokens}.")
+                    break # 超过限制，停止添加文档
+                current_context_tokens += node_tokens
 
             doc_type = n.node.metadata.get("document_type", "Unknown")
             page_label = n.node.metadata.get("page_label", "N/A")

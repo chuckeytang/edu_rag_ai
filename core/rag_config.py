@@ -45,6 +45,10 @@ class RagConfig(BaseModel):
     )
 
     # LLM & 系统参数
+    llm_max_context_tokens: conint(ge=1) = Field(
+        4096,
+        description="LLM模型的最大上下文令牌数。用于限制传入LLM的总文本量，以避免超出模型限制。"
+    )
     llm_max_retries: conint(ge=0) = Field(
         3,
         description="LLM请求的最大重试次数。设为0则不重试。"
