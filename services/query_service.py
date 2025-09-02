@@ -199,6 +199,7 @@ class QueryService:
         
         combined_rag_filters = request.filters if request.filters else {}
         query_type = combined_rag_filters.pop("type", None)
+        final_referenced_material_ids = []
         generated_title = "" 
 
         # --- 流程1: 根据 type 分流召回 ---
