@@ -201,7 +201,6 @@ class QueryService:
         query_type = combined_rag_filters.pop("type", None)
         final_referenced_material_ids = []
         generated_title = "" 
-        rag_sources_info = []
 
         # --- 流程1: 根据 type 分流召回 ---
         collection_names_to_query = []
@@ -295,41 +294,51 @@ class QueryService:
         if not tokenizer:
             logger.warning("Tokenizer not available, cannot perform token-based content trimming.")
         
-        # 定义LLM的最大上下文长度，这通常在 rag_config 中配置
         llm_max_context_tokens = rag_config.llm_max_context_tokens
         
-        # 计算固定部分的 token 数量
+        # 计算固定部分的 token 数量 (Prompt 模板 + 聊天历史 + 用户问题)
+        # 这里的 `qa_prompt.template` 是一个更准确的计算方法，它包含了整个模板文本
         static_prompt_tokens = 0
         if tokenizer:
-            # 这里的 qa_prompt 是一个模板，我们只计算它的占位符以外的部分
-            # 这只是一个粗略估算，更精确的方法是计算 chat_history_context_string 和 question 的 token
-            static_prompt_tokens = len(tokenizer.encode(self.qa_prompt.format(
-                chat_history_context="", context_str="", query_str=""
-            )))
-            static_prompt_tokens += len(tokenizer.encode(chat_history_context_string))
-            static_prompt_tokens += len(tokenizer.encode(request.question))
+            try:
+                # 这是一个更精确的计算，因为它是整个模板的 token
+                template_tokens = len(tokenizer.encode(self.qa_prompt.template))
+                history_tokens = len(tokenizer.encode(chat_history_context_string))
+                query_tokens = len(tokenizer.encode(request.question))
+                
+                # 减去占位符的 tokens，因为它们会被实际内容替换
+                placeholder_tokens = len(tokenizer.encode('{chat_history_context}{context_str}{query_str}'))
+                
+                static_prompt_tokens = template_tokens + history_tokens + query_tokens - placeholder_tokens
+                
+            except Exception as e:
+                logger.warning(f"Failed to calculate static prompt tokens: {e}. Falling back to approximation.")
+                static_prompt_tokens = len(tokenizer.encode(self.qa_prompt.format(
+                    chat_history_context="", context_str="", query_str=""
+                )))
+                static_prompt_tokens += len(tokenizer.encode(chat_history_context_string))
+                static_prompt_tokens += len(tokenizer.encode(request.question))
         
-        remaining_context_tokens = llm_max_context_tokens - static_prompt_tokens
+        # 预留一些空间给 LLM 的回答，以防万一
+        reserved_tokens = 500
+        remaining_context_tokens = llm_max_context_tokens - static_prompt_tokens - reserved_tokens
         
         logger.info(f"LLM max context: {llm_max_context_tokens}, static prompt tokens: {static_prompt_tokens}, remaining for RAG content: {remaining_context_tokens}")
         
-
-        retrieved_node_map = {}
-
-         # --- 构建发送给 LLM 的 context_str，现在包含类型信息 ---
+        
+        final_retrieved_nodes_for_llm = []
         context_parts = []
         current_context_tokens = 0
-        rag_sources_info = [] # 重新初始化，确保只包含最终选择的文档
-        retrieved_node_map = {} # 重新初始化
+        rag_sources_info = []
+        retrieved_node_map = {}
+
         for n in final_retrieved_nodes: # 使用重排后的节点列表
             # 检查节点类型，确保代码健壮性
             if isinstance(n, NodeWithScore):
                 node = n.node
-                retrieved_node_map[node.id_] = node
             else:
                 # 假设它是一个直接的文档或文本节点
                 node = n
-                retrieved_node_map[node.id_] = node
             
             # 过滤掉虚拟节点
             if node.metadata.get("source") == "virtual_fallback" or \
@@ -344,6 +353,9 @@ class QueryService:
                     break # 超过限制，停止添加文档
                 current_context_tokens += node_tokens
 
+            # 添加到最终的节点列表中
+            final_retrieved_nodes_for_llm.append(n)
+            
             doc_type = n.node.metadata.get("document_type", "Unknown")
             page_label = n.node.metadata.get("page_label", "N/A")
             file_name = n.node.metadata.get("file_name", "N/A")
@@ -394,7 +406,7 @@ class QueryService:
                     logger.warning("Tokenizer not available, skipping token count for LLM query.")
 
                 query_engine = RetrieverQueryEngine.from_args(
-                    retriever=CustomRetriever(final_retrieved_nodes), 
+                    retriever=CustomRetriever(final_retrieved_nodes_for_llm),
                     llm=self.llm,
                     streaming=True,
                     text_qa_template=PromptTemplate(final_prompt_for_llm) 
