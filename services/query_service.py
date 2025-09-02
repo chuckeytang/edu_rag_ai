@@ -201,6 +201,7 @@ class QueryService:
         query_type = combined_rag_filters.pop("type", None)
         final_referenced_material_ids = []
         generated_title = "" 
+        rag_sources_info = []
 
         # --- 流程1: 根据 type 分流召回 ---
         collection_names_to_query = []
