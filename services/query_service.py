@@ -76,6 +76,7 @@ class QueryService:
         # 保存 chat_history_service 实例
         self._chat_history_service = chat_history_service
         self.rag_config = rag_config
+        logger.info(f"RagConfig '{rag_config}'.")
 
         # 使用配置中的提示词
         self.qa_prompt = PromptTemplate(rag_config.qa_prompt_template)

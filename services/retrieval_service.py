@@ -102,7 +102,7 @@ class RetrievalService:
         initial_retrieval_top_k = top_k * self.rag_config.initial_retrieval_multiplier if top_k else self.rag_config.retrieval_top_k * self.rag_config.initial_retrieval_multiplier
         
         retriever = rag_index.as_retriever(
-            # vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
+            vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
             similarity_top_k=int(initial_retrieval_top_k)
         )
         retrieved_nodes = await retriever.aretrieve(query_text)
