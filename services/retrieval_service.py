@@ -6,8 +6,12 @@ from llama_index.core.schema import NodeWithScore, QueryBundle
 from llama_index.core.postprocessor import LLMRerank, SentenceTransformerRerank
 from llama_index.llms.openai_like import OpenAILike
 from services.indexer_service import IndexerService
+from llama_index.core.settings import Settings
+from llama_index.core.callbacks import CallbackManager, CBEventType, EventPayload, BaseCallbackHandler
 from core.rag_config import RagConfig
 import torch
+
+from services.llm.metrics_handler import TimingCallbackHandler
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +19,7 @@ class RetrievalService:
     def __init__(self, indexer_service: IndexerService, rag_config: RagConfig, deepseek_llm_for_reranker: OpenAILike):
         self._indexer_service = indexer_service
         self.rag_config = rag_config
+        self._callback_manager = CallbackManager([TimingCallbackHandler()])
         
         self.llm_reranker = None
         self.local_reranker = None

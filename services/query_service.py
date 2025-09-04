@@ -116,7 +116,6 @@ class QueryService:
         
         logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
         self.rag_config = rag_config
-        logger.info(f"RagConfig '{rag_config}'.")
         
         # --- 语义检索历史聊天上下文 ---
         chat_history_context_string = ""
