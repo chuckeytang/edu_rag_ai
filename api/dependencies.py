@@ -3,6 +3,7 @@ from services.ai_extraction_service import AIExtractionService
 from services.document_oss_service import DocumentOssService
 from services.document_service import DocumentService
 from services.indexer_service import IndexerService
+from services.llm.llm_service import DashScopeWithTools
 from services.retrieval_service import RetrievalService
 from services.mcp_service import MCPService
 from services.oss_service import OssService
@@ -227,15 +228,26 @@ def get_deepseek_llm_function_calling() -> OpenAILike:
         api_base=settings.DEEPSEEK_API_BASE,
         api_key=settings.DEEPSEEK_API_KEY,
         temperature=0.0,
-        # 核心配置：明确声明为聊天模型和功能调用模型
         is_chat_model=True,
         is_function_calling_model=True,
+    )
+
+@lru_cache(maxsize=1)
+def get_dashscope_llm_for_function_calling():
+    """为MCP服务提供轻量级的通义千问LLM（QWEN_TURBO），并支持 Function Calling"""
+    logger.info("Initializing DashScope LLM for Function Calling (QWEN_TURBO)...")
+    return DashScopeWithTools( 
+        model_name=DashScopeGenerationModels.QWEN_TURBO,
+        api_key=settings.DASHSCOPE_API_KEY,
+        temperature=0.1,
+        streaming=False
     )
 
 @lru_cache(maxsize=1)
 def get_mcp_service() -> MCPService:
     """提供 MCPService 的单例实例，用于处理功能调用"""
     logger.info("Initializing MCPService...")
-    # 使用 DeepSeek LLM 作为支持 Function Calling 的 LLM
-    return MCPService(llm_for_function_calling=get_deepseek_llm_function_calling(),
-        retrieval_service=get_retrieval_service())
+    return MCPService(
+        llm_for_function_calling=get_dashscope_llm_for_function_calling(),
+        retrieval_service=get_retrieval_service()
+    )
