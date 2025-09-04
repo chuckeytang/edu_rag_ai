@@ -330,6 +330,7 @@ async def debug_rag_flow(
             collection_name=request.collection_name,
             filters=request.filters,
             top_k=initial_retrieval_top_k,
+            rag_config=rag_config,
             use_reranker=False
         )
 

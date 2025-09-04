@@ -107,57 +107,6 @@ class QueryService:
         """
         return self._indexer_service.get_rag_index(collection_name)
 
-    def retrieve_with_filters(self, question: str, collection_name: str, filters: dict, similarity_top_k: int = 5):
-        """
-        [DEBUG METHOD] 仅执行带过滤的召回，并返回召回的节点列表。
-        此方法现在使用通用的 RetrievalService。
-        """
-        logger.info(f"[DEBUG] Retrieving from collection '{collection_name}' with filters: {filters}")
-        
-        # 直接调用 RetrievalService 的通用召回方法
-        
-        try:
-            # 遵照你的原始代码格式，我们暂时假设存在一个同步版本或者在调用时进行异步处理
-            final_retrieved_nodes = self.retrieval_service.retrieve_documents_sync(
-                query_text=question,
-                collection_name=collection_name,
-                filters=filters,
-                top_k=similarity_top_k,
-                use_reranker=False # 此处不需要重排器
-            )
-            
-            logger.info(f"[DEBUG] RetrievalService returned {len(final_retrieved_nodes)} nodes.")
-            return final_retrieved_nodes
-        except Exception as e:
-            logger.error(f"[DEBUG] Error during retrieval: {e}", exc_info=True)
-            raise ValueError(f"Retrieval failed: {e}")
-    
-    async def retrieve_only_for_function_calling(self,
-                                                 query_text: str,
-                                                 collection_name: str,
-                                                 filters: Optional[Dict[str, Any]] = None,
-                                                 top_k: int = 15) -> List[int]:
-        """
-        专为 Function Calling 提供的纯文档召回方法，只返回 material_id 列表。
-        此方法**不应用重排器**。
-        """
-        retrieved_nodes = await self.retrieval_service.retrieve_documents(
-            query_text=query_text,
-            collection_name=collection_name,
-            filters=filters,
-            top_k=top_k,
-            use_reranker=False # 核心：在这里禁用重排器
-        )
-        
-        material_ids = []
-        for node_with_score in retrieved_nodes:
-            node = node_with_score.node
-            material_id = node.metadata.get("material_id")
-            if material_id:
-                material_ids.append(int(material_id))
-        
-        return list(set(material_ids))
-
     @profile
     async def rag_query_with_context(
         self,
@@ -230,6 +179,7 @@ class QueryService:
                 # 在这里，我们将 filters 设置为 None，因为所有过滤都将后置处理
                 filters=None,
                 top_k=final_top_k,
+                rag_config=rag_config,
                 use_reranker=False, # 禁用重排器，重排将在合并后进行
             )
             retrieve_tasks.append(task)

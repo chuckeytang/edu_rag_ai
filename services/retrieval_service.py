@@ -83,6 +83,7 @@ class RetrievalService:
     async def retrieve_documents(self,
                                   query_text: str,
                                   collection_name: str,
+                                  rag_config: Optional[RagConfig] = None,
                                   filters: Optional[Dict[str, Any]] = None,
                                   top_k: Optional[int] = None,
                                   use_reranker: bool = True) -> List[NodeWithScore]:
@@ -94,12 +95,15 @@ class RetrievalService:
             logger.error(f"RAG collection '{collection_name}' does not exist or could not be loaded.")
             return []
 
+        if not rag_config:
+            rag_config = self.rag_config
+
         # 获取顶层过滤条件，如果存在的话
         chroma_where_clause = self._build_chroma_where_clause(filters)
         logger.info(f"Retrieving documents with ChromaDB `where` clause: {chroma_where_clause}")
 
         # 初始召回数量应为 top_k * multiplier
-        initial_retrieval_top_k = top_k * self.rag_config.initial_retrieval_multiplier if top_k else self.rag_config.retrieval_top_k * self.rag_config.initial_retrieval_multiplier
+        initial_retrieval_top_k = top_k * rag_config.initial_retrieval_multiplier if top_k else rag_config.retrieval_top_k * rag_config.initial_retrieval_multiplier
         
         retriever = rag_index.as_retriever(
             vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
@@ -111,22 +115,22 @@ class RetrievalService:
         final_retrieved_nodes = retrieved_nodes
         
         # 如果启用重排器且use_reranker为True，则应用重排器
-        if self.rag_config.use_reranker and use_reranker and (self.llm_reranker or self.local_reranker):
+        if rag_config.use_reranker and use_reranker and (self.llm_reranker or self.local_reranker):
             if len(retrieved_nodes) == 0:
                  logger.info("No nodes retrieved, skipping reranking.")
             else:
                 query_bundle_for_rerank = QueryBundle(query_str=query_text)
                 
-                if self.rag_config.reranker_type == "llm" and self.llm_reranker:
+                if rag_config.reranker_type == "llm" and self.llm_reranker:
                     logger.info(f"Applying LLM Reranker to {len(retrieved_nodes)} nodes...")
                     final_retrieved_nodes = self.llm_reranker._postprocess_nodes(nodes=retrieved_nodes, query_bundle=query_bundle_for_rerank)
-                elif self.rag_config.reranker_type == "local" and self.local_reranker:
+                elif rag_config.reranker_type == "local" and self.local_reranker:
                     logger.info(f"Applying Local Reranker to {len(retrieved_nodes)} nodes...")
                     final_retrieved_nodes = self.local_reranker.postprocess_nodes(retrieved_nodes, query_bundle=query_bundle_for_rerank)
                 logger.info(f"Reranker returned {len(final_retrieved_nodes)} nodes.")
         
         # 无论是否重排，最终都确保返回 top_k 数量的节点
-        final_top_k = top_k if top_k else self.rag_config.retrieval_top_k
+        final_top_k = top_k if top_k else rag_config.retrieval_top_k
         if len(final_retrieved_nodes) > final_top_k:
              final_retrieved_nodes = final_retrieved_nodes[:final_top_k]
 
@@ -135,6 +139,7 @@ class RetrievalService:
     def retrieve_documents_sync(self,
                                 query_text: str,
                                 collection_name: str,
+                                rag_config: Optional[RagConfig] = None,
                                 filters: Optional[Dict[str, Any]] = None,
                                 top_k: Optional[int] = None,
                                 use_reranker: bool = True) -> List[NodeWithScore]:
@@ -147,10 +152,13 @@ class RetrievalService:
             logger.error(f"RAG collection '{collection_name}' does not exist or could not be loaded.")
             return []
 
+        if not rag_config:
+            rag_config = self.rag_config
+
         chroma_where_clause = self._build_chroma_where_clause(filters)
         logger.info(f"Retrieving documents with ChromaDB `where` clause: {chroma_where_clause}")
         
-        initial_retrieval_top_k = top_k * self.rag_config.initial_retrieval_multiplier if top_k else self.rag_config.retrieval_top_k * self.rag_config.initial_retrieval_multiplier
+        initial_retrieval_top_k = top_k * rag_config.initial_retrieval_multiplier if top_k else rag_config.retrieval_top_k * rag_config.initial_retrieval_multiplier
 
         retriever = rag_index.as_retriever(
             vector_store_kwargs={"where": chroma_where_clause} if chroma_where_clause else {},
@@ -162,23 +170,23 @@ class RetrievalService:
 
         final_retrieved_nodes = retrieved_nodes
         
-        if self.rag_config.use_reranker and use_reranker and (self.llm_reranker or self.local_reranker):
+        if rag_config.use_reranker and use_reranker and (self.llm_reranker or self.local_reranker):
             if len(retrieved_nodes) == 0:
                  logger.info("No nodes retrieved, skipping reranking.")
             else:
                 query_bundle_for_rerank = QueryBundle(query_str=query_text)
                 
-                if self.rag_config.reranker_type == "llm" and self.llm_reranker:
+                if rag_config.reranker_type == "llm" and self.llm_reranker:
                     logger.info(f"Applying LLM Reranker to {len(retrieved_nodes)} nodes...")
                     # 调用 LLM Reranker 的同步方法
                     final_retrieved_nodes = self.llm_reranker._postprocess_nodes(nodes=retrieved_nodes, query_bundle=query_bundle_for_rerank)
-                elif self.rag_config.reranker_type == "local" and self.local_reranker:
+                elif rag_config.reranker_type == "local" and self.local_reranker:
                     logger.info(f"Applying Local Reranker to {len(retrieved_nodes)} nodes...")
                     # 调用本地 Reranker 的同步方法
                     final_retrieved_nodes = self.local_reranker.postprocess_nodes(retrieved_nodes, query_bundle=query_bundle_for_rerank)
                 logger.info(f"Reranker returned {len(final_retrieved_nodes)} nodes.")
 
-        final_top_k = top_k if top_k else self.rag_config.retrieval_top_k
+        final_top_k = top_k if top_k else rag_config.retrieval_top_k
         if len(final_retrieved_nodes) > final_top_k:
              final_retrieved_nodes = final_retrieved_nodes[:final_top_k]
 
