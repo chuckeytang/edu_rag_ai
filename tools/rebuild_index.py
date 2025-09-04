@@ -11,9 +11,6 @@ from services.query_service import QueryService
 from services.document_service import DocumentService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-# 仅为 LlamaIndex 相关的模块设置 DEBUG 级别
-logging.getLogger("llama_index.core").setLevel(logging.DEBUG)
-logging.getLogger("services.retrieval_service").setLevel(logging.DEBUG)
 
 def main():
     """
