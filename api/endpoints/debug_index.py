@@ -530,3 +530,23 @@ def delete_chunks_by_filter(
     except Exception as e:
         logger.error(f"An unexpected error occurred during deletion for material_id {material_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+@router.get("/count-chunks", summary="查询指定Collection中的文档块总数")
+def count_chunks_in_collection(
+    collection_name: str = Query(..., description="要查询的Collection名称"),
+    query_service: Any = Depends(get_query_service)
+) -> Dict[str, Any]:
+    """
+    获取指定 ChromaDB Collection 中索引的文档块（chunk）总数。
+    """
+    try:
+        col = query_service.chroma_client.get_collection(name=collection_name)
+        count = col.count()
+        logger.info(f"Collection '{collection_name}' has {count} documents.")
+        return {"collection_name": collection_name, "count": count, "status": "success"}
+    except ValueError:
+        logger.warning(f"Collection '{collection_name}' not found. Returning count 0.")
+        return {"collection_name": collection_name, "count": 0, "status": "not_found"}
+    except Exception as e:
+        logger.error(f"Failed to count chunks in collection '{collection_name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
