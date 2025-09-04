@@ -240,6 +240,9 @@ class QueryService:
         # 确保最终返回的节点数量不超过 top_k
         final_retrieved_nodes = final_retrieved_nodes[:request.similarity_top_k]
 
+        #TODO: 测试
+        final_retrieved_nodes = []
+
         # --- 计算并限制发送给 LLM 的总 token 数量 ---
         tokenizer = get_tokenizer()
         if not tokenizer:
