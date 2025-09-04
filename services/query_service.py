@@ -364,6 +364,7 @@ class QueryService:
                 )
                 
                 llm_response_obj = await query_engine.aquery(request.question) 
+                logger.info("Finish query.")
 
                 is_response_empty = False
                 if llm_response_obj and hasattr(llm_response_obj, 'response_gen') and llm_response_obj.response_gen is not None:
