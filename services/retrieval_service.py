@@ -7,7 +7,7 @@ from llama_index.core.postprocessor import LLMRerank, SentenceTransformerRerank
 from llama_index.llms.openai_like import OpenAILike
 from services.indexer_service import IndexerService
 from llama_index.core.settings import Settings
-from llama_index.core.callbacks import CallbackManager, CBEventType, EventPayload, BaseCallbackHandler
+from llama_index.core.callbacks import CallbackManager, CBEventType, EventPayload
 from core.rag_config import RagConfig
 import torch
 

@@ -1,7 +1,8 @@
 import logging
 import time
-from typing import Any, Dict, Optional
-from llama_index.core.callbacks import CBEventType, EventPayload, BaseCallbackHandler
+from typing import Any, Dict, List, Optional
+from llama_index.core.callbacks import CBEventType, EventPayload
+from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 
 logger = logging.getLogger(__name__)
 
@@ -55,3 +56,19 @@ class TimingCallbackHandler(BaseCallbackHandler):
                     logger.info(f"    -> Embedding event for {len(text_list)} texts.")
                 else:
                     logger.warning(f"    -> Embedding event payload did not contain text content.")
+
+    def start_trace(self, trace_id: Optional[str] = None) -> None:
+        """实现 start_trace 抽象方法。"""
+        # 你不需要任何额外的逻辑，所以这里可以留空
+        logger.debug(f"Trace started with ID: {trace_id}")
+        pass
+
+    def end_trace(
+        self,
+        trace_id: Optional[str] = None,
+        trace_map: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
+        """实现 end_trace 抽象方法。"""
+        # 你不需要任何额外的逻辑，所以这里可以留空
+        logger.debug(f"Trace ended with ID: {trace_id}")
+        pass
