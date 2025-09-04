@@ -228,7 +228,7 @@ class QueryService:
                 collection_name=collection_name,
                 # 在这里，我们将 filters 设置为 None，因为所有过滤都将后置处理
                 filters=None,
-                top_k=final_top_k * rag_config.initial_retrieval_multiplier,
+                top_k=final_top_k,
                 use_reranker=False, # 禁用重排器，重排将在合并后进行
             )
             retrieve_tasks.append(task)
@@ -703,23 +703,52 @@ class QueryService:
     def _check_node_with_filter(self, node, filters: Dict[str, Any]) -> bool:
         """
         根据复杂的过滤器字典，检查单个节点的元数据是否匹配。
-        此方法需要你自己实现，以处理 '$and' 和 '$in' 等逻辑。
+        此方法能处理 ChromaDB 支持的常见操作符。
         """
-        # 这是一个简化的示例，你需要根据你的 _build_chroma_where_clause 逻辑来实现
-        # 更健壮的过滤检查。
         if not filters:
             return True
-        
-        # 如果是简单的 {"key": "value"} 格式
-        if all(isinstance(v, (str, int, float)) for v in filters.values()):
-            return all(node.metadata.get(k) == v for k, v in filters.items())
 
-        # 如果是复杂格式，例如 {"$and": [...]}
+        # 处理逻辑操作符 $and 和 $or
         if "$and" in filters:
             return all(self._check_node_with_filter(node, sub_filter) for sub_filter in filters["$and"])
-        if "$in" in filters and len(filters) == 1:
-            key, values = next(iter(filters.items()))
-            return node.metadata.get(key) in values
+        if "$or" in filters:
+            return any(self._check_node_with_filter(node, sub_filter) for sub_filter in filters["$or"])
+
+        # 遍历所有键值对，处理比较操作符
+        for key, value in filters.items():
+            node_value = node.metadata.get(key)
             
-        # 简化示例，需要更详细的实现
+            # 如果值是一个包含操作符的字典
+            if isinstance(value, dict):
+                op = next(iter(value), None)
+                op_value = value[op]
+
+                if op == "$eq":
+                    if not (node_value == op_value): return False
+                elif op == "$ne":
+                    if not (node_value != op_value): return False
+                elif op == "$gt":
+                    if not (node_value is not None and node_value > op_value): return False
+                elif op == "$gte":
+                    if not (node_value is not None and node_value >= op_value): return False
+                elif op == "$lt":
+                    if not (node_value is not None and node_value < op_value): return False
+                elif op == "$lte":
+                    if not (node_value is not None and node_value <= op_value): return False
+                elif op == "$in":
+                    if not (node_value in op_value): return False
+                elif op == "$nin":
+                    if not (node_value not in op_value): return False
+                else:
+                    # 遇到不支持的操作符，默认不匹配
+                    return False
+            
+            # 如果值是一个列表，使用 $in 操作符
+            elif isinstance(value, list):
+                if not (node_value in value): return False
+            
+            # 否则，使用默认的相等比较
+            else:
+                if not (node_value == value): return False
+
         return True
