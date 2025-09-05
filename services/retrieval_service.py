@@ -20,6 +20,7 @@ class RetrievalService:
         self._indexer_service = indexer_service
         self.rag_config = rag_config
         self._callback_manager = CallbackManager([TimingCallbackHandler()])
+        Settings.callback_manager = self._callback_manager
         
         self.llm_reranker = None
         self.local_reranker = None
