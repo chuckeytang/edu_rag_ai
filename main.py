@@ -26,12 +26,9 @@ from api.dependencies import (
 )
 
 # 在应用启动前设置日志
-setup_app_logging(level=logging.INFO, log_file="logs/app.log")
+setup_app_logging(level=logging.DEBUG, log_file="logs/app.log")
 app_logger = logging.getLogger(__name__) 
 app_logger.info("Starting FastAPI application...")
-# 仅为 LlamaIndex 相关的模块设置 DEBUG 级别
-logging.getLogger("llama_index.core").setLevel(logging.DEBUG)
-logging.getLogger("services.retrieval_service").setLevel(logging.DEBUG)
 
 # --- FastAPI 应用生命周期管理器 ---
 @asynccontextmanager
