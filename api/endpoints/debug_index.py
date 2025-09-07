@@ -65,7 +65,7 @@ def list_indexed(
 
     items = []
     
-    # 修复点：在条件判断前，对 title 和 file_name 进行显式检查
+    # 在条件判断前，对 title 和 file_name 进行显式检查
     # 如果参数为 None 或空字符串，则将其重置为 None
     # 这样可以确保 if title or file_name: 的判断在所有环境中都一致
     effective_title = title.strip() if title else None
