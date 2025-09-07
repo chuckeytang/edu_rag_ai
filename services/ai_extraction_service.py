@@ -161,7 +161,7 @@ class AIExtractionService:
 
         prompt_template = f"""
         You are an expert assistant for analyzing educational content. Please extract metadata from the document content provided below.
-        Ensure your output strictly follows the specified JSON format.
+        Your response MUST be a single, complete, and valid JSON object. Do not include any text before or after the JSON.
 
         Available Options for Matching:
         - Curriculum System (clazz): [{clazz_str}]
@@ -182,9 +182,8 @@ class AIExtractionService:
         {doc_content}
         ---
 
-        Please provide the metadata in JSON format. Here is an example of the desired JSON structure:
-
-        EXAMPLE JSON OUTPUT:
+        Your response MUST be ONLY the JSON object. Do NOT add any extra text, explanations, or comments.
+        Example JSON Output:
         {{
             "clazz": "IB",
             "exam": "CAIE",
@@ -193,6 +192,8 @@ class AIExtractionService:
             "subject": "Biology",
             "type": "Handout"
         }}
+
+        Your final output is:
         """
 
         logger.info(f"Final prompt for metadata extraction: {prompt_template}")
@@ -207,7 +208,24 @@ class AIExtractionService:
 
         try:
             logger.info(f"Preparing to extract metadata: {doc_content[:100]}...") 
-            metadata = await program.acall(document_content=doc_content)
+            raw_output = await program._llm.acomplete(
+                prompt=program.prompt.format(document_content=doc_content)
+            )
+            raw_output_text = raw_output.text
+            
+            logger.info(f"Raw LLM Output:\n{raw_output_text}")
+
+            start_index = raw_output_text.find('{')
+            end_index = raw_output_text.rfind('}')
+            
+            if start_index != -1 and end_index != -1 and end_index > start_index:
+                cleaned_json_str = raw_output_text[start_index : end_index + 1]
+                logger.info(f"Cleaned JSON String:\n{cleaned_json_str}")
+                metadata = ExtractedDocumentMetadata.model_validate_json(cleaned_json_str)
+            else:
+                # 如果没有找到合法的 JSON 结构，则抛出异常
+                raise ValueError("LLM output does not contain a valid JSON structure.")
+
             logger.info(f"Successfully extracted metadata: {metadata.model_dump_json(indent=2)}")
             
             # --- 后处理和默认值设置 ---

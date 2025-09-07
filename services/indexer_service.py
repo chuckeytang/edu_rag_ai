@@ -16,6 +16,7 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.storage.index_store import SimpleIndexStore
 from llama_index.core.storage.kvstore import SimpleKVStore
+import psutil
 
 import chromadb
 from chromadb.config import Settings
@@ -26,6 +27,11 @@ from core.rag_config import RagConfig
 logger = logging.getLogger(__name__)
 
 PERSIST_DIR = settings.INDEX_PATH
+
+def _log_memory_usage(context: str):
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    logger.info(f"Memory Usage ({context}): RSS={mem_info.rss / 1024**2:.2f} MB, VMS={mem_info.vms / 1024**2:.2f} MB")
 
 class IndexerService:
     def __init__(self, 
@@ -150,6 +156,8 @@ class IndexerService:
                                documents: List[LlamaDocument], 
                                collection_name: str,
                                rag_config: RagConfig) -> VectorStoreIndex:
+        _log_memory_usage("Start of add_documents_to_index")
+        
         logger.info(f"Attempting to add {len(documents)} documents to index for collection: '{collection_name}'...")
         if not documents:
             logger.warning("No LlamaDocuments provided for indexing. Skipping.")
@@ -163,6 +171,8 @@ class IndexerService:
         # --- 增加节点处理前的日志 ---
         logger.debug(f"Starting document processing into nodes for collection: '{collection_name}'.")
         processing_start_time = time.time() # 导入 time 模块
+
+        _log_memory_usage("Before node parsing")
         for doc in documents:
             doc_id = doc.id_ if doc.id_ else "no_id"
             doc_type = doc.metadata.get("document_type", "Unknown")
@@ -203,6 +213,7 @@ class IndexerService:
         
         processing_end_time = time.time()
         logger.info(f" [Indexer] Document processing into nodes completed. Took {processing_end_time - processing_start_time:.2f} seconds. Original {len(documents)} documents processed into {len(all_nodes_to_add)} final nodes for indexing.")
+        _log_memory_usage("After node parsing, before indexing")
 
         # 尝试获取现有索引
         index = self.get_rag_index(collection_name)
@@ -229,6 +240,7 @@ class IndexerService:
             finally:
                 init_end_time = time.time()
                 logger.info(f" [Indexer] Index initialization for '{collection_name}' took {init_end_time - init_start_time:.2f} seconds.")
+                _log_memory_usage("After new index initialization")
         else:
             logger.info(f" [Indexer] Index for '{collection_name}' already exists. Inserting new nodes.")
             # --- 增加插入新节点前的日志 ---
@@ -245,6 +257,7 @@ class IndexerService:
                     logger.error(f" [Indexer] Failed to insert node {idx+1} ({node.id_}) into index: {e}", exc_info=True)
             insert_end_time = time.time()
             logger.info(f" [Indexer] All {len(all_nodes_to_add)} nodes insertion for '{collection_name}' took {insert_end_time - insert_start_time:.2f} seconds.")
+            _log_memory_usage("After node insertion")
         
         # --- 增加持久化操作的日志 ---
         persist_start_time = time.time()
@@ -260,6 +273,7 @@ class IndexerService:
             logger.info(f" [Indexer] Index persistence for '{collection_name}' took {persist_end_time - persist_start_time:.2f} seconds.")
             
         self.indices[collection_name] = index
+        _log_memory_usage("End of add_documents_to_index")
         return index
 
     def delete_nodes_by_metadata(self, collection_name: str, filters: dict) -> dict:

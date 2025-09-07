@@ -26,7 +26,7 @@ from api.dependencies import (
 )
 
 # 在应用启动前设置日志
-setup_app_logging(level=logging.WARNING, log_file="logs/app.log")
+setup_app_logging(level=logging.INFO, log_file="logs/app.log")
 app_logger = logging.getLogger(__name__) 
 app_logger.info("Starting FastAPI application...")
 
