@@ -24,7 +24,7 @@ async def extract_metadata_endpoint(
         metadata = await ai_extraction_service.extract_document_metadata(
             file_key=request.file_key, 
             text_content=request.content,
-            is_public=request.is_public,
+            is_public=True,
             # --- 传递用户上下文信息 ---
             user_provided_clazz=request.user_provided_clazz,       
             user_provided_subject=request.user_provided_subject,     
