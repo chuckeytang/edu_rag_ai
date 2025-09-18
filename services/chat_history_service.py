@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Dict, Any, List, Optional
 import chromadb
@@ -136,11 +137,30 @@ class ChatHistoryService:
             
             # 执行异步检索
             retrieved_nodes_with_score: List[NodeWithScore] = await retriever.aretrieve(query_text)
+            
+            # 对检索到的节点的元数据进行反序列化
+            deserialized_nodes = []
+            for node_with_score in retrieved_nodes_with_score:
+                node = node_with_score.node
+                metadata = node.metadata
+                
+                # 检查并反序列化可能包含 JSON 字符串的字段
+                for key, value in metadata.items():
+                    if isinstance(value, str):
+                        try:
+                            # 尝试解析 JSON 字符串
+                            deserialized_value = json.loads(value)
+                            # 仅当解析成功且不是简单的字符串时才替换
+                            if isinstance(deserialized_value, (list, dict)):
+                                metadata[key] = deserialized_value
+                        except (json.JSONDecodeError, TypeError):
+                            # 如果不是有效的 JSON，则不做处理
+                            pass
+                
+                deserialized_nodes.append(node)
 
-            # 提取 TextNode 对象
-            text_nodes = [node_with_score.node for node_with_score in retrieved_nodes_with_score]
-            logger.info(f"Retrieved {len(text_nodes)} relevant chat history nodes.")
-            return text_nodes
+            logger.info(f"Retrieved and deserialized {len(deserialized_nodes)} relevant chat history nodes.")
+            return deserialized_nodes
 
         except Exception as e:
             logger.error(f"Failed to retrieve chat history context: {e}", exc_info=True)

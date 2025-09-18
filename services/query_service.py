@@ -9,6 +9,8 @@ from memory_profiler import profile
 from services.volcano_rag_service import VolcanoEngineRagService
 from services.indexer_service import IndexerService
 from services.chat_history_service import ChatHistoryService
+from llama_index.core.llms import ChatMessage, MessageRole
+from llama_index.core.base.llms.types import ChatResponse, ChatResponseGen
 
 # 引入一个可以替代 LlamaIndex 节点的简单数据结构，或者直接使用字典
 from dataclasses import dataclass
@@ -226,10 +228,12 @@ class QueryService:
                     logger.warning("Tokenizer not available, skipping token count for LLM query.")
 
                 # 使用 LLM 的直接调用，而不是 LlamaIndex 的 QueryEngine
-                llm_response_gen = await self.llm.astream_chat(messages=[ 
-                    {"role": "system", "content": final_prompt_for_llm},
-                    {"role": "user", "content": request.question}
-                ])
+                messages_for_llm = [
+                    ChatMessage(role=MessageRole.SYSTEM, content=final_prompt_for_llm),
+                    ChatMessage(role=MessageRole.USER, content=request.question)
+                ]
+
+                llm_response_gen = await self.llm.astream_chat(messages=messages_for_llm)
 
                 llm_response_obj = llm_response_gen
                 logger.info("Finish query.")
@@ -265,7 +269,6 @@ class QueryService:
                     yield f"data: {error_chunk_json}\n\n".encode("utf-8")
                     return
         
-        # === 核心响应流式处理和引用生成逻辑 ===
         full_response_content = ""
         # 用于引用生成的 chunk 列表
         referenced_chunks = [chunk for chunk in final_retrieved_chunks_for_llm if chunk.get('content')]
@@ -279,12 +282,27 @@ class QueryService:
         combined_referenced_ids = referenced_chunk_ids + chat_history_chunk_ids
 
         # 接收并流式返回 LLM 响应
-        async for chunk_resp in llm_response_obj:
-            chunk_text = chunk_resp.delta.content
-            if chunk_text:
+        async for chunk_resp in llm_response_gen:
+            # 1. 首先检查 chunk_resp 是否有效
+            if not chunk_resp:
+                continue
+
+            # 2. 根据 astream_chat 的源码，chunk_resp 是一个 ChatResponse 对象
+            # 它包含一个 `delta` 属性，即本次新增的文本块
+            # 我们需要确保它是一个有效的 ChatResponse 对象，并且它的 delta 不为空
+            if hasattr(chunk_resp, 'delta') and chunk_resp.delta:
+                chunk_text = chunk_resp.delta
+                
+                # 累积完整的回复内容，用于后续的引用生成
                 full_response_content += chunk_text
+                
+                # 将每次的增量文本块包装成 StreamChunk 并发送
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
-                yield f"data: {sse_event_json}\n\n".encode("utf-8") 
+                yield f"data: {sse_event_json}\n\n".encode("utf-8")
+            else:
+                # 记录警告，以防出现预料之外的 chunk 类型
+                logger.warning(f"Received unexpected chunk from LLM: type={type(chunk_resp)}. Skipping.")
+                continue
             
         logger.debug("Successfully streamed response chunks.")
 
@@ -302,7 +320,7 @@ class QueryService:
             import re
             response_sentences = re.split(r'(?<=[.!?。！？])\s+', full_response_content)
 
-        # ⚠️ 这里需要一个嵌入模型来生成句子嵌入，但你的 __init__ 中移除了它
+        # 这里需要一个嵌入模型来生成句子嵌入，但你的 __init__ 中移除了它
         # 你需要在 QueryService 中注入一个单独的嵌入模型，或者用一个外部服务
         # 否则，这部分逻辑无法运行
         if False: # 暂时禁用这部分代码
@@ -326,16 +344,16 @@ class QueryService:
                     "material_id": material_id
                 }
         
-        final_metadata["rag_sources"] = list(unique_rag_sources.values())
+        final_metadata["rag_sources"] = json.dumps(list(unique_rag_sources.values()))
 
         if final_referenced_material_ids: 
-            final_metadata["referenced_docs"] = final_referenced_material_ids
+            final_metadata["referenced_docs"] = json.dumps(final_referenced_material_ids)
 
         if generated_title:
             final_metadata["session_title"] = generated_title
         
         if sentence_citations:
-            final_metadata["sentence_citations"] = sentence_citations
+            final_metadata["sentence_citations"] = json.dumps(sentence_citations)
         
         logger.debug(f"DEBUG: Final metadata before StreamChunk creation: {final_metadata}")
 
@@ -355,9 +373,7 @@ class QueryService:
                                               chat_history_context_string: str, 
                                               generated_title: Optional[str] = None,
                                               final_referenced_material_ids: Optional[List[str]] = None) -> AsyncGenerator[bytes, None]:
-        """
-        在召回文档为空时，直接调用LLM生成回复。
-        """
+        
         logger.info(f"RAG context is empty. Calling LLM directly for question: '{question}'")
         
         final_prompt_for_llm = self.general_chat_prompt_template.format(
@@ -369,10 +385,13 @@ class QueryService:
         max_retries = self.rag_config.llm_max_retries
         for attempt in range(max_retries):
             try:
-                llm_response_gen = await self.llm.astream_chat(messages=[ 
-                     {"role": "system", "content": final_prompt_for_llm}, 
-                     {"role": "user", "content": question} 
-                 ])
+                # 使用 LlamaIndex 的 ChatMessage 对象
+                messages_for_llm = [
+                    ChatMessage(role=MessageRole.SYSTEM, content=final_prompt_for_llm),
+                    ChatMessage(role=MessageRole.USER, content=question)
+                ]
+
+                llm_response_gen = await self.llm.astream_chat(messages=messages_for_llm)
                 break
             except Exception as e:
                 logger.error(f"Attempt {attempt + 1}: Error calling LLM without RAG context for '{question}': {e}", exc_info=True)
@@ -389,11 +408,28 @@ class QueryService:
             return
 
         full_response_content = ""
+        # 接收并流式返回 LLM 响应
         async for chunk_resp in llm_response_gen:
-            chunk_text = chunk_resp.delta.content
-            full_response_content += chunk_text
-            sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
-            yield f"data: {sse_event_json}\n\n".encode("utf-8")
+            # 1. 首先检查 chunk_resp 是否有效
+            if not chunk_resp:
+                continue
+
+            # 2. 根据 astream_chat 的源码，chunk_resp 是一个 ChatResponse 对象
+            # 它包含一个 `delta` 属性，即本次新增的文本块
+            # 我们需要确保它是一个有效的 ChatResponse 对象，并且它的 delta 不为空
+            if hasattr(chunk_resp, 'delta') and chunk_resp.delta:
+                chunk_text = chunk_resp.delta
+                
+                # 累积完整的回复内容，用于后续的引用生成
+                full_response_content += chunk_text
+                
+                # 将每次的增量文本块包装成 StreamChunk 并发送
+                sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
+                yield f"data: {sse_event_json}\n\n".encode("utf-8")
+            else:
+                # 记录警告，以防出现预料之外的 chunk 类型
+                logger.warning(f"Received unexpected chunk from LLM: type={type(chunk_resp)}. Skipping.")
+                continue
         
         final_metadata = {
             "rag_sources": [],
@@ -404,4 +440,3 @@ class QueryService:
         yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
 
         return
-    
