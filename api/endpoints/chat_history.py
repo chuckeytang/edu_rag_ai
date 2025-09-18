@@ -20,7 +20,7 @@ async def add_chat_message_to_chroma_api(request: AddChatMessageRequest,
     """
     try:
         request_dict = request.dict()
-        rag_config = request_dict.pop("rag_config", None) # 从字典中移除 rag_config
+        rag_config = request_dict.pop("rag_config", None)
         chat_history_service.add_chat_message_to_chroma(request_dict, rag_config=rag_config)
         return {"status": "success", "message": "Chat message added to ChromaDB."}
     except Exception as e:

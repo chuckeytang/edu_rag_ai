@@ -21,29 +21,14 @@ class RagConfig(BaseModel):
         description="通用聊天提示词模板。{chat_history_context}, {query_str} 是占位符。"
     )
 
-    # 召回与重排参数
+    # 召回参数
     retrieval_top_k: conint(ge=1) = Field(
         5,
-        description="最终送入LLM的文档数，也是召回的top-k值。"
-    )
-    initial_retrieval_multiplier: conint(ge=1) = Field(
-        3,
-        description="重排前初始召回文档数的乘数。实际召回数 = retrieval_top_k * initial_retrieval_multiplier"
+        description="最终送入LLM的文档数，也是火山引擎召回的limit值。"
     )
     history_retrieval_top_k: int = Field(5, description="聊天历史召回的文档数")
     use_reranker: bool = Field(True, description="是否启用重排")
-    reranker_type: str = Field("local", description="重排器类型: 'local' 或 'llm'")
     
-    # 文本分割参数
-    chunk_size: int = Field(512, description="文本分割块大小")
-    chunk_overlap: int = Field(50, description="文本分割块重叠大小")
-
-    # --- 表格分割参数 ---
-    table_chunk_size: conint(ge=1) = Field(
-        600,
-        description="表格智能分块的最大文本长度（token数），此参数用于PDF表格处理。"
-    )
-
     # LLM & 系统参数
     llm_max_context_tokens: conint(ge=1) = Field(
         4096,
@@ -116,9 +101,9 @@ class RagConfig(BaseModel):
                 "- If the user writes in another language (e.g. Chinese), you may include short bilingual elements or mix languages naturally — but the main title should still be understandable in English\n"
                 "- Focus on accuracy: represent the actual intent or topic of the user's question\n"
                 "---------------------\n"
-                "User query: {query_str}\n"      # LLM Query Engine will automatically fill this
-                "Relevant document content: {context_str}\n" # LLM Query Engine will automatically fill this
-                "Session Title:" # Guides the LLM to output only the title
+                "User query: {query_str}\n"
+                "Relevant document content: {context_str}\n"
+                "Session Title:"
             ),
             general_chat_prompt_template=(
                 "{chat_history_context}"
@@ -127,13 +112,8 @@ class RagConfig(BaseModel):
                 "Query: {query_str}"
             ),
             retrieval_top_k=5,
-            initial_retrieval_multiplier=3,
             use_reranker=True,
-            reranker_type="llm",
             history_retrieval_top_k=5,
-            chunk_size=512,
-            chunk_overlap=50,
-            table_chunk_size=600,
             llm_max_retries=3,
             retry_base_delay=1.0,
             citation_similarity_threshold=0.3

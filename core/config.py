@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     DEEPSEEK_API_BASE: str
     DEEPSEEK_API_KEY: str
 
+    # ✨ 新增：火山引擎知识库配置
+    VOLCANO_ENGINE_AK_ID: str
+    VOLCANO_ENGINE_SK_SECRET: str
+    VOLCANO_ENGINE_RAG_API_URL: str
+    VOLCANO_ENGINE_REGION: str
+    # 这个 ID 将在你的业务逻辑中替代 collection_name
+    VOLCANO_ENGINE_KNOWLEDGE_BASE_ID: str
+
     # 使用 SettingsConfigDict 来配置 Pydantic
     model_config = SettingsConfigDict(
         case_sensitive=True,

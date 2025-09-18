@@ -36,8 +36,8 @@ class OssService:
             aws_secret_access_key=self.access_key_secret,
             region_name=self.region_name,
             config=Config(
-                s3={'addressing_style': 'virtual'}, # Use virtual-hosted style, which is standard for accelerate endpoints
-                connect_timeout=10, # Add a connection timeout
+                s3={'addressing_style': 'virtual'},
+                connect_timeout=10,
                 read_timeout=10
         )
         )
@@ -55,16 +55,12 @@ class OssService:
             str: The full local file path of the downloaded file.
         """
         try:
-            # 创建一个唯一的临时目录来存放下载的文件
             temp_dir = tempfile.mkdtemp(prefix="oss_downloads_")
-            # 从object_key中提取原始文件名
             original_filename = os.path.basename(object_key)
-            # 构造完整的本地文件路径
             local_file_path = os.path.join(temp_dir, original_filename)
 
             logger.info(f"Downloading s3://{bucket_name}/{object_key} to temporary file '{local_file_path}'...")
             
-            # 使用 boto3 的 download_file 方法
             self.s3_client.download_file(bucket_name, object_key, local_file_path)
             
             logger.info("Download to temporary file complete.")

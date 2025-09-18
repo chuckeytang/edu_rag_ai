@@ -17,7 +17,6 @@ from models.schemas import UploadFromOssRequest
 from core.config import settings
 from services.indexer_service import IndexerService
 from services.oss_service import OssService
-from services.readers.camelot_pdf_reader import CamelotPDFReader
 from services.task_manager_service import TaskManagerService
 from datetime import datetime
 

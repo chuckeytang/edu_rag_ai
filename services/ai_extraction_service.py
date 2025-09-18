@@ -4,19 +4,16 @@ import json
 import logging
 import os
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from fastapi import HTTPException
 
 from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.program import LLMTextCompletionProgram
 from llama_index.core.output_parsers import PydanticOutputParser
-from llama_index.core import SimpleDirectoryReader
 
 from core.config import settings 
 from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList, WxMineCollectSubjectList
-from services.oss_service import OssService
-from services.readers.camelot_pdf_reader import CamelotPDFReader
 from tools.tokenizer_utils import get_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -26,12 +23,11 @@ MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION = 58000
 class AIExtractionService:
     def __init__(self,
                  llm_metadata_model: OpenAILike,
-                 llm_flashcard_model: OpenAILike,
-                 oss_service_instance: OssService = None
+                 llm_flashcard_model: OpenAILike
                  ):
         self.llm_metadata = llm_metadata_model
         self.llm_flashcard = llm_flashcard_model
-        self.oss_service = oss_service_instance
+        # 移除oss_service的依赖，因为这个服务不再负责文件下载和本地处理。
 
         # 预定义的选项集合 (这些应该从Spring后端获取，或从数据库加载)
         # 实际应用中，这些可能通过构造函数参数传入，或通过单独的服务获取
@@ -48,64 +44,14 @@ class AIExtractionService:
                                             is_public: bool = False
                                             ) -> str:
         """
-        根据 file_key 从 OSS 下载文件并提取内容，或直接使用提供的文本内容。
-        根据 is_public 参数决定从公共桶或私有桶下载。
+        这个服务现在只处理直接提供的文本内容。
+        文件下载和处理逻辑已转移到调用服务。
         """
-        if file_key:
-            local_file_path = None
-            try:
-                # 根据 is_public 决定目标桶
-                target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if is_public else settings.OSS_PRIVATE_BUCKET_NAME
-                logger.info(f"Attempting to download '{file_key}' from bucket: '{target_bucket}'")
-
-                local_file_path = self.oss_service.download_file_to_temp(
-                    object_key=file_key, 
-                    bucket_name=target_bucket
-                )
-                file_extension_lower = os.path.splitext(local_file_path)[1].lower()
-                documents = []
-                if file_extension_lower == '.pdf':
-                    reader = CamelotPDFReader(
-                        flavor='lattice', # 或 'lattice'，取决于PDF表格类型
-                        extract_text_also=True,
-                        chunk_tables_intelligently=True
-                    )
-                    documents = reader.load_data(file=local_file_path)
-                else:
-                    # 对于其他文件类型，继续使用 SimpleDirectoryReader
-                    reader = SimpleDirectoryReader(input_files=[local_file_path])
-                    documents = reader.load_data()
-                
-                full_content = "\n".join([doc.text for doc in documents])
-                import unicodedata
-                cleaned_content = ''.join(c for c in full_content if unicodedata.category(c) != 'Cs')
-                tokenizer = get_tokenizer()
-                if tokenizer:
-                    tokens = tokenizer.encode(cleaned_content)
-                    if len(tokens) > MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION:
-                        logger.warning(f"File '{file_key}' content ({len(tokens)} tokens) exceeds LLM input limit ({MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION}). Truncating for AI extraction.")
-                        truncated_tokens = tokens[:MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION]
-                        truncated_content = tokenizer.decode(truncated_tokens)
-                        return truncated_content
-                    return cleaned_content
-                else: 
-                    max_chars = MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION * 4
-                    if len(cleaned_content) > max_chars:
-                        logger.warning(f"File '{file_key}' content ({len(cleaned_content)} chars) exceeds LLM input limit (approx. {max_chars} chars). Truncating for AI extraction.")
-                        return cleaned_content[:max_chars]
-                    return cleaned_content
-                
-            except Exception as e:
-                logger.error(f"从OSS下载或读取文件 '{file_key}' 失败 (桶: {target_bucket}): {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=f"从OSS下载或读取文件失败: {e}. 请检查文件键和权限。")
-            finally:
-                if local_file_path and os.path.exists(os.path.dirname(local_file_path)):
-                    shutil.rmtree(os.path.dirname(local_file_path))
-                    logger.info(f"Cleaned up temporary directory for {file_key}")
-        elif text_content:
+        if text_content:
             return text_content
         else:
-            raise ValueError("必须提供 'file_key' 或 'text_content' 中的至少一个。")
+            # 如果没有提供文本内容，就抛出错误
+            raise ValueError("AI Extraction Service now only accepts 'text_content' directly. 'file_key' is not supported for local processing.")
 
     async def extract_document_metadata(self, 
                                         file_key: Optional[str] = None, 

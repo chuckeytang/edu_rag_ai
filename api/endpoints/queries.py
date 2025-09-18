@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 import logging
 
 logger = logging.getLogger(__name__)
-    
+
 router = APIRouter()
 @router.post("/rag-query-with-context")
 async def rag_query_with_context_api(request: ChatQueryRequest,
