@@ -54,7 +54,6 @@ def setup_app_logging(level=logging.INFO, log_file: Optional[str] = None): # 可
 
     # 2. **针对您需要调试的特定模块，单独设置为 DEBUG 级别**
     # 例如，您当前主要调试的是 CamelotPDFReader 和 IndexerService 的 chunking
-    logging.getLogger('services.readers.camelot_pdf_reader').setLevel(logging.DEBUG)
     logging.getLogger('services.document_oss_service').setLevel(logging.DEBUG) # 处理文件下载和 Reader 调用
     logging.getLogger('services.indexer_service').setLevel(logging.DEBUG) # 处理 Document 到 Node 的转换和入库
 

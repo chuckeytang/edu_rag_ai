@@ -16,7 +16,6 @@ from llama_index.core import SimpleDirectoryReader
 from core.config import settings 
 from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList, WxMineCollectSubjectList
 from services.oss_service import OssService
-from services.readers.camelot_pdf_reader import CamelotPDFReader
 from tools.tokenizer_utils import get_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -64,17 +63,9 @@ class AIExtractionService:
                 )
                 file_extension_lower = os.path.splitext(local_file_path)[1].lower()
                 documents = []
-                if file_extension_lower == '.pdf':
-                    reader = CamelotPDFReader(
-                        flavor='lattice', # 或 'lattice'，取决于PDF表格类型
-                        extract_text_also=True,
-                        chunk_tables_intelligently=True
-                    )
-                    documents = reader.load_data(file=local_file_path)
-                else:
-                    # 对于其他文件类型，继续使用 SimpleDirectoryReader
-                    reader = SimpleDirectoryReader(input_files=[local_file_path])
-                    documents = reader.load_data()
+                # 对于其他文件类型，继续使用 SimpleDirectoryReader
+                reader = SimpleDirectoryReader(input_files=[local_file_path])
+                documents = reader.load_data()
                 
                 full_content = "\n".join([doc.text for doc in documents])
                 import unicodedata

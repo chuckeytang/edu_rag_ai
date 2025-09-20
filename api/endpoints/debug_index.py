@@ -313,11 +313,49 @@ async def debug_rag_flow(
         
     try:
         logger.info(f"rag_config.use_reranker: {rag_config.use_reranker}.")
+        filter_expressions = []
+        
+        # 1. 处理现有的 filters
+        if request.filters:
+            filter_expressions.append(request.filters)
+        
+        # 2. 处理 target_file_ids
+        if request.target_file_ids:
+            logger.info(f"Target file IDs specified: {request.target_file_ids}. Only retrieving from these files.")
+
+            # 将所有 ID 转换为整数类型
+            try:
+                integer_material_ids = [int(id_str) for id_str in request.target_file_ids]
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid target_file_ids. All IDs must be integers.")
+
+            if len(integer_material_ids) == 1:
+                # 只有一个文件ID，直接用 $eq 表达式
+                file_filter = {"material_id": {"$eq": integer_material_ids[0]}}
+                filter_expressions.append(file_filter)
+            else:
+                # 多个文件ID，使用 $in 表达式 (更简洁)
+                # 注: ChromaDB 的 $in 表达式接受列表，而不需要 $or 
+                file_filter = {"material_id": {"$in": integer_material_ids}}
+                filter_expressions.append(file_filter)
+
+        # 3. 根据表达式数量构建最终的过滤器
+        final_filters = None
+        if len(filter_expressions) == 1:
+            # 只有一个表达式，直接使用它
+            final_filters = filter_expressions[0]
+        elif len(filter_expressions) > 1:
+            # 多个表达式，用 $and 组合
+            final_filters = {"$and": filter_expressions}
+        
+        logger.info(f"Final filters to be used: {final_filters}")
+        # --- 结束新增逻辑 ---
+
         # 直接调用 RetrievalService 的通用方法，获取最终重排后的节点
         final_retrieved_nodes_with_score = await retrieval_service.retrieve_documents(
             query_text=request.question,
             collection_name=request.collection_name,
-            filters=request.filters,
+            filters=final_filters,
             top_k=request.similarity_top_k,
             use_reranker=rag_config.use_reranker
         )
@@ -328,7 +366,7 @@ async def debug_rag_flow(
         original_retrieved_nodes_with_score = await retrieval_service.retrieve_documents(
             query_text=request.question,
             collection_name=request.collection_name,
-            filters=request.filters,
+            filters=final_filters,
             top_k=initial_retrieval_top_k,
             rag_config=rag_config,
             use_reranker=False

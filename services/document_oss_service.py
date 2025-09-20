@@ -17,7 +17,6 @@ from models.schemas import UploadFromOssRequest
 from core.config import settings
 from services.indexer_service import IndexerService
 from services.oss_service import OssService
-from services.readers.camelot_pdf_reader import CamelotPDFReader
 from services.task_manager_service import TaskManagerService
 from datetime import datetime
 
@@ -108,20 +107,9 @@ class DocumentOssService:
             self.task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
             _log_memory_usage("After file download, before document loading")
             
-            # --- 2. 加载原始 LlamaDocument ---
-            custom_file_extractor = {
-                ".pdf": CamelotPDFReader(
-                    flavor='stream', # 或 'lattice'
-                    table_settings={},
-                    extract_text_also=True,
-                    chunk_tables_intelligently=True
-                )
-            }
-
             reader = SimpleDirectoryReader(
                 input_files=[local_file_path], 
-                recursive=True, 
-                file_extractor=custom_file_extractor
+                recursive=True
             )
             loaded_original_docs = reader.load_data()
             _log_memory_usage("After document loading")
