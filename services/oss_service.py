@@ -75,3 +75,30 @@ class OssService:
         except Exception as e:
             logger.error(f"Generic exception downloading '{object_key}': {str(e)}", exc_info=True)
             raise HTTPException(status_code=503, detail=f"Could not connect to OSS endpoint or another error occurred. Original error: {str(e)}")
+        
+    def generate_presigned_url(self, object_key: str, bucket_name: str, expires_in: int = 3600) -> str:
+        """
+        生成一个用于 GET 请求的预签名 URL，可用于将文件导入第三方服务。
+        
+        Args:
+            object_key (str): 要访问的 OSS 对象的键。
+            bucket_name (str): 存储桶名称。
+            expires_in (int): URL 的有效秒数，默认 1 小时。
+            
+        Returns:
+            str: 生成的预签名 URL。
+        """
+        try:
+            url = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket_name, 'Key': object_key},
+                ExpiresIn=expires_in
+            )
+            logger.info(f"Generated pre-signed URL for {object_key}. URL expires in {expires_in} seconds.")
+            return url
+        except ClientError as e:
+            logger.error(f"Failed to generate pre-signed URL for '{object_key}': {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to generate pre-signed URL due to a client error.")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while generating URL for '{object_key}': {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"An unexpected error occurred.")

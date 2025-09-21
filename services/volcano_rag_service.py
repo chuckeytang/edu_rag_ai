@@ -65,7 +65,7 @@ class VolcanoEngineRagService(Service):
         api_info = {
             "SearchKnowledge": ApiInfo("POST", "/api/knowledge/collection/search_knowledge", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
             "DeleteDocument": ApiInfo("POST", "/api/knowledge/collection/delete_document", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
-            "ImportDocumentUrl": ApiInfo("POST", "/api/knowledge/collection/import_document_url", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
+            "ImportDocumentUrl": ApiInfo("POST", "/api/knowledge/doc/add", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
             "Ping": ApiInfo("GET", "/api/knowledge/ping", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
         }
         return api_info
@@ -75,7 +75,6 @@ class VolcanoEngineRagService(Service):
             raise Exception("no such api")
         api_info = self.api_info[api]
         
-        # 先创建 Request 实例，然后调用 prepare_request
         request = self.prepare_request(api_info, params)
         request.headers['Content-Type'] = 'application/json'
         request.headers['Traffic-Source'] = 'SDK'
@@ -93,7 +92,23 @@ class VolcanoEngineRagService(Service):
                     headers=request.headers,
                     content=request.body,
                 )
-                response.raise_for_status()
+                
+                # 在这里，先检查非200状态码，并尝试解析错误详情
+                if response.status_code >= 400:
+                    try:
+                        error_data = response.json()
+                        # 打印火山引擎返回的 JSON 错误详情
+                        logger.error(f"Volcano Engine API returned an error. Status Code: {response.status_code}, Response Body: {json.dumps(error_data, indent=2)}")
+                        # 抛出包含详细信息的自定义异常
+                        message = error_data.get("message", "Unknown API error")
+                        request_id = error_data.get("request_id", "N/A")
+                        raise VolcanoEngineRagException(error_data.get("code", "N/A"), request_id, message)
+                    except json.JSONDecodeError:
+                        # 如果响应不是 JSON 格式，就打印原始文本
+                        logger.error(f"HTTP error occurred. Status Code: {response.status_code}, Response Body: {response.text}")
+                        raise VolcanoEngineRagException(response.status_code, "httpx_error", response.text)
+
+                # 如果状态码是200，则继续处理响应
                 response_data = response.json()
                 
                 if response_data.get("code") != 0:
@@ -102,22 +117,42 @@ class VolcanoEngineRagService(Service):
                     
                 return response_data
 
-            except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error occurred: {e}", exc_info=True)
-                raise VolcanoEngineRagException(e.response.status_code, "httpx_error", str(e))
             except Exception as e:
+                # 捕获其他任何请求失败异常
                 logger.error(f"Request failed: {e}", exc_info=True)
                 raise VolcanoEngineRagException(1000029, "request_error", str(e))
 
-    async def import_document_url(self, url: str, doc_name: str, knowledge_base_id: str, user_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def import_document_url(self, 
+                                  url: str, 
+                                  doc_name: str, 
+                                  knowledge_base_id: str, 
+                                  doc_id: str, # 新增 doc_id 参数
+                                  doc_type: str, # 新增 doc_type 参数
+                                  meta: Optional[List[Dict[str, Any]]] = None # 新增 meta 参数
+                                  ) -> Dict[str, Any]:
+        
         logger.info(f"Importing document '{doc_name}' from URL to knowledge base '{knowledge_base_id}'.")
+        
+        # 参照火山引擎官方文档 doc/add 的请求参数来构建 payload
         payload = {
+            "collection_name": knowledge_base_id, # 火山引擎的文档中 collection_name 对应知识库名称
             "resource_id": knowledge_base_id,
-            "urls": [url],
+            "add_type": "url",
+            "doc_id": doc_id,
             "doc_name": doc_name,
-            "user_data": json.dumps(user_data) if user_data else ""
+            "doc_type": doc_type,
+            "url": url,
         }
-        return await self._async_make_request("ImportDocumentUrl", {}, payload)
+        
+        if meta:
+            payload["meta"] = meta
+            
+        try:
+            # 调用 _async_make_request 并确保 API 名称正确
+            return await self._async_make_request("ImportDocumentUrl", {}, payload)
+        except Exception as e:
+            logger.error(f"Error during API call with payload: {payload}", exc_info=True)
+            raise e
 
     async def delete_document(self, knowledge_base_id: str, doc_id: str) -> Dict[str, Any]:
         logger.info(f"Deleting document '{doc_id}' from knowledge base '{knowledge_base_id}'.")

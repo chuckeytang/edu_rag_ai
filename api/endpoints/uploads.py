@@ -15,14 +15,10 @@ from services.oss_service import OssService
 from services.query_service import QueryService 
 from llama_index.core.schema import Document
 from models.schemas import (
-    AddChatMessageRequest,
     DeleteByMetadataRequest,
     TaskStatus,
     UploadFromTextRequest,
-    UploadResponse,
     UploadFromOssRequest,
-    UpdateMetadataRequest,
-    UpdateMetadataResponse,
 )
 from api.dependencies import (
     get_indexer_service, 
@@ -36,7 +32,7 @@ router = APIRouter()
 
 
 # 核心业务逻辑包装函数
-def process_task_wrapper(request: UploadFromOssRequest, 
+async def process_task_wrapper(request: UploadFromOssRequest, 
                          task_id: str,
                          document_oss_service: DocumentOssService,
                          task_manager_service: TaskManagerService):
@@ -46,7 +42,7 @@ def process_task_wrapper(request: UploadFromOssRequest,
     """
     logger.info(f"[TASK_ID: {task_id}] Background task wrapper started. Delegating all logic to DocumentOssService...")
     try:
-        document_oss_service.process_new_oss_file(request, task_id, request.rag_config)
+        await document_oss_service.process_new_oss_file(request, task_id, request.rag_config)
     except Exception as e:
         logger.error(f"[TASK_ID: {task_id}] A critical unhandled exception escaped the service layer: {e}", exc_info=True)
         task_manager_service.finish_task(task_id, "error", result={"message": "A critical and unexpected error occurred in the service layer."})
@@ -94,7 +90,7 @@ def delete_by_metadata(request: DeleteByMetadataRequest,
     logger.info(f"Received request to delete documents with filters: {request.filters}")
     try:
         result = indexer_service.delete_nodes_by_metadata(
-            collection_name=request.collection_name,
+            knowledge_base_id=request.knowledge_base_id,
             filters=request.filters
         )
         if result["status"] == "error":
@@ -133,7 +129,7 @@ async def process_text_indexing_task(request: UploadFromTextRequest, task_id: st
         indexer_service = get_indexer_service()
         indexer_service.add_documents_to_index(
             [doc], 
-            collection_name=request.collection_name, 
+            knowledge_base_id=request.knowledge_base_id, 
             rag_config=request.rag_config
         )
         

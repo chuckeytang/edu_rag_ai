@@ -6,6 +6,8 @@ from functools import lru_cache
 from typing import Any, Dict, Optional, Sequence
 from http import HTTPStatus
 
+from fastapi import Depends
+
 # 核心配置和服务
 from core.config import settings
 from core.rag_config import RagConfig
@@ -199,12 +201,23 @@ def get_query_service() -> QueryService:
     )
 
 @lru_cache(maxsize=1)
-def get_ai_extraction_service() -> AIExtractionService:
+def get_oss_service() -> OssService:
+    """提供 OssService 的单例实例"""
+    logger.info("Initializing OssService...")
+    return OssService()
+
+@lru_cache(maxsize=1)
+def get_ai_extraction_service(
+    # 使用 Depends 注入 OssService 实例
+    oss_service: OssService = Depends(get_oss_service) 
+) -> AIExtractionService:
     """提供 AIExtractionService 的单例实例"""
     logger.info("Initializing AIExtractionService...")
     return AIExtractionService(
         llm_metadata_model=get_deepseek_llm_metadata(),
-        llm_flashcard_model=get_deepseek_llm_flashcard()
+        llm_flashcard_model=get_deepseek_llm_flashcard(),
+        # 正确传递 oss_service 实例
+        oss_service_instance=oss_service 
     )
 
 @lru_cache(maxsize=1)

@@ -24,58 +24,55 @@ class IndexerService:
 
         logger.info("IndexerService initialized with Volcano Engine RAG service.")
 
-    def add_documents_to_index(self, 
+    async def add_documents_to_index(self, 
                                documents: List[Dict[str, Any]], 
                                knowledge_base_id: str) -> Dict[str, Any]:
         """
         向火山引擎知识库中添加文档。
         
         Args:
-            documents: 包含 'content' 和 'metadata' 的文档列表。
-                       例如: [{"content": "...", "metadata": {"file_name": "..."}}]
-            knowledge_base_id: 火山引擎知识库 ID，对应原先的 collection_name。
+            documents: 包含文档元数据的字典列表。
+                       我们只处理列表中的第一个文档，因为它代表了原始文件。
+            knowledge_base_id: 火山引擎知识库 ID。
             
         Returns:
             火山引擎 API 的响应。
         """
-        # 在这里，我们将使用你提供的具体知识库ID
-        knowledge_base_id = "kb-6afe3b11148d7b69"
-        
-        logger.info(f"Attempting to add {len(documents)} documents to knowledge base: '{knowledge_base_id}'...")
         if not documents:
             logger.warning("No documents provided for indexing. Skipping.")
             return {"status": "success", "message": "No documents to add."}
 
-        results = []
-        for doc in documents:
-            # 这里的 doc 应该是从 DocumentOssService 传递过来的包含 URL 和元数据的字典
-            # 例如: {"url": "...", "doc_name": "...", "user_data": {...}}
-            url = doc.get("url")
-            doc_name = doc.get("doc_name")
-            user_data = doc.get("user_data")
-            
-            if not url:
-                logger.warning(f"Skipping document with no URL. Doc Name: {doc_name}")
-                continue
-                
-            try:
-                # 调用火山引擎服务进行上传
-                result = self.volcano_rag_service.import_document_url(
-                    url=url,
-                    doc_name=doc_name,
-                    knowledge_base_id=knowledge_base_id,
-                    user_data=user_data
-                )
-                results.append(result)
-                logger.info(f"Document '{doc_name}' from URL uploaded successfully. Response: {result}")
-            except Exception as e:
-                logger.error(f"Failed to upload document '{doc_name}' from URL: {e}", exc_info=True)
-                results.append({"status": "error", "message": str(e), "doc_name": doc_name})
+        # 移除 first_doc.metadata 的调用，因为 documents 是字典列表
+        document_to_add = documents[0]
         
-        return {
-            "status": "success" if all(r.get("status_code") == 200 for r in results) else "partial_success",
-            "results": results
-        }
+        url = document_to_add.get("url")
+        doc_name = document_to_add.get("doc_name")
+        doc_id = document_to_add.get("doc_id")
+        doc_type = document_to_add.get("doc_type")
+        meta = document_to_add.get("meta")
+        
+        if not url:
+            logger.error("Document dictionary is missing 'url'. Cannot index.")
+            return {"status": "error", "message": "Document dictionary is missing 'url'"}
+        
+        # 你的逻辑已经将所有数据准备在了一个字典中，所以这里只需要直接使用它们
+        
+        try:
+            # 调用火山引擎服务进行上传
+            result = await self.volcano_rag_service.import_document_url(
+                url=url,
+                doc_id=doc_id,
+                doc_name=doc_name,
+                doc_type=doc_type,
+                knowledge_base_id=knowledge_base_id,
+                meta=meta
+            )
+            logger.info(f"Document '{doc_name}' from URL uploaded successfully. Response: {result}")
+            return {"status": "success", "result": result}
+            
+        except Exception as e:
+            logger.error(f"Failed to upload document '{doc_name}' from URL: {e}", exc_info=True)
+            return {"status": "error", "message": str(e), "doc_name": doc_name}
 
     def delete_nodes_by_metadata(self, knowledge_base_id: str, filters: dict) -> dict:
         """

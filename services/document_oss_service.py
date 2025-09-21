@@ -64,7 +64,7 @@ class DocumentOssService:
             for key, filename in self.processed_files.items():
                 f.write(f"{key}:{filename}\n")
 
-    def process_new_oss_file(self, 
+    async def process_new_oss_file(self, 
                              request: UploadFromOssRequest, 
                              task_id: str,
                              rag_config: RagConfig) -> dict:
@@ -75,8 +75,6 @@ class DocumentOssService:
         local_file_path = None
         file_key = request.file_key
         display_file_name = request.metadata.file_name or "unknown_file"
-        collection_name = request.collection_name or "public_collection"
-        _log_memory_usage("Start of process_new_oss_file")
          
         # 1. 去重检查
         if file_key in self.processed_files:
@@ -90,155 +88,91 @@ class DocumentOssService:
             return
         
         try:
-            # 根据文件类型决定加载方式
-            loaded_original_docs: List[LlamaDocument] = []
-
-            # 从 OSS 下载文件
-            self.task_manager.update_progress(task_id, 10, "Downloading file from OSS...")
-            
-            # 确定存储桶
-            accessible_to_list = request.metadata.accessible_to or []
-            target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if "public" in accessible_to_list else settings.OSS_PRIVATE_BUCKET_NAME
-
-            local_file_path = self.oss_service.download_file_to_temp(
-                object_key=file_key, 
-                bucket_name=target_bucket
-            )
-            self.task_manager.update_progress(task_id, 30, "File download complete. Processing document...")
-            _log_memory_usage("After file download, before document loading")
-            
-            # --- 2. 加载原始 LlamaDocument ---
-            custom_file_extractor = {
-                ".pdf": CamelotPDFReader(
-                    flavor='stream', # 或 'lattice'
-                    table_settings={},
-                    extract_text_also=True,
-                    chunk_tables_intelligently=True
-                )
-            }
-
-            reader = SimpleDirectoryReader(
-                input_files=[local_file_path], 
-                recursive=True, 
-                file_extractor=custom_file_extractor
-            )
-            loaded_original_docs = reader.load_data()
-            _log_memory_usage("After document loading")
-            
-            if not loaded_original_docs:
-                raise ValueError("Could not load any documents from the provided file.")
-
-            # 获取原始总页数（仅对PDF文件有效，从第一个Document的metadata中推断或重新读取）
-            total_pages = 1 # 默认值
-            file_extension_lower = os.path.splitext(local_file_path)[1].lower()
-            if file_extension_lower == '.pdf' and loaded_original_docs:
-                try:
-                    # 从原始PDF获取总页数，可能需要再次使用 pypdf
-                    from pypdf import PdfReader
-                    pdf_reader_obj = PdfReader(local_file_path)
-                    total_pages = len(pdf_reader_obj.pages)
-                except Exception:
-                    logger.warning(f"Could not determine total pages for PDF: {local_file_path}. Defaulting to 1.")
-                    total_pages = 1 # 降级处理
-            elif loaded_original_docs: # 对于非PDF文件，一个doc可能就是一页或更多
-                # 这是一个大致的页数，LlamaIndex默认会将单文件视为1页
-                total_pages = max([int(doc.metadata.get("page_label", 1)) for doc in loaded_original_docs if doc.metadata and doc.metadata.get("page_label")], default=1)
-
-            # --- 3. 准备基础元数据并附加到每个 LlamaDocument 上 ---
-            # 将顶层的 file_key 也添加到元数据中
+            # 2. 准备基础元数据
             base_metadata_payload = request.metadata.model_dump()
             base_metadata_payload['file_key'] = file_key
 
             base_metadata_payload.pop('accessible_to', None)
             base_metadata_payload.pop('level_list', None) 
+            
+            # 3. 生成可导入的 URL
+            self.task_manager.update_progress(task_id, 10, "Generating temporary URL from OSS...")
+            
+            # 确定存储桶
+            accessible_to_list = request.metadata.accessible_to or []
+            target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if "public" in accessible_to_list else settings.OSS_PRIVATE_BUCKET_NAME
+            
+            # 调用 OssService 的新方法来生成预签名 URL
+            # 这是一个关键步骤，因为火山引擎需要一个可公开访问的 URL
+            import urllib.parse
+            temp_url = self.oss_service.generate_presigned_url(
+                object_key=file_key,
+                bucket_name=target_bucket,
+                expires_in=3600 # URL有效期（秒）
+            )
+            logger.info(f"Successfully generated pre-signed URL for {file_key}")
 
-            # 添加文件类型和时间戳
-            file_extension = os.path.splitext(file_key)[1].lower()
-            if file_extension == '.pdf':
-                base_metadata_payload['document_type'] = 'PDF'
-            elif file_extension in ('.doc', '.docx'):
-                base_metadata_payload['document_type'] = 'Word'
-            # 您可以根据需要添加更多文件类型判断
-            else:
-                base_metadata_payload['document_type'] = 'Unknown'
+            import re
+            # 正则表达式: 匹配所有不是字母、数字、_、- 的字符
+            cleaned_doc_id = re.sub(r'[^a-zA-Z0-9_-]', '_', file_key)
+            # 确保第一个字符是字母或下划线
+            if not re.match(r'^[a-zA-Z_]', cleaned_doc_id):
+                cleaned_doc_id = 'doc_' + cleaned_doc_id
 
-            base_metadata_payload['creation_date'] = datetime.now().isoformat()
-            
-            base_metadata_payload = {k: v for k, v in base_metadata_payload.items() if v is not None}
-            logger.info(f"Constructed base metadata: {base_metadata_payload}")
-            display_file_name = base_metadata_payload.get("file_name", "unknown_file")
-            
-            logger.info("Applying node duplication strategy based on ACLs...")
-            # 如果权限列表为空，为了防止文档丢失，默认将其归属给作者
-            if not accessible_to_list and 'author_id' in base_metadata_payload:
-                acl_tag = str(base_metadata_payload['author_id'])
-                accessible_to_list.append(acl_tag)
-                logger.warning(f"ACL list was empty. Defaulting to author_id: {acl_tag}")
+            # 4. 准备火山引擎所需的文档元数据
+            # 火山引擎的doc/add接口只处理一个文件URL，所以我们不再需要处理LlamaDocument的列表
+            final_document_payload = {
+                "url": temp_url,
+                "doc_name": display_file_name,
+                "doc_id": cleaned_doc_id, # 使用清理后的 doc_id
+                "doc_type": os.path.splitext(file_key)[1].strip('.').lower(),
+                "meta": []
+            }
 
-            # 为每一个权限标签，创建一套完整的文档节点副本
-            final_documents_for_indexing: List[LlamaDocument] = []
+            # 根据火山引擎文档，doc_type需要进行特殊处理
+            if final_document_payload["doc_type"] == 'jpg':
+                final_document_payload["doc_type"] = 'jpeg'
             
-            # 如果 accessible_to_list 仍然为空 (例如，没有 author_id 也没有指定 accessible_to)
-            # 则默认使用 "private_default" 或直接跳过
-            if not accessible_to_list:
-                logger.warning(f"No specific ACL tags found for {file_key}. Document will be indexed with 'private_default' ACL.")
-                accessible_to_list.append("private_default") # 默认一个私有标签
-            
-            # 为每一个权限标签，创建一套完整的文档节点副本
-            final_nodes_to_index = []
-            for acl_tag in accessible_to_list:
-                for doc in loaded_original_docs:
-                    # 复制基础元数据
-                    metadata_copy = base_metadata_payload.copy()
-                    # 为这个副本设置单一的、字符串类型的访问标签
-                    metadata_copy['accessible_to'] = str(acl_tag)
-                    # 保留原始的页码信息
-                    metadata_copy['page_label'] = doc.metadata.get("page_label", "1")
-                    
-                    # 创建一个新的 LlamaDocument 节点对象
-                    new_node = LlamaDocument(
-                        text=doc.text,
-                        metadata=metadata_copy
-                    )
-                    final_nodes_to_index.append(new_node)
-            
-            pages_loaded = len(final_nodes_to_index)
-            logger.info(f"Generated a total of {pages_loaded} nodes for indexing.")
-            # --- [进度汇报] 文档处理完成 ---
-            self.task_manager.update_progress(task_id, 75, f"Processing complete. Found {pages_loaded} nodes to index.")
+            # 将自定义元数据转换为火山引擎的 "meta" 格式
+            for key, value in base_metadata_payload.items():
+                if key not in ["file_name", "file_key", "accessible_to", "creation_date", "document_type"] and value is not None:
+                    # 注意: field_type 需要根据你创建知识库时的配置来确定
+                    # 这里假设都是string类型，如果你的标签有其他类型，需要做相应判断
+                    final_document_payload["meta"].append({
+                        "field_name": key,
+                        "field_type": "string",
+                        "field_value": str(value)
+                    })
 
-            # 4. 索引所有生成的节点
-            if not final_nodes_to_index:
-                self.task_manager.finish_task(task_id, "error", result={"message": "No valid content or nodes generated for indexing."})
-            else:
-                logger.info(f"Indexing {pages_loaded} document chunks into collection '{collection_name}'...")
-                self.indexer_service.add_documents_to_index(final_nodes_to_index, collection_name=collection_name, rag_config=rag_config)
-                
-                self.processed_files[file_key] = display_file_name
-                self._save_processed_keys()
-                
-                success_result = {
-                    "message": "File from OSS has been processed and indexed successfully.",
-                    "pages_loaded": pages_loaded,
-                    "total_pages": total_pages,
-                    "file_key": file_key
-                }
-                self.task_manager.finish_task(task_id, "success", result=success_result)
-                return {"status": "success", "message": success_result["message"]} # 明确返回
+            self.task_manager.update_progress(task_id, 30, "Document payload prepared. Indexing...")
+
+            # 5. 调用 IndexerService 进行索引
+            logger.info(f"Indexing document '{display_file_name}' into knowledge base '{rag_config.knowledge_base_id}'...")
+            
+            await self.indexer_service.add_documents_to_index(
+                documents=[final_document_payload], # 传入包含单个文档字典的列表
+                knowledge_base_id=rag_config.knowledge_base_id 
+            )
+            
+            self.processed_files[file_key] = display_file_name
+            self._save_processed_keys()
+            
+            success_result = {
+                "message": "File from OSS has been processed and indexed successfully.",
+                "file_key": file_key,
+                "knowledge_base_id": rag_config.knowledge_base_id
+            }
+            self.task_manager.finish_task(task_id, "success", result=success_result)
+            return {"status": "success", "message": success_result["message"]}
 
         except Exception as e:
             logger.error(f"Error during processing of OSS key '{file_key}': {e}", exc_info=True)
             self.task_manager.finish_task(task_id, "error", result={"message": str(e)})
             return {"status": "error", "message": str(e)}
         finally:
-            # 清理临时文件
-            if local_file_path:
-                temp_dir = os.path.dirname(local_file_path)
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                    logger.info(f"Cleaned up temporary directory: '{temp_dir}'")
-            gc.collect() 
-            _log_memory_usage("End of process_new_oss_file")
+            # 清理，由于是URL导入，不再需要本地文件，所以这部分可以精简
+            # 但如果你保留了下载到本地的逻辑，清理是必要的
+            pass
 
     def _filter_documents(self, documents: List[LlamaDocument]) -> Tuple[List[LlamaDocument], dict]:
         """Filters out blank or empty pages from a list of documents."""

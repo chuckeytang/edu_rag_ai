@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import Any, Optional, List, Dict
+from typing import Any, Optional, List, Dict, Union
 from datetime import datetime, timezone
 
 from core.rag_config import RagConfig
@@ -72,46 +72,34 @@ class WxMineCollectSubjectList(BaseModel):
 
 # 请求体模型，用于接收文本内容或 OSS file_key，并新增用户上下文信息
 class ExtractionRequest(BaseModel):
-    file_key: Optional[str] = None # OSS 文件键
-    content: Optional[str] = None  # 直接的文本内容
+    file_key: Optional[str] = None
+    content: Optional[str] = None
     is_public: Optional[bool] = True
+    user_provided_clazz: Optional[str] = None
+    user_provided_subject: Optional[str] = None
+    user_provided_exam: Optional[str] = None
+    
+    # 将 user_provided_level 的类型设置为 Union[str, List[str]]
+    # 这样可以同时接收单个字符串（如果 Java 端将单元素列表序列化为字符串）和列表
+    user_provided_level: Union[str, List[str], None] = Field(None, description="用户提供的等级预设，可以是单个字符串或列表") 
+    
+    # 同样，将 subscribed_subjects 的类型设置为 Union[List, None]，以处理空列表或 null
+    subscribed_subjects: Union[List[WxMineCollectSubjectList], None] = Field(None)
 
-    # --- 用户提供的元数据预设 (现在 level 是 List[str]) ---
-    user_provided_clazz: Optional[str] = Field(None, description="用户提供的课程体系预设，如：IB、IGCSE、AP")
-    user_provided_subject: Optional[str] = Field(None, description="用户提供的学科预设，如：Chemistry、Business")
-    user_provided_exam: Optional[str] = Field(None, description="用户提供的考试局预设，如：CAIE、Edexcel")
-    # !!! 修改 1: user_provided_level 变为 List[str] !!!
-    user_provided_level: List[str] = Field([], description="用户提供的等级预设，如：['AS', 'HL']") 
-
-    # !!! 修改 2: subscribed_subjects 变为 List[WxMineCollectSubjectList] !!!
-    subscribed_subjects: List[WxMineCollectSubjectList] = Field([], description="用户订阅的学科列表，包含学科、体系、考试局信息")
-
+    # 移除 'validate_at_least_one'，将校验逻辑移到业务层
+    # 这样做可以避免 FastAPI 因为校验失败而直接返回 400，从而让我们能记录更详细的错误日志
     class Config:
-        extra = "forbid"
-        @classmethod
-        def validate_at_least_one(cls, values):
-            if not values.get('file_key') and not values.get('content'):
-                raise ValueError("必须提供 'file_key' 或 'content' 中的至少一个。")
-            if values.get('file_key') and values.get('content'):
-                raise ValueError("不能同时提供 'file_key' 和 'content'。")
-            return values
-        
+        extra = "ignore"  # 允许 Java 端发送任何额外字段而不报错
         json_schema_extra = {
             "examples": [
                 {
                     "file_key": "path/to/your/document.pdf",
                     "is_public": True,
                     "user_provided_subject": "Mathematics",
-                    "user_provided_level": ["AS"], 
+                    "user_provided_level": ["AS"],
                     "subscribed_subjects": [ 
-                        {"subject": "Mathematics", "clazz": "A-Level", "exam": "CAIE"},
-                        {"subject": "Physics", "clazz": "IB", "exam": "Edexcel"}
+                        {"subject": "Mathematics", "clazz": "A-Level", "exam": "CAIE"}
                     ]
-                },
-                {
-                    "content": "This is a sample document about IB Chemistry, focusing on redox reactions.",
-                    "user_provided_clazz": "IB",
-                    "subscribed_subjects": [{"subject": "Chemistry", "clazz": "IB", "exam": ""}] 
                 }
             ]
         }
@@ -158,7 +146,7 @@ class RAGMetadata(BaseModel):
 class UploadFromOssRequest(BaseModel):
     file_key: str = Field(..., description="The object key for the file in the public OSS bucket.")
     metadata: RAGMetadata
-    collection_name: Optional[str] = Field(None)
+    knowledge_base_id: Optional[str] = Field(None)
     rag_config: RagConfig = Field(
         ...,
         description="RAG 配置，用于文档索引阶段的参数，例如 chunk_size。"
@@ -166,7 +154,7 @@ class UploadFromOssRequest(BaseModel):
 
 class UpdateMetadataRequest(BaseModel):
     material_id: int = Field(..., description="The ID of the material to update.")
-    collection_name: Optional[str] = Field(None)
+    knowledge_base_id: Optional[str] = Field(None)
     metadata: RAGMetadata = Field(..., description="The new metadata payload.")
     rag_config: Optional[RagConfig] = Field(None, description="可选的 RAG 配置，用于文档索引阶段的参数，例如 chunk_size。")
 
@@ -177,7 +165,7 @@ class UpdateMetadataResponse(BaseModel):
     status: str
 
 class DeleteByMetadataRequest(BaseModel):
-    collection_name: str = Field(..., description="The name of the collection to delete from.")
+    knowledge_base_id: str = Field(..., description="The name of the knowledge base to delete from.")
     filters: Optional[Dict] = Field(..., description="The `where` clause to filter documents for deletion.")
 
 class DocumentChunkResponse(BaseModel):
@@ -205,7 +193,7 @@ class AddChatMessageRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    collection_name: str = Field(...) 
+    knowledge_base_id: str = Field(...) 
     filters: Optional[Dict] = Field(default_factory=dict)
     similarity_top_k: Optional[int] = 10
     target_file_ids: Optional[List[str]] = None 
@@ -215,7 +203,7 @@ class ChatQueryRequest(BaseModel):
     session_id: str
     account_id: int
     context_retrieval_query: str
-    collection_name: str
+    knowledge_base_id: str
     target_file_ids: Optional[List[str]] = None
     filters: Optional[Dict[str, Any]] = None
     similarity_top_k: Optional[int] = 5
@@ -279,7 +267,7 @@ class PaperCutMetadataPayload(BaseModel):
 class UploadFromTextRequest(BaseModel):
     text_content: str
     metadata: PaperCutMetadataPayload # 使用新的元数据模型
-    collection_name: Optional[str] = "public_collection"
+    knowledge_base_id: Optional[str] = RagConfig.get_default_config().knowledge_base_id
     rag_config: Optional[RagConfig] = None
 
 # --- MCP 调度相关的模型 ---

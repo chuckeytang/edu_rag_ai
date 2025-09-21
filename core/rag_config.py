@@ -20,6 +20,10 @@ class RagConfig(BaseModel):
         ...,
         description="通用聊天提示词模板。{chat_history_context}, {query_str} 是占位符。"
     )
+    knowledge_base_id: str = Field(
+        ...,
+        description="火山引擎知识库的唯一ID。"
+    )
 
     # 召回参数
     retrieval_top_k: conint(ge=1) = Field(
@@ -116,5 +120,6 @@ class RagConfig(BaseModel):
             history_retrieval_top_k=5,
             llm_max_retries=3,
             retry_base_delay=1.0,
-            citation_similarity_threshold=0.3
+            citation_similarity_threshold=0.3,
+            knowledge_base_id="kb-6afe3b11148d7b69",
         )

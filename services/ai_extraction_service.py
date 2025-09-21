@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 from typing import List, Optional, Any
+from llama_index.core import SimpleDirectoryReader
 
 from fastapi import HTTPException
 
@@ -14,6 +15,7 @@ from llama_index.core.output_parsers import PydanticOutputParser
 
 from core.config import settings 
 from models.schemas import ExtractedDocumentMetadata, Flashcard, FlashcardList, WxMineCollectSubjectList
+from services.oss_service import OssService
 from tools.tokenizer_utils import get_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -23,11 +25,13 @@ MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION = 58000
 class AIExtractionService:
     def __init__(self,
                  llm_metadata_model: OpenAILike,
-                 llm_flashcard_model: OpenAILike
-                 ):
+                 llm_flashcard_model: OpenAILike,
+                 oss_service_instance: OssService):
         self.llm_metadata = llm_metadata_model
         self.llm_flashcard = llm_flashcard_model
-        # 移除oss_service的依赖，因为这个服务不再负责文件下载和本地处理。
+        if not oss_service_instance:
+             raise ValueError("OssService instance must be provided.")
+        self.oss_service = oss_service_instance
 
         # 预定义的选项集合 (这些应该从Spring后端获取，或从数据库加载)
         # 实际应用中，这些可能通过构造函数参数传入，或通过单独的服务获取
@@ -44,14 +48,58 @@ class AIExtractionService:
                                             is_public: bool = False
                                             ) -> str:
         """
-        这个服务现在只处理直接提供的文本内容。
-        文件下载和处理逻辑已转移到调用服务。
+        根据 file_key 从 OSS 下载文件并提取内容，或直接使用提供的文本内容。
+        根据 is_public 参数决定从公共桶或私有桶下载。
         """
-        if text_content:
+        if file_key:
+            # **这里是你需要恢复的逻辑**
+            local_file_path = None
+            try:
+                # 根据 is_public 决定目标桶
+                target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if is_public else settings.OSS_PRIVATE_BUCKET_NAME
+                logger.info(f"Attempting to download '{file_key}' from bucket: '{target_bucket}'")
+
+                # 调用 OssService 下载文件
+                local_file_path = self.oss_service.download_file_to_temp(
+                    object_key=file_key, 
+                    bucket_name=target_bucket
+                )
+                
+                # 使用 LlamaIndex 的 SimpleDirectoryReader 读取本地文件内容
+                reader = SimpleDirectoryReader(input_files=[local_file_path])
+                documents = reader.load_data()
+                full_content = "\n".join([doc.text for doc in documents])
+                
+                # 内容清理和截断逻辑 (与你提供的代码一致，可以保留)
+                import unicodedata
+                cleaned_content = ''.join(c for c in full_content if unicodedata.category(c) != 'Cs')
+                tokenizer = get_tokenizer()
+                if tokenizer:
+                    tokens = tokenizer.encode(cleaned_content)
+                    if len(tokens) > MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION:
+                        logger.warning(f"File '{file_key}' content ({len(tokens)} tokens) exceeds LLM input limit ({MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION}). Truncating for AI extraction.")
+                        truncated_tokens = tokens[:MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION]
+                        return tokenizer.decode(truncated_tokens)
+                    return cleaned_content
+                else: 
+                    max_chars = MAX_LLM_INPUT_TOKENS_FOR_EXTRACTION * 4
+                    if len(cleaned_content) > max_chars:
+                        logger.warning(f"File '{file_key}' content ({len(cleaned_content)} chars) exceeds LLM input limit (approx. {max_chars} chars). Truncating for AI extraction.")
+                        return cleaned_content[:max_chars]
+                    return cleaned_content
+                
+            except Exception as e:
+                logger.error(f"从OSS下载或读取文件 '{file_key}' 失败 (桶: {target_bucket}): {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"从OSS下载或读取文件失败: {e}. 请检查文件键和权限。")
+            finally:
+                if local_file_path and os.path.exists(os.path.dirname(local_file_path)):
+                    shutil.rmtree(os.path.dirname(local_file_path))
+                    logger.info(f"Cleaned up temporary directory for {file_key}")
+        
+        elif text_content:
             return text_content
         else:
-            # 如果没有提供文本内容，就抛出错误
-            raise ValueError("AI Extraction Service now only accepts 'text_content' directly. 'file_key' is not supported for local processing.")
+            raise ValueError("必须提供 'file_key' 或 'text_content' 中的至少一个。")
 
     async def extract_document_metadata(self, 
                                         file_key: Optional[str] = None, 
