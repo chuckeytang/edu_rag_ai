@@ -3,7 +3,7 @@ import logging
 from typing import Dict, Any, List, Optional
 import chromadb
 from chromadb.config import Settings
-from llama_cloud import SentenceSplitter
+from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import Document as LlamaDocument, TextNode, NodeWithScore, QueryBundle
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core import VectorStoreIndex
