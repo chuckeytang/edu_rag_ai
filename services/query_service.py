@@ -21,6 +21,7 @@ from dataclasses import dataclass
 class SimpleNode:
     text: str
     metadata: Dict[str, Any]
+    id_: Optional[str] = None 
 
 from core.rag_config import RagConfig
 from core.config import settings
