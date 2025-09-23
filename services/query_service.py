@@ -520,7 +520,7 @@ class QueryService:
                 continue
         
         final_metadata = {
-            "rag_sources": [],
+            "rag_sources": "[]", 
             "referenced_docs": final_referenced_material_ids,
             "session_title": generated_title
         }
