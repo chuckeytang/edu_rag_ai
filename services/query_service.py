@@ -4,6 +4,8 @@ import asyncio
 
 from typing import Optional, Any, AsyncGenerator, List, Dict
 from memory_profiler import profile
+import re
+import numpy as np
 
 # 新增的导入，用于替代 LlamaIndex 的概念
 from services.volcano_rag_service import VolcanoEngineRagService
@@ -11,6 +13,7 @@ from services.indexer_service import IndexerService
 from services.chat_history_service import ChatHistoryService
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.base.llms.types import ChatResponse, ChatResponseGen
+from llama_index.core.embeddings import BaseEmbedding
 
 # 引入一个可以替代 LlamaIndex 节点的简单数据结构，或者直接使用字典
 from dataclasses import dataclass
@@ -28,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 class QueryService:
     def __init__(self, 
-                 # 移除 chroma_client, embedding_model 和 retrieval_service
-                 llm: Any,  # LLM实例仍然需要
+                 llm: Any,
+                 embedding_model: BaseEmbedding,
                  indexer_service: IndexerService,
                  volcano_rag_service: VolcanoEngineRagService, # 新增：注入火山引擎服务
                  rag_config: RagConfig, 
@@ -37,9 +40,10 @@ class QueryService:
         """
         构造函数 - 切换到火山引擎 RAG 服务
         """
-        self.llm = llm                           
+        self.llm = llm             
+        self.embedding_model = embedding_model              
         self._indexer_service = indexer_service
-        self.volcano_rag_service = volcano_rag_service # 新增
+        self.volcano_rag_service = volcano_rag_service 
         self._chat_history_service = chat_history_service
         self.rag_config = rag_config
 
@@ -49,7 +53,6 @@ class QueryService:
         self.title_generation_prompt_template = rag_config.title_prompt_template
         self.general_chat_prompt_template = rag_config.general_chat_prompt_template
         
-        # 移除本地重排器，因为火山引擎已处理
         self.llm_reranker = None
         self.local_reranker = None
         logger.info("QueryService initialized. Using Volcano Engine RAG for retrieval and reranking.")
@@ -103,15 +106,12 @@ class QueryService:
             knowledge_base_ids_to_query = [settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID] # 示例
             logger.info("Query type is 'PaperCut', retrieving from specific knowledge base.")
         elif query_type:
-            # 你可能需要将你的 `collection_name` 映射到火山引擎的知识库ID
-            # 这里简化为直接使用配置中的ID
             knowledge_base_ids_to_query = [settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID] 
             logger.info(f"Query type is '{query_type}', retrieving from knowledge base.")
         else:
             knowledge_base_ids_to_query = [settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID] 
             logger.info("Query type not specified, retrieving from default knowledge base.")
         
-        # 使用 request.similarity_top_k 作为检索数量，火山引擎内部会处理重排
         final_top_k = request.similarity_top_k if request.similarity_top_k is not None else rag_config.retrieval_top_k
         
         # --- 流程2: 异步并行调用火山引擎检索API ---
@@ -121,7 +121,7 @@ class QueryService:
                 query_text=request.question,
                 knowledge_base_id=kb_id,
                 limit=final_top_k,
-                rerank_switch=True, # 始终开启重排
+                rerank_switch=True, 
             )
             retrieve_tasks.append(task)
         
@@ -135,9 +135,14 @@ class QueryService:
         
         logger.info(f"Retrieved {len(combined_retrieved_chunks)} chunks from all knowledge bases combined.")
 
-        # 检查是否召回了文档
-        if not combined_retrieved_chunks:
-            logger.info("No documents retrieved for the main query. Directly calling LLM.")
+        highest_score = 0.0
+        if combined_retrieved_chunks:
+            highest_score = max([chunk.get('rerank_score', chunk.get('score', 0.0)) for chunk in combined_retrieved_chunks])
+            logger.info(f"Highest rerank score from retrieved chunks: {highest_score}")
+
+        # 如果检索结果为空，或者最高分数低于设定的阈值，则直接回退
+        if not combined_retrieved_chunks or highest_score < self.rag_config.retrieval_score_threshold:
+            logger.info("No relevant documents found (either empty or score below threshold). Falling back to LLM general chat.")
             async for chunk in self._stream_llm_without_rag_context(
                 request.question,
                 chat_history_context_string,
@@ -179,6 +184,7 @@ class QueryService:
         context_parts = []
         current_context_tokens = 0
         rag_sources_info = []
+        retrieved_chunk_map = {}
         
         # 使用火山引擎返回的 chunk 数据构建上下文
         for chunk in final_retrieved_chunks_for_llm:
@@ -186,6 +192,7 @@ class QueryService:
             chunk_source = chunk.get('source', '未知文件')
             chunk_doc_id = chunk.get('docId', 'N/A')
             chunk_material_id = chunk.get('material_id', 'N/A')
+            chunk_id = f"{chunk_doc_id}-{chunk.get('chunkId', 'N/A')}" 
             
             if tokenizer:
                 chunk_tokens = len(tokenizer.encode(chunk_content))
@@ -205,6 +212,17 @@ class QueryService:
                 "page_number": "N/A", # 火山引擎API通常不直接返回页码，可能需要从元数据解析
                 "material_id": chunk_material_id
             })
+
+            retrieved_chunk_map[chunk_id] = SimpleNode(
+                text=chunk_content,
+                metadata={
+                    'document_id': chunk_doc_id,
+                    'material_id': chunk_material_id,
+                    'file_name': chunk_source,
+                    'page_label': "N/A"
+                },
+                id_=chunk_id
+            )
 
         context_str_for_llm = "\n\n".join(context_parts)
         
@@ -312,28 +330,98 @@ class QueryService:
              final_sse_event_json = StreamChunk(content="抱歉，我未能从现有资料中找到相关信息。", is_last=True).json()
              yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
              return
-    
-        # --- 句子级引用生成 ---
+        
+        # --- 还原：句子级引用后处理逻辑 ---
         response_sentences = []
         sentence_citations = []
         if full_response_content:
-            import re
             response_sentences = re.split(r'(?<=[.!?。！？])\s+', full_response_content)
 
-        # 这里需要一个嵌入模型来生成句子嵌入，但你的 __init__ 中移除了它
-        # 你需要在 QueryService 中注入一个单独的嵌入模型，或者用一个外部服务
-        # 否则，这部分逻辑无法运行
-        if False: # 暂时禁用这部分代码
-            # ... (如果重新添加嵌入模型，可以恢复这部分逻辑)
-            # 这是一个占位符，提示需要嵌入模型
-            pass
+        if self.embedding_model:
+            # 获取所有被引用的 chunk 的文本列表和 ID 列表
+            referenced_chunk_texts = [node.text for node in retrieved_chunk_map.values()]
+            referenced_chunk_ids = list(retrieved_chunk_map.keys())
+
+            # 合并文档 chunk 和聊天历史 chunk
+            combined_referenced_texts = referenced_chunk_texts + chat_history_chunk_texts
+            combined_referenced_ids = referenced_chunk_ids + chat_history_chunk_ids
+
+            if not combined_referenced_texts:
+                logger.warning("No texts to embed for citation. Skipping citation generation.")
+                sentence_citations = []
+            else:
+                # 批量获取句子和 chunk 的 embeddings
+                all_text_to_embed = response_sentences + combined_referenced_texts
+                all_embeddings = await self.embedding_model.aget_text_embedding_batch(all_text_to_embed, show_progress=False)
+
+                response_sentence_embeddings = all_embeddings[:len(response_sentences)]
+                referenced_chunk_embeddings = all_embeddings[len(response_sentences):]
+
+                # 定义余弦相似度计算函数
+                def cosine_similarity(v1, v2):
+                    v1 = np.array(v1)
+                    v2 = np.array(v2)
+                    dot_product = np.dot(v1, v2)
+                    norm_v1 = np.linalg.norm(v1)
+                    norm_v2 = np.linalg.norm(v2)
+                    if norm_v1 == 0 or norm_v2 == 0:
+                        return 0
+                    return dot_product / (norm_v1 * norm_v2)
+
+                for i, sentence in enumerate(response_sentences):
+                    sentence_embedding = response_sentence_embeddings[i]
+                    best_match_id = None
+                    max_similarity = -1.0
+                    best_match_type = ""
+                    citation_info = {}
+
+                    for j, chunk_embedding in enumerate(referenced_chunk_embeddings):
+                        similarity = cosine_similarity(sentence_embedding, chunk_embedding)
+                        if similarity > max_similarity:
+                            max_similarity = similarity
+                            best_match_id = combined_referenced_ids[j]
+                            if j < len(referenced_chunk_ids):
+                                best_match_type = "document"
+                            else:
+                                best_match_type = "chat_history"
+
+                    # 阈值判断：如果最高相似度低于某个阈值，可能就不认为是引用
+                    if max_similarity > self.rag_config.citation_similarity_threshold:
+                        citation_info = {
+                            "sentence": sentence,
+                            "referenced_chunk_id": best_match_id,
+                            "source_type": best_match_type,
+                            "document_id": None,
+                            "material_id": None,
+                            "file_name": None,
+                            "page_label": None
+                        }
+
+                        if best_match_type == "document":
+                            source_node = retrieved_chunk_map.get(best_match_id)
+                            if source_node:
+                                citation_info.update({
+                                    "document_id": source_node.metadata.get('document_id'),
+                                    "material_id": source_node.metadata.get('material_id'),
+                                    "file_name": source_node.metadata.get('file_name'),
+                                    "page_label": source_node.metadata.get('page_label')
+                                })
+                        else: # 聊天历史
+                            # 查找对应的聊天历史节点
+                            source_node = next((node for node in chat_history_context_nodes if node.id_ == best_match_id), None)
+                            if source_node:
+                                citation_info.update({
+                                    "document_id": None,
+                                    "material_id": None,
+                                    "file_name": "聊天历史",
+                                    "page_label": source_node.metadata.get('role', '未知')
+                                })
+                        sentence_citations.append(citation_info)
         else:
             logger.warning("Embedding model is not available for sentence-level citation. Skipping this step.")
 
         # --- 构建最终的 metadata ---
         final_metadata = {}
-        
-        # 构建来源信息
         unique_rag_sources = {}
         for chunk in final_retrieved_chunks_for_llm:
             material_id = chunk.get("material_id")
@@ -343,24 +431,24 @@ class QueryService:
                     "page_number": chunk.get("page_label", "N/A"),
                     "material_id": material_id
                 }
-        
+
         final_metadata["rag_sources"] = json.dumps(list(unique_rag_sources.values()))
 
-        if final_referenced_material_ids: 
+        if final_referenced_material_ids:
             final_metadata["referenced_docs"] = json.dumps(final_referenced_material_ids)
 
         if generated_title:
             final_metadata["session_title"] = generated_title
-        
+
         if sentence_citations:
             final_metadata["sentence_citations"] = json.dumps(sentence_citations)
-        
+
         logger.debug(f"DEBUG: Final metadata before StreamChunk creation: {final_metadata}")
 
         final_sse_event_json = StreamChunk(
             content="",
             is_last=True,
-            metadata=final_metadata 
+            metadata=final_metadata
         ).json()
         temp_stream_chunk = StreamChunk(content="", is_last=True, metadata=final_metadata)
         logger.debug(f"DEBUG: Final StreamChunk object's dict (pre-json): {temp_stream_chunk.__dict__}")

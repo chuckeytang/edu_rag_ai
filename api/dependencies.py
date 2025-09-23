@@ -153,14 +153,13 @@ def get_dashscope_llm_for_function_calling():
         streaming=False
     )
 
-# --- 新增：VolcanoEngine RAG 服务 ---
+# --- VolcanoEngine RAG 服务 ---
 @lru_cache(maxsize=1)
 def get_volcano_rag_service() -> VolcanoEngineRagService:
     """提供 VolcanoEngineRagService 的单例实例"""
     logger.info("Initializing VolcanoEngineRagService...")
     return VolcanoEngineRagService()
 
-# --- 核心服务依赖 ---
 @lru_cache(maxsize=1)
 def get_indexer_service() -> IndexerService:
     """提供 IndexerService 的单例实例"""
@@ -194,6 +193,7 @@ def get_query_service() -> QueryService:
     rag_config = get_rag_config()
     return QueryService(
         llm=get_dashscope_rag_llm(),
+        embedding_model=get_embedding_model(),
         indexer_service=get_indexer_service(),
         chat_history_service=get_chat_history_service(),
         volcano_rag_service=get_volcano_rag_service(), 
