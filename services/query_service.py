@@ -15,6 +15,9 @@ from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.base.llms.types import ChatResponse, ChatResponseGen
 from llama_index.core.embeddings import BaseEmbedding
 
+# 定义截断长度
+TRUNCATE_LENGTH = 30
+
 # 引入一个可以替代 LlamaIndex 节点的简单数据结构，或者直接使用字典
 from dataclasses import dataclass
 @dataclass
@@ -383,13 +386,19 @@ class QueryService:
                                 best_match_type = "chat_history"
 
                     if max_similarity > self.rag_config.citation_similarity_threshold:
+                        # 获取完整的引用文本
+                        full_referenced_text = combined_referenced_texts[combined_referenced_ids.index(best_match_id)]
+                        
+                        # 核心修改点：对引用文本进行截断
+                        truncated_referenced_text = (full_referenced_text[:TRUNCATE_LENGTH] + '...') if len(full_referenced_text) > TRUNCATE_LENGTH else full_referenced_text
+
                         citation_info = {
                             "sentence": sentence,
                             # 核心修改点：旧版本使用 referenced_chunk_id 作为引用
                             "referenced_chunk_id": best_match_id, 
                             "source_type": best_match_type, # 核心修改点：旧版本没有这个字段，可以移除或精简
                             # 核心修改点：添加 referenced_chunk_text
-                            "referenced_chunk_text": combined_referenced_texts[combined_referenced_ids.index(best_match_id)],
+                            "referenced_chunk_text": truncated_referenced_text,
                             "document_id": None,
                             "material_id": None,
                             "file_name": None,
