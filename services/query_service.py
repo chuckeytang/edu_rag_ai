@@ -332,18 +332,16 @@ class QueryService:
              yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
              return
         
-        # --- 还原：句子级引用后处理逻辑 ---
+        # --- 句子级引用后处理逻辑 ---
         response_sentences = []
         sentence_citations = []
         if full_response_content:
             response_sentences = re.split(r'(?<=[.!?。！？])\s+', full_response_content)
 
         if self.embedding_model:
-            # 获取所有被引用的 chunk 的文本列表和 ID 列表
             referenced_chunk_texts = [node.text for node in retrieved_chunk_map.values()]
             referenced_chunk_ids = list(retrieved_chunk_map.keys())
 
-            # 合并文档 chunk 和聊天历史 chunk
             combined_referenced_texts = referenced_chunk_texts + chat_history_chunk_texts
             combined_referenced_ids = referenced_chunk_ids + chat_history_chunk_ids
 
@@ -351,14 +349,12 @@ class QueryService:
                 logger.warning("No texts to embed for citation. Skipping citation generation.")
                 sentence_citations = []
             else:
-                # 批量获取句子和 chunk 的 embeddings
                 all_text_to_embed = response_sentences + combined_referenced_texts
                 all_embeddings = await self.embedding_model.aget_text_embedding_batch(all_text_to_embed, show_progress=False)
 
                 response_sentence_embeddings = all_embeddings[:len(response_sentences)]
                 referenced_chunk_embeddings = all_embeddings[len(response_sentences):]
 
-                # 定义余弦相似度计算函数
                 def cosine_similarity(v1, v2):
                     v1 = np.array(v1)
                     v2 = np.array(v2)
@@ -386,12 +382,14 @@ class QueryService:
                             else:
                                 best_match_type = "chat_history"
 
-                    # 阈值判断：如果最高相似度低于某个阈值，可能就不认为是引用
                     if max_similarity > self.rag_config.citation_similarity_threshold:
                         citation_info = {
                             "sentence": sentence,
-                            "referenced_chunk_id": best_match_id,
-                            "source_type": best_match_type,
+                            # 核心修改点：旧版本使用 referenced_chunk_id 作为引用
+                            "referenced_chunk_id": best_match_id, 
+                            "source_type": best_match_type, # 核心修改点：旧版本没有这个字段，可以移除或精简
+                            # 核心修改点：添加 referenced_chunk_text
+                            "referenced_chunk_text": combined_referenced_texts[combined_referenced_ids.index(best_match_id)],
                             "document_id": None,
                             "material_id": None,
                             "file_name": None,
@@ -407,8 +405,7 @@ class QueryService:
                                     "file_name": source_node.metadata.get('file_name'),
                                     "page_label": source_node.metadata.get('page_label')
                                 })
-                        else: # 聊天历史
-                            # 查找对应的聊天历史节点
+                        else: 
                             source_node = next((node for node in chat_history_context_nodes if node.id_ == best_match_id), None)
                             if source_node:
                                 citation_info.update({
@@ -423,26 +420,17 @@ class QueryService:
 
         # --- 构建最终的 metadata ---
         final_metadata = {}
-        unique_rag_sources = {}
-        for chunk in final_retrieved_chunks_for_llm:
-            material_id = chunk.get("material_id")
-            if material_id not in unique_rag_sources:
-                unique_rag_sources[material_id] = {
-                    "file_name": chunk.get("source", "未知文件"),
-                    "page_number": chunk.get("page_label", "N/A"),
-                    "material_id": material_id
-                }
-
-        final_metadata["rag_sources"] = json.dumps(list(unique_rag_sources.values()))
+        # 核心修改点：不进行去重，直接使用 rag_sources_info
+        final_metadata["rag_sources"] = rag_sources_info 
 
         if final_referenced_material_ids:
-            final_metadata["referenced_docs"] = json.dumps(final_referenced_material_ids)
+            final_metadata["referenced_docs"] = final_referenced_material_ids
 
         if generated_title:
             final_metadata["session_title"] = generated_title
 
         if sentence_citations:
-            final_metadata["sentence_citations"] = json.dumps(sentence_citations)
+            final_metadata["sentence_citations"] = sentence_citations
 
         logger.debug(f"DEBUG: Final metadata before StreamChunk creation: {final_metadata}")
 
