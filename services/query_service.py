@@ -9,6 +9,7 @@ import numpy as np
 
 # 新增的导入，用于替代 LlamaIndex 的概念
 from services.volcano_rag_service import VolcanoEngineRagService
+from llama_index.core import PromptTemplate
 from services.indexer_service import IndexerService
 from services.chat_history_service import ChatHistoryService
 from llama_index.core.llms import ChatMessage, MessageRole
@@ -16,7 +17,7 @@ from llama_index.core.base.llms.types import ChatResponse, ChatResponseGen
 from llama_index.core.embeddings import BaseEmbedding
 
 # 定义截断长度
-TRUNCATE_LENGTH = 30
+TRUNCATE_LENGTH = 60
 
 # 引入一个可以替代 LlamaIndex 节点的简单数据结构，或者直接使用字典
 from dataclasses import dataclass
@@ -235,6 +236,7 @@ class QueryService:
         llm_response_obj = None 
         for attempt in range(max_retries):
             try:
+                self.qa_prompt_template = PromptTemplate(rag_config.qa_prompt_template)
                 final_prompt_for_llm = self.qa_prompt_template.format(
                     chat_history_context=chat_history_context_string,
                     context_str=context_str_for_llm, 
@@ -394,10 +396,8 @@ class QueryService:
 
                         citation_info = {
                             "sentence": sentence,
-                            # 核心修改点：旧版本使用 referenced_chunk_id 作为引用
                             "referenced_chunk_id": best_match_id, 
-                            "source_type": best_match_type, # 核心修改点：旧版本没有这个字段，可以移除或精简
-                            # 核心修改点：添加 referenced_chunk_text
+                            "source_type": best_match_type, 
                             "referenced_chunk_text": truncated_referenced_text,
                             "document_id": None,
                             "material_id": None,

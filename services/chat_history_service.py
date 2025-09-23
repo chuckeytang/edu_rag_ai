@@ -3,6 +3,7 @@ import logging
 from typing import Dict, Any, List, Optional
 import chromadb
 from chromadb.config import Settings
+from llama_cloud import SentenceSplitter
 from llama_index.core.schema import Document as LlamaDocument, TextNode, NodeWithScore, QueryBundle
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core import VectorStoreIndex
@@ -27,6 +28,12 @@ class ChatHistoryService:
         self.chroma_client = chroma_client
         self._embedding_model = embedding_model 
         self.chat_history_collection_name = "chat_history_collection"
+        CHROMA_CHAT_HISTORY_CHUNK_SIZE = 4096
+
+        self.node_parser = SentenceSplitter(
+            chunk_size=CHROMA_CHAT_HISTORY_CHUNK_SIZE,
+            chunk_overlap=0 
+        )
         
         # 直接在 __init__ 中准备索引，而不是依赖 IndexerService
         self._vector_store = ChromaVectorStore(
@@ -53,7 +60,8 @@ class ChatHistoryService:
             index = VectorStoreIndex.from_vector_store(
                 vector_store=self._vector_store,
                 embed_model=self._embedding_model,
-                storage_context=storage_context
+                storage_context=storage_context,
+                transformations=[self.node_parser]
             )
             logger.info(f"Chat history index object loaded/reconstructed from ChromaDB collection '{self.chat_history_collection_name}'.")
             return index
