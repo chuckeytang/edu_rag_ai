@@ -79,7 +79,7 @@ class IndexerService:
         根据元数据过滤器删除文档。
         """
         # 在这里，我们将使用你提供的具体知识库ID
-        knowledge_base_id = "kb-6afe3b11148d7b69"
+        knowledge_base_id = "kb-4921c8e76f8463c1"
         
         logger.info(f"Attempting to delete documents from '{knowledge_base_id}' with filters: {filters}")
         
@@ -109,7 +109,7 @@ class IndexerService:
         更新现有文档的元数据。
         """
         # 在这里，我们将使用你提供的具体知识库ID
-        knowledge_base_id = "kb-6afe3b11148d7b69"
+        knowledge_base_id = "kb-4921c8e76f8463c1"
         
         logger.info(f"Performing metadata update for doc_id: {doc_id} in KB '{knowledge_base_id}' with payload: {metadata_update_payload}")
         
@@ -158,7 +158,7 @@ class IndexerService:
 # 重新设计的 add_public_acl_to_material 方法
 # 根据这个新方案，你的 indexer_service.py 中的 add_public_acl_to_material 方法应该被重写，它的核心职责变为调用 volcano_rag_service 来完成跨知识库的文档导入。
         # 在这里，我们将使用你提供的具体知识库ID
-        knowledge_base_id = "kb-6afe3b11148d7b69"
+        knowledge_base_id = "kb-4921c8e76f8463c1"
         
         task_status = "error"
         message = f"An unexpected error occurred while publishing material {material_id}."

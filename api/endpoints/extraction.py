@@ -45,12 +45,11 @@ async def extract_metadata_endpoint(
             file_key=request.file_key, 
             text_content=request.content,
             is_public=request.is_public,
-            # --- 传递处理后的用户上下文信息 ---
             user_provided_clazz=request.user_provided_clazz,       
             user_provided_subject=request.user_provided_subject,     
             user_provided_exam=request.user_provided_exam,        
-            user_provided_level=processed_levels,       # 使用经过处理的列表
-            subscribed_subjects=processed_subscribed_subjects # 使用经过处理的列表
+            user_provided_level=processed_levels,  
+            subscribed_subjects=processed_subscribed_subjects
         )
         return metadata
     except ValueError as e:

@@ -127,5 +127,5 @@ class RagConfig(BaseModel):
             llm_max_retries=3,
             retry_base_delay=1.0,
             citation_similarity_threshold=0.3,
-            knowledge_base_id="kb-6afe3b11148d7b69",
+            knowledge_base_id="kb-4921c8e76f8463c1",
         )
