@@ -57,6 +57,16 @@ class IndexerService:
         
         # 你的逻辑已经将所有数据准备在了一个字典中，所以这里只需要直接使用它们
         
+        indexing_metadata = {
+            "url": url,
+            "doc_id": doc_id,
+            "doc_name": doc_name,
+            "doc_type": doc_type,
+            "knowledge_base_id": knowledge_base_id,
+            "meta": meta
+        }
+        logger.info(f"Preparing to index document with the following metadata: {indexing_metadata}")
+        
         try:
             # 调用火山引擎服务进行上传
             result = await self.volcano_rag_service.import_document_url(
