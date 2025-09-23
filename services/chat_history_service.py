@@ -60,8 +60,7 @@ class ChatHistoryService:
             index = VectorStoreIndex.from_vector_store(
                 vector_store=self._vector_store,
                 embed_model=self._embedding_model,
-                storage_context=storage_context,
-                transformations=[self.node_parser]
+                storage_context=storage_context
             )
             logger.info(f"Chat history index object loaded/reconstructed from ChromaDB collection '{self.chat_history_collection_name}'.")
             return index
@@ -93,8 +92,8 @@ class ChatHistoryService:
         )
             
         try:
-            # 直接使用内部的 index 对象来插入节点，不再通过 IndexerService
-            self._index.insert(doc)
+            nodes = self.node_parser.get_nodes_from_documents([doc])
+            self._index.insert_nodes(nodes)
             logger.info(f"Successfully added chat message '{doc.id_}' to ChromaDB.")
         except Exception as e:
             logger.error(f"Failed to add chat message '{doc.id_}' to ChromaDB: {e}", exc_info=True)
