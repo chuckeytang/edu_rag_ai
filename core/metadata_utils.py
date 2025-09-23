@@ -11,10 +11,17 @@ def prepare_metadata_for_storage(metadata: Dict[str, Any]) -> Dict[str, Any]:
     因为火山引擎知识库的 user_data 字段是一个 JSON 字符串，
     我们只需确保元数据是可序列化的，而不需要特殊的字符串转换。
     """
-    # 在这里，我们不再进行任何特殊的字符串转换，因为 json.dumps() 会处理列表。
-    # 为了保持函数的完整性，我们只返回一个副本，并打印日志。
-    storage_ready_metadata = metadata.copy()
-    logger.debug("Metadata is prepared for storage. No special conversion needed for JSON format.")
-    return storage_ready_metadata
+    storage_ready_metadata = {}
+    for key, value in metadata.items():
+        if isinstance(value, (list, dict)):
+            # 序列化列表或字典为JSON字符串
+            try:
+                storage_ready_metadata[key] = json.dumps(value, ensure_ascii=False)
+            except TypeError as e:
+                logger.error(f"Failed to serialize metadata key '{key}': {e}")
+                storage_ready_metadata[key] = str(value) # 降级为字符串
+        else:
+            storage_ready_metadata[key] = value
 
-# reconstruct_metadata_from_storage 方法已被移除，因为它仅用于 ChromaDB
+    logger.debug("Metadata is prepared for storage.")
+    return storage_ready_metadata

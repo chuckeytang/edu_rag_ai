@@ -420,7 +420,6 @@ class QueryService:
 
         # --- 构建最终的 metadata ---
         final_metadata = {}
-        # 核心修改点：不进行去重，直接使用 rag_sources_info
         final_metadata["rag_sources"] = rag_sources_info 
 
         if final_referenced_material_ids:
