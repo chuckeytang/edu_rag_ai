@@ -169,6 +169,7 @@ class VolcanoEngineRagService(Service):
                                  rerank_switch: bool = True,
                                  filters: Optional[Dict[str, Any]] = None,
                                  dense_weight: float = 0.5) -> List[Dict[str, Any]]:
+        
         logger.info(f"Retrieving for query '{query_text[:50]}...' from knowledge base '{knowledge_base_id}'.")
         
         # 1. 初始化 payload

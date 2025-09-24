@@ -124,12 +124,23 @@ class QueryService:
         
         # --- 流程2: 异步并行调用火山引擎检索API ---
         retrieve_tasks = []
+        # 构建文档过滤器
+        filters = {}
+        if request.target_file_ids:
+            logger.info(f"Applying doc_id filter: {request.target_file_ids}")
+            filters = {
+                "op": "must",
+                "field": "doc_id",
+                "conds": request.target_file_ids
+            }
+
         for kb_id in knowledge_base_ids_to_query:
             task = self.volcano_rag_service.retrieve_documents(
                 query_text=request.question,
                 knowledge_base_id=kb_id,
                 limit=final_top_k,
-                rerank_switch=True, 
+                rerank_switch=True,
+                filters=filters
             )
             retrieve_tasks.append(task)
         

@@ -83,10 +83,10 @@ class MCPService:
                     logger.info(f"Function call 'query_exam_questions' detected. Performing RAG recall for topic: {topic}")
                     
                     try:
-                        # ⚠️ 关键改动：调用新的 VolcanoEngineRagService
+                        # 调用新的 VolcanoEngineRagService
                         retrieved_chunks: List[Dict[str, Any]] = await self.volcano_rag_service.retrieve_documents(
                             query_text=user_question, 
-                            knowledge_base_id="paper_cut_collection", # ⚠️ 假设这是 PaperCut 对应的知识库ID
+                            knowledge_base_id="paper_cut_collection", # PaperCut 对应的知识库ID
                             limit=10,
                             rerank_switch=True # 火山引擎的重排通常是开启的
                         )
