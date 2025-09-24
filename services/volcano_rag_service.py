@@ -171,6 +171,7 @@ class VolcanoEngineRagService(Service):
                                  dense_weight: float = 0.5) -> List[Dict[str, Any]]:
         logger.info(f"Retrieving for query '{query_text[:50]}...' from knowledge base '{knowledge_base_id}'.")
         
+        # 1. 初始化 payload
         payload = {
             "resource_id": knowledge_base_id,
             "query": query_text,
@@ -178,12 +179,17 @@ class VolcanoEngineRagService(Service):
             "dense_weight": dense_weight,
             "post_processing": {
                 "rerank_switch": rerank_switch
-            }
+            },
+            "query_param": {}
         }
         
+        # 2. 如果存在 filters，将其作为 doc_filter 添加到 query_param 中
         if filters:
-            payload["filters"] = filters
-        
+            payload["query_param"]["doc_filter"] = filters
+         
+        # 3. 打印最终的 payload 以便调试
+        logger.info(f"Final retrieval payload: {json.dumps(payload, indent=2)}")
+
         try:
             response_data = await self._async_make_request("SearchKnowledge", {}, payload)
             
