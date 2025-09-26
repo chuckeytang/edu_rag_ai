@@ -92,8 +92,11 @@ class DocumentOssService:
             base_metadata_payload = request.metadata.model_dump()
             base_metadata_payload['file_key'] = file_key
 
-            base_metadata_payload.pop('accessible_to', None)
-            base_metadata_payload.pop('level_list', None) 
+            # 提取并清理不需要作为普通字符串元数据导入的字段
+            accessible_to_list = base_metadata_payload.pop('accessible_to', None) or []
+            level_list = base_metadata_payload.pop('level_list', None) 
+            base_metadata_payload.pop('file_name', None) # file_name 作为 doc_name
+            base_metadata_payload.pop('file_key', None)  # file_key 已在上方使用
             
             # 3. 生成可导入的 URL
             self.task_manager.update_progress(task_id, 10, "Generating temporary URL from OSS...")
@@ -133,6 +136,28 @@ class DocumentOssService:
             if final_document_payload["doc_type"] == 'jpg':
                 final_document_payload["doc_type"] = 'jpeg'
             
+            # 1. 添加 accessible_to (权限控制字段)
+            if accessible_to_list:
+                final_document_payload["meta"].append({
+                    "field_name": "accessible_to",
+                    # 明确指定类型为 list<string>
+                    "field_type": "list<string>", 
+                    # 直接传入列表
+                    "field_value": accessible_to_list 
+                })
+                logger.debug(f"Added accessible_to meta: {accessible_to_list}")
+
+            # 2. 添加 level_list (等级列表)
+            if level_list:
+                final_document_payload["meta"].append({
+                    "field_name": "level_list",
+                    # 明确指定类型为 list<string>
+                    "field_type": "list<string>", 
+                    # 直接传入列表
+                    "field_value": level_list 
+                })
+                logger.debug(f"Added level_list meta: {level_list}")
+                
             # 将自定义元数据转换为火山引擎的 "meta" 格式
             for key, value in base_metadata_payload.items():
                 if key not in ["file_name", "file_key", "accessible_to", "creation_date", "document_type"] and value is not None:

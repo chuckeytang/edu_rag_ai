@@ -17,6 +17,7 @@ from llama_index.core.schema import Document
 from models.schemas import (
     DeleteByMetadataRequest,
     TaskStatus,
+    UpdateMetadataRequest,
     UploadFromTextRequest,
     UploadFromOssRequest,
 )
@@ -77,8 +78,42 @@ async def upload_from_oss(request: UploadFromOssRequest,
     logger.info(f"Task {task_id} successfully scheduled.")
     return initial_status
 
-# --- 元数据更新与发布（已移除） ---
-# 由于元数据更新和权限发布逻辑已不再适用，相关的 API 和后台任务被移除。
+@router.post("/update-metadata", summary="[同步操作] 通知 RAG 服务更新文档元数据（例如权限）")
+async def notify_metadata_update(
+    request: UpdateMetadataRequest,
+    indexer_service: IndexerService = Depends(get_indexer_service)
+):
+    """
+    接收来自 Java 后端的指令，更新指定文档的元数据。这是一个同步操作。
+    """
+    logger.info(f"Received request to update metadata for doc_id: {request.doc_id}")
+    
+    # 1. 映射 Pydantic 模型到 IndexerService 需要的 List[Dict]
+    # Pydantic 模型的 model_dump 方法会处理好嵌套结构
+    # 确保 Python 端的 UpdateMetadataRequest 中的 meta_updates 字段使用了 List[VolcanoMetaField]
+    meta_updates_dicts = [
+        meta_field.model_dump(exclude_none=True) 
+        for meta_field in request.meta_updates
+    ]
+
+    try:
+        # 2. 直接调用 IndexerService 中的元数据更新方法
+        result = await indexer_service.update_document_meta(
+            doc_id=request.doc_id,
+            knowledge_base_id=request.knowledge_base_id,
+            meta_updates=meta_updates_dicts
+        )
+        
+        if result["status"] == "error":
+            # 如果 IndexerService 返回了错误，向上抛出 HTTP 异常
+            raise HTTPException(status_code=500, detail=result["message"])
+            
+        return result
+        
+    except Exception as e:
+        logger.error(f"Metadata update failed for doc {request.doc_id}: {e}", exc_info=True)
+        # 捕获所有异常并返回 500 错误
+        raise HTTPException(status_code=500, detail=f"Failed to update metadata: {str(e)}")
 
 @router.post("/delete-by-metadata", summary="[同步操作] 根据元数据删除文档")
 def delete_by_metadata(request: DeleteByMetadataRequest,

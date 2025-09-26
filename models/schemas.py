@@ -152,11 +152,20 @@ class UploadFromOssRequest(BaseModel):
         description="RAG 配置，用于文档索引阶段的参数，例如 chunk_size。"
     )
 
+# Volcano API 的元数据格式
+class VolcanoMetaField(BaseModel):
+    field_name: str
+    field_type: str
+    field_value: Any # 可以是 string, bool, list<string> 等
+
 class UpdateMetadataRequest(BaseModel):
-    material_id: int = Field(..., description="The ID of the material to update.")
-    knowledge_base_id: Optional[str] = Field(None)
-    metadata: RAGMetadata = Field(..., description="The new metadata payload.")
-    rag_config: Optional[RagConfig] = Field(None, description="可选的 RAG 配置，用于文档索引阶段的参数，例如 chunk_size。")
+    """
+    用于从 Java 端通知 Python RAG 服务更新文档元数据（例如权限）的请求 DTO。
+    """
+    doc_id: str = Field(..., description="火山知识库中的文档 ID。")
+    meta_updates: List[VolcanoMetaField] = Field(..., description="要更新的元数据字段列表。")
+    knowledge_base_id: str
+    rag_config: RagConfig
 
 class UpdateMetadataResponse(BaseModel):
     message: str

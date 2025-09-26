@@ -140,44 +140,37 @@ class IndexerService:
             logger.error(message, exc_info=True)
             return {"status": "error", "message": message}
             
-    def add_public_acl_to_material(self, material_id: int, knowledge_base_id: str, rag_config: Optional[RagConfig] = None) -> dict:
+    async def update_document_meta(self, 
+                             doc_id: str, 
+                             knowledge_base_id: str, 
+                             meta_updates: List[Dict[str, Any]]) -> dict:
         """
-        为已存在的私有文档添加公共权限。
-        此逻辑不再适用，需要重新设计。
+        通用元数据更新方法，直接调用 VolcanoEngineRagService。
         """
-
-#         新架构中的权限管理方案
-# 要在新架构中实现“为文档添加公共权限”这个功能，你需要重新设计你的工作流。最佳实践是使用两个独立的知识库来模拟不同的权限层级：
-
-# 私有知识库：只包含你的私有文档，访问权限严格受限。
-
-# 公共知识库：只包含可以公开访问的文档。
-
-# 有了这两个知识库，你的 add_public_acl_to_material 方法的逻辑将彻底改变：
-
-# 旧逻辑：在同一个 ChromaDB Collection 中为文档创建一个带有不同元数据的副本。
-
-# 新逻辑：将一个文档从“私有”状态转为“公共”状态，意味着你需要将该文档从私有知识库导入到公共知识库。
-
-# 这要求你的后端服务能够：
-
-# 获取文档内容：首先从你的 OSS 或其他存储中获取原始文档的文件 URL。
-
-# 调用导入 API：调用火山引擎的文档导入 API，将该文件的 URL 提交到公共知识库中。
-
-# 重新设计的 add_public_acl_to_material 方法
-# 根据这个新方案，你的 indexer_service.py 中的 add_public_acl_to_material 方法应该被重写，它的核心职责变为调用 volcano_rag_service 来完成跨知识库的文档导入。
-        # 在这里，我们将使用你提供的具体知识库ID
-        knowledge_base_id = "kb-a026f6f25e1b2a25"
-        
-        task_status = "error"
-        message = f"An unexpected error occurred while publishing material {material_id}."
-
-        logger.warning("The logic for 'add_public_acl_to_material' needs a major redesign.")
-        logger.warning("Volcano Engine manages permissions at the knowledge base level, not per document.")
-        logger.warning("You might need a public knowledge base and a private one, and this method would handle cross-base document re-import.")
-        
-        return {
-            "message": "Functionality is deprecated. Please redesign based on Volcano Engine's permission model.",
-            "status": "not_implemented",
-        }
+        try:
+            logger.info(f"Preparing to update meta for doc {doc_id} in KB {knowledge_base_id}. Meta Updates: {meta_updates}")
+            # 2. 调用火山引擎更新 API
+            response = await self.volcano_rag_service.update_document_meta(
+                knowledge_base_id=knowledge_base_id,
+                doc_id=doc_id,
+                meta_updates=meta_updates
+            )
+            
+            if response.get("code") == 0:
+                return {
+                    "message": f"Successfully updated meta for doc {doc_id}.",
+                    "status": "success",
+                    "doc_id": doc_id
+                }
+            else:
+                return {
+                    "message": f"Volcano API failed to update meta: {response.get('message')}",
+                    "status": "error",
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to update document meta for doc {doc_id}: {e}", exc_info=True)
+            return {
+                "message": f"An API error occurred: {str(e)}",
+                "status": "error",
+            }

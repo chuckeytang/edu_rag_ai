@@ -1,7 +1,7 @@
 # api/api_v1.py
 from fastapi import APIRouter
 
-from api.endpoints import chat_history, extraction, queries, uploads, config, mcp
+from api.endpoints import chat_history, extraction, queries, uploads, config, mcp, debug_index
 
 api_router = APIRouter()
 
@@ -27,4 +27,8 @@ api_router.include_router(
 
 api_router.include_router(
     mcp.router, prefix="/mcp", tags=["mcp"]
+)
+
+api_router.include_router(
+    debug_index.router, prefix="/debug", tags=["debug"]
 )

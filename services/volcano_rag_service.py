@@ -67,9 +67,90 @@ class VolcanoEngineRagService(Service):
             "DeleteDocument": ApiInfo("POST", "/api/knowledge/collection/delete_document", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
             "ImportDocumentUrl": ApiInfo("POST", "/api/knowledge/doc/add", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
             "Ping": ApiInfo("GET", "/api/knowledge/ping", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
+            "UpdateDocumentMeta": ApiInfo("POST", "/api/knowledge/doc/update_meta", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
+            "ListKnowledgePoints": ApiInfo("POST", "/api/knowledge/point/list", {}, {}, {'Accept': 'application/json', 'Content-Type': 'application/json'}),
         }
         return api_info
 
+
+    async def list_knowledge_points(self, 
+                                    knowledge_base_id: str,
+                                    doc_ids: Optional[List[str]] = None,
+                                    limit: int = 100,
+                                    offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        调用 /api/knowledge/point/list 接口获取知识库中的切片列表及其完整元数据。
+        """
+        logger.info(f"Listing knowledge points for KB '{knowledge_base_id}'. Doc IDs: {doc_ids}, Limit: {limit}")
+
+        payload = {
+            "resource_id": knowledge_base_id,
+            "limit": limit,
+            "offset": offset
+        }
+        
+        if doc_ids:
+            payload["doc_ids"] = doc_ids # 筛选文档 ID
+            
+        try:
+            response_data = await self._async_make_request("ListKnowledgePoints", {}, payload)
+            
+            point_list = response_data.get("data", {}).get("point_list", [])
+            
+            mapped_results = []
+            for point in point_list:
+                doc_info = point.get('doc_info', {})
+                doc_meta_str = doc_info.get('doc_meta', '[]')
+                
+                # 尝试解析 doc_meta 字符串
+                custom_metadata = {}
+                try:
+                    # doc_meta 是一个包含 {"field_name": ..., "field_value": ...} 列表的字符串
+                    doc_meta_list = json.loads(doc_meta_str)
+                    for item in doc_meta_list:
+                        # 转换成 {field_name: field_value} 的字典格式
+                        custom_metadata[item['field_name']] = item['field_value']
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to decode doc_meta for point {point.get('point_id')}")
+
+                mapped_results.append({
+                    "content": point.get('content'),
+                    "point_id": point.get('point_id'),
+                    "doc_id": doc_info.get('doc_id'),
+                    "doc_name": doc_info.get('doc_name'),
+                    "doc_type": doc_info.get('doc_type'),
+                    "source": doc_info.get('source'),
+                    "process_time": point.get('process_time'),
+                    "metadata": custom_metadata
+                })
+
+            return mapped_results
+
+        except Exception as e:
+            logger.error(f"Failed to list knowledge points from Volcano Engine: {e}")
+            return []
+
+    async def update_document_meta(self, 
+                               knowledge_base_id: str, 
+                               doc_id: str, 
+                               meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        调用火山引擎 /api/knowledge/doc/update_meta 接口更新文档的元数据。
+        """
+        logger.info(f"Updating meta for doc '{doc_id}' in KB '{knowledge_base_id}' with updates: {meta_updates}")
+
+        payload = {
+            "resource_id": knowledge_base_id,
+            "doc_id": doc_id,
+            "meta": meta_updates # 传入要更新的元数据列表
+        }
+        
+        try:
+            return await self._async_make_request("UpdateDocumentMeta", {}, payload)
+        except Exception as e:
+            logger.error(f"Error during meta update for doc '{doc_id}': {e}", exc_info=True)
+            raise e
+    
     async def _async_make_request(self, api: str, params: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
         if not (api in self.api_info):
             raise Exception("no such api")
