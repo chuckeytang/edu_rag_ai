@@ -21,15 +21,17 @@ from services.mcp_service import MCPService
 from services.oss_service import OssService
 from services.task_manager_service import TaskManagerService
 
-# 新增：火山引擎服务
+# 引入抽象接口和具体实现
+from services.abstract_kb_service import AbstractKnowledgeBaseService
 from services.volcano_rag_service import VolcanoEngineRagService
+from services.bailian_rag_service import BailianRagService
 
 # 保留 LLM 和 Embedding 依赖，但重新组织
 from llama_index.embeddings.dashscope import DashScopeEmbedding, DashScopeTextEmbeddingModels
 from llama_index.llms.dashscope import DashScope as LlamaDashScope, DashScopeGenerationModels
 from llama_index.core.llms import LLM as LlamaLLM, ChatMessage
 from llama_index.llms.openai_like import OpenAILike
-from services.llm.llm_service import DashScopeWithTools # 保留这个增强的 LLM 服务
+from services.llm.llm_service import DashScopeWithTools
 
 # 保留 ChromaDB 依赖，仅用于聊天历史
 import chromadb
@@ -60,6 +62,7 @@ def update_rag_config(new_config_json_str: str):
 # --- ChromaDB 和 Embedding 依赖 (仅用于聊天历史) ---
 def get_chroma_client():
     """获取 ChromaDB 客户端的依赖"""
+    global _global_chroma_client_instance
     if _global_chroma_client_instance is None:
         logger.warning("ChromaDB client requested but not yet globally initialized. Attempting lazy initialization.")
         initialize_global_chroma_client()
@@ -79,8 +82,12 @@ def initialize_global_chroma_client():
         except Exception as e:
             logger.critical(f"FATAL: Failed to initialize global ChromaDB PersistentClient: {e}", exc_info=True)
             raise
-    else:
-        logger.info("Global ChromaDB PersistentClient already initialized.")
+
+@lru_cache(maxsize=1)
+def get_oss_service() -> OssService:
+    """提供 OssService 的单例实例"""
+    logger.info("Initializing OssService...")
+    return OssService()
 
 @lru_cache(maxsize=1)
 def get_embedding_model():
@@ -153,28 +160,69 @@ def get_dashscope_llm_for_function_calling():
         streaming=False
     )
 
-# --- VolcanoEngine RAG 服务 ---
 @lru_cache(maxsize=1)
-def get_volcano_rag_service() -> VolcanoEngineRagService:
-    """提供 VolcanoEngineRagService 的单例实例"""
-    logger.info("Initializing VolcanoEngineRagService...")
-    return VolcanoEngineRagService()
+def get_ai_extraction_service(
+    oss_service: OssService = Depends(get_oss_service) 
+) -> AIExtractionService:
+    """提供 AIExtractionService 的单例实例"""
+    logger.info("Initializing AIExtractionService...")
+    return AIExtractionService(
+        llm_metadata_model=get_deepseek_llm_metadata(),
+        llm_flashcard_model=get_deepseek_llm_flashcard(),
+        oss_service_instance=oss_service 
+    )
+
+@lru_cache(maxsize=1)
+def get_task_manager_service() -> TaskManagerService:
+    """提供 TaskManagerService 的单例实例"""
+    logger.info("Initializing TaskManagerService...")
+    return TaskManagerService()
+
+@lru_cache(maxsize=1)
+def get_document_service() -> DocumentService:
+    """提供 DocumentService 的单例实例"""
+    logger.info("Initializing DocumentService...")
+    return DocumentService()
+
+@lru_cache(maxsize=1)
+def get_document_oss_service() -> DocumentOssService:
+    """提供 DocumentOssService 的单例实例"""
+    logger.info("Initializing DocumentOssService...")
+    return DocumentOssService(
+        indexer_service=get_indexer_service(),
+        oss_service_instance=get_oss_service(),
+        task_manager_service=get_task_manager_service()
+    )
+# --- 知识库服务抽象工厂 (核心改造) ---
+
+@lru_cache(maxsize=1)
+def get_abstract_kb_service() -> AbstractKnowledgeBaseService:
+    """
+    根据配置实例化并返回具体的知识库服务（Volcano 或 Bailian），
+    所有业务层都将依赖这个抽象接口。
+    """
+    # 假设 settings 中有一个 KB_SERVICE_VENDOR 字段，例如 'VOLCANO' 或 'BAILIAN'
+    vendor = getattr(settings, 'KB_SERVICE_VENDOR', 'VOLCANO').upper()
+    logger.info(f"Initializing Knowledge Base Service for vendor: {vendor}")
+
+    if vendor == 'BAILIAN':
+        return BailianRagService()
+    elif vendor == 'VOLCANO':
+        # VolcanoEngineRagService 实例保持原样，但作为抽象接口返回
+        return VolcanoEngineRagService()
+    else:
+        raise ValueError(f"Unknown KB_SERVICE_VENDOR: {vendor}. Must be 'VOLCANO' or 'BAILIAN'.")
 
 @lru_cache(maxsize=1)
 def get_indexer_service() -> IndexerService:
-    """提供 IndexerService 的单例实例"""
+    """提供 IndexerService 的单例实例，注入抽象 KB Service"""
     logger.info("Initializing IndexerService...")
     rag_config = get_rag_config()
-    # 注入新的火山引擎服务
+    # 注入抽象知识库服务
     return IndexerService(
         rag_config=rag_config,
-        volcano_rag_service=get_volcano_rag_service()
+        kb_service=get_abstract_kb_service() # 更改：使用抽象接口
     )
-
-# RetrievalService 已废弃，因为火山引擎负责召回和重排
-# @lru_cache(maxsize=1)
-# def get_retrieval_service() -> RetrievalService:
-#     ...
 
 @lru_cache(maxsize=1)
 def get_chat_history_service() -> ChatHistoryService:
@@ -196,19 +244,12 @@ def get_query_service() -> QueryService:
         embedding_model=get_embedding_model(),
         indexer_service=get_indexer_service(),
         chat_history_service=get_chat_history_service(),
-        volcano_rag_service=get_volcano_rag_service(), 
+        kb_service=get_abstract_kb_service(),
         rag_config=rag_config, 
     )
 
 @lru_cache(maxsize=1)
-def get_oss_service() -> OssService:
-    """提供 OssService 的单例实例"""
-    logger.info("Initializing OssService...")
-    return OssService()
-
-@lru_cache(maxsize=1)
 def get_ai_extraction_service(
-    # 使用 Depends 注入 OssService 实例
     oss_service: OssService = Depends(get_oss_service) 
 ) -> AIExtractionService:
     """提供 AIExtractionService 的单例实例"""
@@ -219,12 +260,6 @@ def get_ai_extraction_service(
         # 正确传递 oss_service 实例
         oss_service_instance=oss_service 
     )
-
-@lru_cache(maxsize=1)
-def get_oss_service() -> OssService:
-    """提供 OSSService 的单例实例"""
-    logger.info("Initializing OssService...")
-    return OssService()
 
 @lru_cache(maxsize=1)
 def get_task_manager_service() -> TaskManagerService:
@@ -254,5 +289,5 @@ def get_mcp_service() -> MCPService:
     logger.info("Initializing MCPService...")
     return MCPService(
         llm_for_function_calling=get_dashscope_llm_for_function_calling(),
-        volcano_rag_service=get_volcano_rag_service() # 注入新的火山引擎服务
+        kb_service=get_abstract_kb_service() # 更改：使用抽象接口
     )

@@ -7,13 +7,11 @@ from memory_profiler import profile
 import re
 import numpy as np
 
-# 新增的导入，用于替代 LlamaIndex 的概念
-from services.volcano_rag_service import VolcanoEngineRagService
+from services.abstract_kb_service import AbstractKnowledgeBaseService
 from llama_index.core import PromptTemplate
 from services.indexer_service import IndexerService
 from services.chat_history_service import ChatHistoryService
 from llama_index.core.llms import ChatMessage, MessageRole
-from llama_index.core.base.llms.types import ChatResponse, ChatResponseGen
 from llama_index.core.embeddings import BaseEmbedding
 
 # 定义截断长度
@@ -39,16 +37,15 @@ class QueryService:
                  llm: Any,
                  embedding_model: BaseEmbedding,
                  indexer_service: IndexerService,
-                 volcano_rag_service: VolcanoEngineRagService, # 新增：注入火山引擎服务
+                 kb_service: AbstractKnowledgeBaseService, 
                  rag_config: RagConfig, 
                  chat_history_service: Optional[ChatHistoryService] = None):
-        """
-        构造函数 - 切换到火山引擎 RAG 服务
-        """
+        """构造函数 - 切换到抽象 RAG 服务"""
         self.llm = llm             
         self.embedding_model = embedding_model              
         self._indexer_service = indexer_service
-        self.volcano_rag_service = volcano_rag_service 
+        # 使用通用名称 self.kb_service
+        self.kb_service = kb_service 
         self._chat_history_service = chat_history_service
         self.rag_config = rag_config
 
@@ -107,17 +104,18 @@ class QueryService:
         final_referenced_material_ids = []
         generated_title = "" 
 
-        # --- 流程1: 统一调用火山引擎的检索服务 ---
+        # --- 流程1: 统一调用抽象服务的检索服务 ---
         knowledge_base_ids_to_query = []
+        default_index_id = settings.BAILIAN_INDEX_ID if hasattr(settings, 'BAILIAN_INDEX_ID') else settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID
+        
         if query_type == "PaperCut":
-            # 这里你需要为 "PaperCut" 定义一个对应的火山引擎知识库ID
-            knowledge_base_ids_to_query = [settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID] # 示例
+            knowledge_base_ids_to_query = [default_index_id]
             logger.info("Query type is 'PaperCut', retrieving from specific knowledge base.")
         elif query_type:
-            knowledge_base_ids_to_query = [settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID] 
+            knowledge_base_ids_to_query = [default_index_id] 
             logger.info(f"Query type is '{query_type}', retrieving from knowledge base.")
         else:
-            knowledge_base_ids_to_query = [settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID] 
+            knowledge_base_ids_to_query = [default_index_id] 
             logger.info("Query type not specified, retrieving from default knowledge base.")
         
         final_top_k = request.similarity_top_k if request.similarity_top_k is not None else rag_config.retrieval_top_k
@@ -127,15 +125,13 @@ class QueryService:
         # 构建文档过滤器
         filters = {}
         if request.target_file_ids:
-            logger.info(f"Applying doc_id filter: {request.target_file_ids}")
-            filters = {
-                "op": "must",
-                "field": "doc_id",
-                "conds": request.target_file_ids
-            }
+            logger.info(f"Applying doc_id filter: {request.target_file_ids}. Note: Filter support depends on underlying KB implementation.")
+            # 简化 filters 示例: 
+            filters = {"doc_id_list": request.target_file_ids} # 传递简化后的过滤器，由底层服务决定如何处理
 
         for kb_id in knowledge_base_ids_to_query:
-            task = self.volcano_rag_service.retrieve_documents(
+            # 调用抽象接口
+            task = self.kb_service.retrieve_documents(
                 query_text=request.question,
                 knowledge_base_id=kb_id,
                 limit=final_top_k,

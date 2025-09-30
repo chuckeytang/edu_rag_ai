@@ -13,6 +13,7 @@ from volcengine.auth.SignerV4 import SignerV4
 from volcengine.base.Request import Request
 
 from core.config import settings
+from services.abstract_kb_service import AbstractKnowledgeBaseService
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,9 @@ class VolcanoEngineRagException(Exception):
         self.message = f"{message}, code:{self.code}，request_id:{self.request_id}"
     def __str__(self):
         return self.message
-
-class VolcanoEngineRagService(Service):
+    
+# 继承抽象接口
+class VolcanoEngineRagService(Service, AbstractKnowledgeBaseService):
     _instance_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
@@ -50,8 +52,7 @@ class VolcanoEngineRagService(Service):
         if sts_token:
             self.set_session_token(session_token=sts_token)
         
-        # ⚠️ 移除有问题的同步 Ping 测试，以解决启动错误
-        logger.info("Volcano Engine RAG service initialized. Ping test skipped.")
+        logger.info("Volcano Engine RAG service initialized. Now conforming to AbstractKnowledgeBaseService interface.")
 
     @staticmethod
     def get_service_info(host, region, scheme, connection_timeout, socket_timeout):
@@ -72,6 +73,141 @@ class VolcanoEngineRagService(Service):
         }
         return api_info
 
+    # 抽象方法实现 1: 导入文档
+    async def import_document_url(self, 
+                                  url: str, 
+                                  doc_name: str, 
+                                  knowledge_base_id: str, 
+                                  doc_id: str, 
+                                  doc_type: str, 
+                                  meta: Optional[List[Dict[str, Any]]] = None # 适配抽象接口
+                                  ) -> Dict[str, Any]:
+        """
+        火山引擎的文档导入接口实现，适配 AbstractKnowledgeBaseService。
+        """
+        logger.info(f"Importing document '{doc_name}' from URL to knowledge base '{knowledge_base_id}'.")
+        
+        payload = {
+            "collection_name": knowledge_base_id,
+            "resource_id": knowledge_base_id,
+            "add_type": "url",
+            "doc_id": doc_id,
+            "doc_name": doc_name,
+            "doc_type": doc_type,
+            "url": url,
+        }
+        
+        if meta:
+            payload["meta"] = meta
+            
+        try:
+            return await self._async_make_request("ImportDocumentUrl", {}, payload)
+        except Exception as e:
+            logger.error(f"Error during API call with payload: {payload}", exc_info=True)
+            raise e
+
+    # 抽象方法实现 2: 删除文档
+    async def delete_document(self, knowledge_base_id: str, doc_id: str) -> Dict[str, Any]:
+        """
+        火山引擎的文档删除接口实现，适配 AbstractKnowledgeBaseService。
+        """
+        logger.info(f"Deleting document '{doc_id}' from knowledge base '{knowledge_base_id}'.")
+        payload = {
+            "resource_id": knowledge_base_id,
+            "doc_id": doc_id,
+        }
+        return await self._async_make_request("DeleteDocument", {}, payload)
+
+    # 抽象方法实现 3: 检索文档 (核心)
+    async def retrieve_documents(self,
+                                 query_text: str,
+                                 knowledge_base_id: str,
+                                 limit: int = 10,
+                                 rerank_switch: bool = True,
+                                 filters: Optional[Dict[str, Any]] = None, # 适配抽象接口
+                                 dense_weight: float = 0.5) -> List[Dict[str, Any]]:
+        """
+        火山引擎的检索接口实现，适配 AbstractKnowledgeBaseService，并支持 filters 传入。
+        """
+        
+        logger.info(f"Retrieving for query '{query_text[:50]}...' from knowledge base '{knowledge_base_id}'.")
+        
+        # 1. 初始化 payload
+        payload = {
+            "resource_id": knowledge_base_id,
+            "query": query_text,
+            "limit": limit,
+            "dense_weight": dense_weight,
+            "post_processing": {
+                "rerank_switch": rerank_switch
+            },
+            "query_param": {}
+        }
+        
+        # 2. 如果存在 filters，将其作为 doc_filter 添加到 query_param 中 (恢复的逻辑)
+        if filters:
+            # filters 预期是 Volcano 引擎支持的结构，例如 {"op": "must", "field": "doc_id", "conds": ["id1", "id2"]}
+            payload["query_param"]["doc_filter"] = filters
+         
+        # 3. 打印最终的 payload 以便调试
+        logger.info(f"Final retrieval payload: {json.dumps(payload, indent=2)}")
+
+        try:
+            response_data = await self._async_make_request("SearchKnowledge", {}, payload)
+            
+            result_list = response_data.get("data", {}).get("result_list", [])
+            logger.info(f"Successfully retrieved {len(result_list)} chunks.")
+
+            mapped_results = []
+            for item in result_list:
+                doc_info = item.get('doc_info', {})
+                user_data_str = doc_info.get('user_data', '{}')
+                try:
+                    user_data = json.loads(user_data_str)
+                except json.JSONDecodeError:
+                    user_data = {"error": "Invalid JSON in user_data"}
+
+                # 保持 Volcano 原始的映射结构
+                mapped_results.append({
+                    "content": item.get('content'),
+                    "score": item.get('score'),
+                    "rerank_score": item.get('rerank_score'),
+                    "source": doc_info.get('doc_name'),
+                    "docId": doc_info.get('doc_id'),
+                    "chunkId": item.get('id'),
+                    "url": doc_info.get('url'),
+                    "user_data": user_data
+                })
+
+            return mapped_results
+
+        except Exception as e:
+            logger.error(f"Failed to retrieve from Volcano Engine RAG: {e}")
+            return []
+
+    # 抽象方法实现 4: 更新元数据
+    async def update_document_meta(self, 
+                               knowledge_base_id: str, 
+                               doc_id: str, 
+                               meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        调用火山引擎 /api/knowledge/doc/update_meta 接口更新文档的元数据，适配 AbstractKnowledgeBaseService。
+        """
+        logger.info(f"Updating meta for doc '{doc_id}' in KB '{knowledge_base_id}' with updates: {meta_updates}")
+
+        payload = {
+            "resource_id": knowledge_base_id,
+            "doc_id": doc_id,
+            "meta": meta_updates # 传入要更新的元数据列表
+        }
+        
+        try:
+            # _async_make_request 是原类中的私有方法，用于进行签名和请求
+            return await self._async_make_request("UpdateDocumentMeta", {}, payload)
+        except Exception as e:
+            logger.error(f"Error during meta update for doc '{doc_id}': {e}", exc_info=True)
+            raise e
+    
 
     async def list_knowledge_points(self, 
                                     knowledge_base_id: str,
@@ -129,28 +265,7 @@ class VolcanoEngineRagService(Service):
         except Exception as e:
             logger.error(f"Failed to list knowledge points from Volcano Engine: {e}")
             return []
-
-    async def update_document_meta(self, 
-                               knowledge_base_id: str, 
-                               doc_id: str, 
-                               meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        调用火山引擎 /api/knowledge/doc/update_meta 接口更新文档的元数据。
-        """
-        logger.info(f"Updating meta for doc '{doc_id}' in KB '{knowledge_base_id}' with updates: {meta_updates}")
-
-        payload = {
-            "resource_id": knowledge_base_id,
-            "doc_id": doc_id,
-            "meta": meta_updates # 传入要更新的元数据列表
-        }
         
-        try:
-            return await self._async_make_request("UpdateDocumentMeta", {}, payload)
-        except Exception as e:
-            logger.error(f"Error during meta update for doc '{doc_id}': {e}", exc_info=True)
-            raise e
-    
     async def _async_make_request(self, api: str, params: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
         if not (api in self.api_info):
             raise Exception("no such api")
@@ -202,104 +317,3 @@ class VolcanoEngineRagService(Service):
                 # 捕获其他任何请求失败异常
                 logger.error(f"Request failed: {e}", exc_info=True)
                 raise VolcanoEngineRagException(1000029, "request_error", str(e))
-
-    async def import_document_url(self, 
-                                  url: str, 
-                                  doc_name: str, 
-                                  knowledge_base_id: str, 
-                                  doc_id: str, # 新增 doc_id 参数
-                                  doc_type: str, # 新增 doc_type 参数
-                                  meta: Optional[List[Dict[str, Any]]] = None # 新增 meta 参数
-                                  ) -> Dict[str, Any]:
-        
-        logger.info(f"Importing document '{doc_name}' from URL to knowledge base '{knowledge_base_id}'.")
-        
-        # 参照火山引擎官方文档 doc/add 的请求参数来构建 payload
-        payload = {
-            "collection_name": knowledge_base_id, # 火山引擎的文档中 collection_name 对应知识库名称
-            "resource_id": knowledge_base_id,
-            "add_type": "url",
-            "doc_id": doc_id,
-            "doc_name": doc_name,
-            "doc_type": doc_type,
-            "url": url,
-        }
-        
-        if meta:
-            payload["meta"] = meta
-            
-        try:
-            # 调用 _async_make_request 并确保 API 名称正确
-            return await self._async_make_request("ImportDocumentUrl", {}, payload)
-        except Exception as e:
-            logger.error(f"Error during API call with payload: {payload}", exc_info=True)
-            raise e
-
-    async def delete_document(self, knowledge_base_id: str, doc_id: str) -> Dict[str, Any]:
-        logger.info(f"Deleting document '{doc_id}' from knowledge base '{knowledge_base_id}'.")
-        payload = {
-            "resource_id": knowledge_base_id,
-            "doc_id": doc_id,
-        }
-        return await self._async_make_request("DeleteDocument", {}, payload)
-
-    async def retrieve_documents(self,
-                                 query_text: str,
-                                 knowledge_base_id: str,
-                                 limit: int = 10,
-                                 rerank_switch: bool = True,
-                                 filters: Optional[Dict[str, Any]] = None,
-                                 dense_weight: float = 0.5) -> List[Dict[str, Any]]:
-        
-        logger.info(f"Retrieving for query '{query_text[:50]}...' from knowledge base '{knowledge_base_id}'.")
-        
-        # 1. 初始化 payload
-        payload = {
-            "resource_id": knowledge_base_id,
-            "query": query_text,
-            "limit": limit,
-            "dense_weight": dense_weight,
-            "post_processing": {
-                "rerank_switch": rerank_switch
-            },
-            "query_param": {}
-        }
-        
-        # 2. 如果存在 filters，将其作为 doc_filter 添加到 query_param 中
-        if filters:
-            payload["query_param"]["doc_filter"] = filters
-         
-        # 3. 打印最终的 payload 以便调试
-        logger.info(f"Final retrieval payload: {json.dumps(payload, indent=2)}")
-
-        try:
-            response_data = await self._async_make_request("SearchKnowledge", {}, payload)
-            
-            result_list = response_data.get("data", {}).get("result_list", [])
-            logger.info(f"Successfully retrieved {len(result_list)} chunks.")
-
-            mapped_results = []
-            for item in result_list:
-                doc_info = item.get('doc_info', {})
-                user_data_str = doc_info.get('user_data', '{}')
-                try:
-                    user_data = json.loads(user_data_str)
-                except json.JSONDecodeError:
-                    user_data = {"error": "Invalid JSON in user_data"}
-
-                mapped_results.append({
-                    "content": item.get('content'),
-                    "score": item.get('score'),
-                    "rerank_score": item.get('rerank_score'),
-                    "source": doc_info.get('doc_name'),
-                    "docId": doc_info.get('doc_id'),
-                    "chunkId": item.get('id'),
-                    "url": doc_info.get('url'),
-                    "user_data": user_data
-                })
-
-            return mapped_results
-
-        except Exception as e:
-            logger.error(f"Failed to retrieve from Volcano Engine RAG: {e}")
-            return []
