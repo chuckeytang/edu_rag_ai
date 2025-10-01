@@ -243,14 +243,20 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             if doc_id_list and isinstance(doc_id_list, list):
                 logger.info(f"Mapping doc_id_list filter for Bailian: {doc_id_list}")
                 
-                # 实现逻辑 AND 过滤（文档必须包含所有标签，即每个 Doc ID 作为一个子分组）
+                # 核心修正：必须对传入的 doc_id 进行清洗，以匹配存储时的标签格式
                 for doc_id in doc_id_list:
-                    # 关键：tags 的值必须是 JSON 字符串形式的列表，且只包含一个 doc_id
+                    
+                    # 关键：对传入的 doc_id 进行清洗，确保与存储时的标签格式一致
+                    sanitized_tag = self._sanitize_tag(str(doc_id)) 
+                    
+                    # 实现逻辑 AND 过滤（文档必须包含所有标签）
                     tag_filter = {
-                        "tags": json.dumps([str(doc_id)])
+                        "tags": json.dumps([sanitized_tag]) # 标签必须是 JSON 字符串列表
                     }
                     bailian_search_filters.append(tag_filter)
                 
+                logger.info(f"Generated Bailian tags filters for Doc ID: {bailian_search_filters}")
+
             else:
                 # 如果传入的不是 doc_id_list 而是其他复杂的 K/V 结构，
                 # 假设它已经是简单的 Bailian 子分组结构，直接作为唯一分组传入。
@@ -267,6 +273,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             query=query_text,
             enable_reranking=rerank_switch, 
             dense_similarity_top_k=limit,
+            search_filters=bailian_search_filters if bailian_search_filters else None # 传入过滤器
         )
         
         # 3. 如果成功生成了 SearchFilters，则添加到 Request 中
