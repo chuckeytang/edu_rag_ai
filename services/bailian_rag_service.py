@@ -251,7 +251,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                     
                     # 实现逻辑 AND 过滤（文档必须包含所有标签）
                     tag_filter = {
-                        "tags": json.dumps([sanitized_tag]) # 标签必须是 JSON 字符串列表
+                        "tags": [sanitized_tag]  # 标签必须是 JSON 字符串列表
                     }
                     bailian_search_filters.append(tag_filter)
                 
