@@ -79,7 +79,6 @@ class DocumentOssService:
         # 1. 去重检查
         if file_key in self.processed_files:
             logger.warning(f"[TASK_ID: {task_id}] Duplicate file key detected: {file_key}")
-            # --- [最终状态] 发现重复文件 ---
             result_payload = {
                 "message": f"This OSS file has already been processed (Original Filename: {self.processed_files[file_key]}).",
                 "file_key": file_key
@@ -90,24 +89,21 @@ class DocumentOssService:
         try:
             # 2. 准备基础元数据
             base_metadata_payload = request.metadata.model_dump()
-            base_metadata_payload['file_key'] = file_key
-
+            
             # 提取并清理不需要作为普通字符串元数据导入的字段
             accessible_to_list = base_metadata_payload.pop('accessible_to', None) or []
             level_list = base_metadata_payload.pop('level_list', None) 
-            base_metadata_payload.pop('file_name', None) # file_name 作为 doc_name
-            base_metadata_payload.pop('file_key', None)  # file_key 已在上方使用
+            base_metadata_payload.pop('file_name', None) 
+            base_metadata_payload.pop('file_key', None) 
             
-            # 3. 生成可导入的 URL
+            # 3. 生成可导入的 URL (逻辑不变)
             self.task_manager.update_progress(task_id, 10, "Generating temporary URL from OSS...")
             
             # 确定存储桶
-            accessible_to_list = request.metadata.accessible_to or []
+            # 注意：此处重新定义了 accessible_to_list，但我们在前面已经初始化并使用了 request.metadata.accessible_to
+            # 为了保证逻辑一致性，使用上面初始化的 accessible_to_list
             target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if "public" in accessible_to_list else settings.OSS_PRIVATE_BUCKET_NAME
             
-            # 调用 OssService 的新方法来生成预签名 URL
-            # 这是一个关键步骤，因为火山引擎需要一个可公开访问的 URL
-            import urllib.parse
             temp_url = self.oss_service.generate_presigned_url(
                 object_key=file_key,
                 bucket_name=target_bucket,
@@ -122,60 +118,51 @@ class DocumentOssService:
             if not re.match(r'^[a-zA-Z_]', cleaned_doc_id):
                 cleaned_doc_id = 'doc_' + cleaned_doc_id
 
-            # 4. 准备火山引擎所需的文档元数据
-            # 火山引擎的doc/add接口只处理一个文件URL，所以我们不再需要处理LlamaDocument的列表
+            # 4. 准备通用文档元数据 (核心改造区域)
+            
+            # 4.1 初始化通用元数据字典
+            generic_metadata = {}
+
+            # 4.2 核心业务列表字段 (直接赋值，不进行供应商格式转换)
+            
+            # 1. 添加 accessible_to (权限控制字段)
+            if accessible_to_list:
+                generic_metadata["accessible_to"] = accessible_to_list 
+                logger.debug(f"Added accessible_to meta: {accessible_to_list}")
+
+            # 2. 添加 level_list (等级列表)
+            if level_list:
+                generic_metadata["level_list"] = level_list
+                logger.debug(f"Added level_list meta: {level_list}")
+                
+            # 4.3 将其他自定义元数据添加到通用字典
+            for key, value in base_metadata_payload.items():
+                # 排除不再需要的或已在上面处理过的字段
+                if key not in ["creation_date", "document_type"] and value is not None:
+                    generic_metadata[key] = value
+
+            # 5. 最终调用 IndexerService 的文档结构
             final_document_payload = {
                 "url": temp_url,
                 "doc_name": display_file_name,
                 "doc_id": cleaned_doc_id, # 使用清理后的 doc_id
                 "doc_type": os.path.splitext(file_key)[1].strip('.').lower(),
-                "meta": []
+                # 传递通用字典，由底层服务（Bailian/Volcano）负责适配
+                "meta": generic_metadata 
             }
 
-            # 根据火山引擎文档，doc_type需要进行特殊处理
+            # 根据火山引擎文档，doc_type需要进行特殊处理 (此处保留，因为它与文档类型强相关)
             if final_document_payload["doc_type"] == 'jpg':
                 final_document_payload["doc_type"] = 'jpeg'
-            
-            # 1. 添加 accessible_to (权限控制字段)
-            if accessible_to_list:
-                final_document_payload["meta"].append({
-                    "field_name": "accessible_to",
-                    # 明确指定类型为 list<string>
-                    "field_type": "list<string>", 
-                    # 直接传入列表
-                    "field_value": accessible_to_list 
-                })
-                logger.debug(f"Added accessible_to meta: {accessible_to_list}")
-
-            # 2. 添加 level_list (等级列表)
-            if level_list:
-                final_document_payload["meta"].append({
-                    "field_name": "level_list",
-                    # 明确指定类型为 list<string>
-                    "field_type": "list<string>", 
-                    # 直接传入列表
-                    "field_value": level_list 
-                })
-                logger.debug(f"Added level_list meta: {level_list}")
-                
-            # 将自定义元数据转换为火山引擎的 "meta" 格式
-            for key, value in base_metadata_payload.items():
-                if key not in ["file_name", "file_key", "accessible_to", "creation_date", "document_type"] and value is not None:
-                    # 注意: field_type 需要根据你创建知识库时的配置来确定
-                    # 这里假设都是string类型，如果你的标签有其他类型，需要做相应判断
-                    final_document_payload["meta"].append({
-                        "field_name": key,
-                        "field_type": "string",
-                        "field_value": str(value)
-                    })
 
             self.task_manager.update_progress(task_id, 30, "Document payload prepared. Indexing...")
 
-            # 5. 调用 IndexerService 进行索引
+            # 6. 调用 IndexerService 进行索引 (逻辑不变)
             logger.info(f"Indexing document '{display_file_name}' into knowledge base '{rag_config.knowledge_base_id}'...")
             
+            # IndexerService 负责将这里的通用 meta 适配给底层 KB
             await self.indexer_service.add_documents_to_index(
-                documents=[final_document_payload], # 传入包含单个文档字典的列表
+                documents=[final_document_payload], 
                 knowledge_base_id=rag_config.knowledge_base_id 
             )
             
@@ -195,8 +182,6 @@ class DocumentOssService:
             self.task_manager.finish_task(task_id, "error", result={"message": str(e)})
             return {"status": "error", "message": str(e)}
         finally:
-            # 清理，由于是URL导入，不再需要本地文件，所以这部分可以精简
-            # 但如果你保留了下载到本地的逻辑，清理是必要的
             pass
 
     def _filter_documents(self, documents: List[LlamaDocument]) -> Tuple[List[LlamaDocument], dict]:

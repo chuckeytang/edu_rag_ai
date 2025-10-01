@@ -54,8 +54,12 @@ class IndexerService:
         try:
             # 调用抽象接口
             result = await self.kb_service.import_document_url(
-                url=url, doc_id=doc_id, doc_name=doc_name, doc_type=doc_type,
-                knowledge_base_id=knowledge_base_id, meta=meta
+                url=url, 
+                doc_id=doc_id, 
+                doc_name=doc_name, 
+                doc_type=doc_type,
+                knowledge_base_id=knowledge_base_id, 
+                meta=meta # 传入通用字典
             )
             logger.info(f"Document '{doc_name}' from URL uploaded successfully. Response: {result}")
             return {"status": "success", "result": result, "file_id": result.get('file_id')}

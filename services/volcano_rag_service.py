@@ -73,6 +73,39 @@ class VolcanoEngineRagService(Service, AbstractKnowledgeBaseService):
         }
         return api_info
 
+    def _adapt_meta_to_volcano_list(self, generic_meta: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        将业务层传递的通用元数据字典转换为火山引擎 API 期望的列表格式。
+        通用格式: {'key': 'value'} 或 {'key': ['v1', 'v2']}
+        火山格式: [{'field_name': 'key', 'field_type': 'string'/'list<string>', 'field_value': value}]
+        """
+        if not generic_meta:
+            return []
+
+        volcano_meta_list = []
+        for key, value in generic_meta.items():
+            if value is None:
+                continue
+
+            field_type = "string"
+            field_value = value
+
+            if isinstance(value, list):
+                # 假设列表字段需要明确声明为 list<string>
+                field_type = "list<string>"
+                field_value = value
+            elif isinstance(value, (int, float, bool)):
+                # 简单类型转换为字符串，以便兼容
+                field_value = str(value)
+            
+            volcano_meta_list.append({
+                "field_name": key,
+                "field_type": field_type,
+                "field_value": field_value
+            })
+            
+        return volcano_meta_list
+    
     # 抽象方法实现 1: 导入文档
     async def import_document_url(self, 
                                   url: str, 
@@ -80,13 +113,16 @@ class VolcanoEngineRagService(Service, AbstractKnowledgeBaseService):
                                   knowledge_base_id: str, 
                                   doc_id: str, 
                                   doc_type: str, 
-                                  meta: Optional[List[Dict[str, Any]]] = None # 适配抽象接口
+                                  meta: Optional[Dict[str, Any]] = None 
                                   ) -> Dict[str, Any]:
         """
         火山引擎的文档导入接口实现，适配 AbstractKnowledgeBaseService。
         """
         logger.info(f"Importing document '{doc_name}' from URL to knowledge base '{knowledge_base_id}'.")
         
+        # 核心改造点：将通用字典转换为火山引擎需要的列表格式
+        volcano_meta_list = self._adapt_meta_to_volcano_list(meta)
+
         payload = {
             "collection_name": knowledge_base_id,
             "resource_id": knowledge_base_id,
@@ -97,8 +133,9 @@ class VolcanoEngineRagService(Service, AbstractKnowledgeBaseService):
             "url": url,
         }
         
-        if meta:
-            payload["meta"] = meta
+        if volcano_meta_list:
+            payload["meta"] = volcano_meta_list
+            logger.debug(f"Volcano meta payload: {payload['meta']}")
             
         try:
             return await self._async_make_request("ImportDocumentUrl", {}, payload)
@@ -189,7 +226,7 @@ class VolcanoEngineRagService(Service, AbstractKnowledgeBaseService):
     async def update_document_meta(self, 
                                knowledge_base_id: str, 
                                doc_id: str, 
-                               meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+                               meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]: 
         """
         调用火山引擎 /api/knowledge/doc/update_meta 接口更新文档的元数据，适配 AbstractKnowledgeBaseService。
         """

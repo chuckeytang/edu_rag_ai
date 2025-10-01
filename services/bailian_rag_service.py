@@ -143,22 +143,51 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         # 2. 客户端上传文件内容到 presigned URL
         await self._upload_file_content_from_url(pre_signed_url, url, upload_headers_dict)
         
-        # 3. 添加文件到类目
-        add_file_request = AddFileRequest(lease_id=lease_id, parser=self.parser_type, category_id=self.default_category_id)
+        # 3. 添加文件到类目 (核心：注入 doc_id 作为 tags)
+        
+        # 构造 Tags 列表，将业务 doc_id 作为第一个标签
+        all_tags = [doc_id] 
+        if meta and isinstance(meta, dict):
+            for key, value in meta.items():
+                if isinstance(value, list):
+                    # 如果值是列表 (如 accessible_to, level_list)，则将列表中的每个元素作为标签
+                    # 注意：这将实现 OR 语义，即检索时需要包含其中任意一个 tag
+                    all_tags.extend([str(v) for v in value])
+                elif isinstance(value, (str, int, float)):
+                    # 如果值是单个值，则格式化为 key:value 形式作为标签，方便检索识别
+                    all_tags.append(f"{key}:{value}")
+        # 去重并去除 None/空字符串
+        all_tags = list(set([t for t in all_tags if t]))
+        
+        # 实例化 AddFileRequest 并传入 tags
+        add_file_request = AddFileRequest(
+            lease_id=lease_id, 
+            parser=self.parser_type, 
+            category_id=self.default_category_id,
+            tags=all_tags # ✨ 修正：通过 tags 字段传递所有通用元数据
+        )
+        logger.info(f"Adding file {doc_name} with tags/metadata: {all_tags}")
+        
         add_file_response = await self._async_bailian_call(self._client.add_file_with_options,
             self.workspace_id, add_file_request, {}, RuntimeOptions())
         
         file_id = add_file_response.get('FileId')
         
         # 4. 提交索引追加任务
-        submit_request = SubmitIndexAddDocumentsJobRequest(index_id=index_id, document_ids=[file_id], source_type='DATA_CENTER_FILE')
+        # SubmitIndexAddDocumentsJobRequest 不包含元数据字段，仅传入文件 ID
+        submit_request = SubmitIndexAddDocumentsJobRequest(
+            index_id=index_id, 
+            document_ids=[file_id], 
+            source_type='DATA_CENTER_FILE'
+        )
         submit_response = await self._async_bailian_call(self._client.submit_index_add_documents_job_with_options,
             self.workspace_id, submit_request, {}, RuntimeOptions())
         
         job_id = submit_response.get('Id')
         
         return {
-            "file_id": file_id,
+            "file_id": file_id, # 百炼返回的 File ID
+            "business_doc_id": doc_id, # 业务传入的 Doc ID
             "job_id": job_id,
             "status": "Submitted for indexing",
             "request_id": submit_response.get('RequestId')
@@ -186,27 +215,75 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         
         index_id = knowledge_base_id
         
-        retrieve_request = RetrieveRequest(index_id=index_id, query=query_text)
+        bailian_search_filters = []
         
-        if filters:
-            logger.warning("Bailian Retrieve API does not support complex filters. Ignoring filters.")
+        # 1. 过滤器适配逻辑：将上层业务 filter 转换为 Bailian SearchFilters
+        if filters and isinstance(filters, dict):
+            
+            # --- 适配 Doc ID 列表过滤 (业务最常见需求) ---
+            # 传入格式示例: {"doc_id_list": ["id1", "id2"]}
+            doc_id_list = filters.get("doc_id_list")
+            
+            if doc_id_list and isinstance(doc_id_list, list):
+                logger.info(f"Mapping doc_id_list filter for Bailian: {doc_id_list}")
+                
+                # 实现逻辑 AND 过滤（文档必须包含所有标签，即每个 Doc ID 作为一个子分组）
+                for doc_id in doc_id_list:
+                    # 关键：tags 的值必须是 JSON 字符串形式的列表，且只包含一个 doc_id
+                    tag_filter = {
+                        "tags": json.dumps([str(doc_id)])
+                    }
+                    bailian_search_filters.append(tag_filter)
+                
+            else:
+                # 如果传入的不是 doc_id_list 而是其他复杂的 K/V 结构，
+                # 假设它已经是简单的 Bailian 子分组结构，直接作为唯一分组传入。
+                # ⚠️ 警告：这部分适配存在风险，因为它依赖于业务层传入的 K/V 键名与百炼索引字段名一致。
+                if filters.get("op") is None: # 排除 Volcano 复杂的 op/conds 结构
+                    bailian_search_filters.append(filters)
+                    logger.warning("Treating complex filter as a single Bailian SearchFilter subgroup.")
+                else:
+                    logger.warning(f"Complex Volcano-style filter structure detected: {json.dumps(filters)}. Ignoring for Bailian API.")
+
+        # 2. 构造 Retrieve 请求体
+        retrieve_request = RetrieveRequest(
+            index_id=index_id, 
+            query=query_text,
+            enable_reranking=rerank_switch, 
+            dense_similarity_top_k=limit,
+        )
         
+        # 3. 如果成功生成了 SearchFilters，则添加到 Request 中
+        if bailian_search_filters:
+            retrieve_request.search_filters = bailian_search_filters
+            logger.info(f"Final Bailian SearchFilters: {json.dumps(bailian_search_filters)}")
+        
+        # 4. 调用 API
         response_data = await self._async_bailian_call(self._client.retrieve_with_options,
             self.workspace_id, retrieve_request, {}, RuntimeOptions())
         
         result_list = response_data.get("Docs", [])
 
+        # 5. 结果映射 (使用 Score 字段，不再固定为 1.0)
         mapped_results = []
         for item in result_list[:limit]:
             source = item.get('Source', {})
+            metadata = item.get('Metadata', {})
+            
+            # 从 Metadata 中提取 docId (FileId)
+            doc_id_from_metadata = metadata.get('doc_id') or source.get('DocumentId', 'N/A')
+            
+            # 将 Metadata 字段映射到 user_data
+            user_data = metadata.copy()
+            
             mapped_results.append({
                 "content": item.get('Content', ''),
-                "score": 1.0, # Bailian Retrieve 不提供分数，设为 1.0 兼容
-                "rerank_score": 1.0, 
+                "score": item.get('Score', 0.0), # 读取真实的 Score 字段，默认 0.0
+                "rerank_score": item.get('Score', 0.0), 
                 "source": source.get('DocumentName', '未知文件'),
-                "docId": source.get('DocumentId', 'N/A'), # FileId
+                "docId": doc_id_from_metadata, 
                 "chunkId": item.get('ChunkId', 'N/A'),
-                "user_data": source.get('CustomField', {}) 
+                "user_data": user_data 
             })
         return mapped_results
 
