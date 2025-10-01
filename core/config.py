@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: list[str] = ["*"]
     CHROMA_PATH: str = "./chroma_db"
     INDEX_PATH: str = "./index_store"
+    KB_SERVICE_VENDOR: str = "BAILIAN" 
 
     # OSS configuration fields here
     OSS_PROVIDER: str = "ALIYUN"

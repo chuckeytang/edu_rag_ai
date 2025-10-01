@@ -155,3 +155,4 @@ sentence-transformers==5.0.0
 psutil
 volcengine-python-sdk
 volcengine
+alibabacloud_bailian20231229

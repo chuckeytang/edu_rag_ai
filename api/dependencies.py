@@ -202,7 +202,7 @@ def get_abstract_kb_service() -> AbstractKnowledgeBaseService:
     所有业务层都将依赖这个抽象接口。
     """
     # 假设 settings 中有一个 KB_SERVICE_VENDOR 字段，例如 'VOLCANO' 或 'BAILIAN'
-    vendor = getattr(settings, 'KB_SERVICE_VENDOR', 'VOLCANO').upper()
+    vendor = getattr(settings, 'KB_SERVICE_VENDOR', 'BAILIAN').upper()
     logger.info(f"Initializing Knowledge Base Service for vendor: {vendor}")
 
     if vendor == 'BAILIAN':
