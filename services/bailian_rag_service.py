@@ -8,7 +8,6 @@ from typing import Dict, Any, List, Optional
 import httpx 
 import os 
 from alibabacloud_bailian20231229.client import Client as BailianClient
-from alibabacloud_bailian20231229.models import ListChunksRequest 
 from Tea.model import TeaModel
 # 修正 1：Client Config 路径通常在 tea_openapi 或 tea_util 中
 from alibabacloud_tea_openapi.models import Config as BailianConfig 
@@ -121,7 +120,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         cleaned_tag = re.sub(r'[^\w\u4e00-\u9fa5]+', '_', tag).strip('_')
         
         # 确保标签不为空且不超过长度限制（假设不超过 32 个字符）
-        return cleaned_tag if cleaned_tag else 'tag_empty'
+        return cleaned_tag[:32] if cleaned_tag else 'tag_empty'
 
     async def import_document_url(self, 
                                   url: str, 
