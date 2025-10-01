@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 import httpx 
 import os 
 from alibabacloud_bailian20231229.client import Client as BailianClient
+from alibabacloud_bailian20231229.models import ListChunksRequest 
 from Tea.model import TeaModel
 # 修正 1：Client Config 路径通常在 tea_openapi 或 tea_util 中
 from alibabacloud_tea_openapi.models import Config as BailianConfig 
