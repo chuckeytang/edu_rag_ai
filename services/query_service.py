@@ -332,6 +332,7 @@ class QueryService:
                 
                 # 将每次的增量文本块包装成 StreamChunk 并发送
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
+                logger.debug(f"SSE TX: data: {sse_event_json[:70]}...") 
                 yield f"data: {sse_event_json}\n\n".encode("utf-8")
             else:
                 # 记录警告，以防出现预料之外的 chunk 类型
@@ -344,6 +345,7 @@ class QueryService:
              # 处理LLM找不到答案的情况
              logger.info("LLM did not find a relevant response based on context.")
              final_sse_event_json = StreamChunk(content="抱歉，我未能从现有资料中找到相关信息。", is_last=True).json()
+             logger.debug(f"SSE TX (Final - No Content): data: {final_sse_event_json}")
              yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
              return
         
@@ -460,7 +462,7 @@ class QueryService:
         temp_stream_chunk = StreamChunk(content="", is_last=True, metadata=final_metadata)
         logger.debug(f"DEBUG: Final StreamChunk object's dict (pre-json): {temp_stream_chunk.__dict__}")
 
-        logger.debug(f"Yielding final raw JSON chunk: {final_sse_event_json}")
+        logger.info(f"SSE TX (Final Metadata): {final_sse_event_json}")
         yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
         
     async def _stream_llm_without_rag_context(self, 
@@ -520,6 +522,7 @@ class QueryService:
                 
                 # 将每次的增量文本块包装成 StreamChunk 并发送
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
+                logger.debug(f"SSE TX (Fallback): data: {sse_event_json}")
                 yield f"data: {sse_event_json}\n\n".encode("utf-8")
             else:
                 # 记录警告，以防出现预料之外的 chunk 类型
@@ -532,6 +535,7 @@ class QueryService:
             "session_title": generated_title
         }
         final_sse_event_json = StreamChunk(content="", is_last=True, metadata=final_metadata).json()
+        logger.info(f"SSE TX (Fallback Final Metadata): {final_sse_event_json}")
         yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
 
         return
