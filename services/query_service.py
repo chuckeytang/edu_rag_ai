@@ -150,14 +150,25 @@ class QueryService:
         
         logger.info(f"Retrieved {len(combined_retrieved_chunks)} chunks from all knowledge bases combined.")
 
-        highest_score = 0.0
-        if combined_retrieved_chunks:
-            highest_score = max([chunk.get('rerank_score', chunk.get('score', 0.0)) for chunk in combined_retrieved_chunks])
-            logger.info(f"Highest rerank score from retrieved chunks: {highest_score}")
+        # 1. 切片级别的过滤
+        score_threshold = self.rag_config.retrieval_score_threshold
 
-        # 如果检索结果为空，或者最高分数低于设定的阈值，则直接回退
-        if not combined_retrieved_chunks or highest_score < self.rag_config.retrieval_score_threshold:
-            logger.info("No relevant documents found (either empty or score below threshold). Falling back to LLM general chat.")
+        # 过滤出所有分数高于阈值的切片
+        filtered_chunks = [
+            chunk for chunk in combined_retrieved_chunks
+            if chunk.get('rerank_score', chunk.get('score', 0.0)) >= score_threshold
+        ]
+
+        # 2. 重新计算最高分数（基于已过滤的切片）
+        highest_score = 0.0
+        if filtered_chunks:
+            highest_score = max([chunk.get('rerank_score', chunk.get('score', 0.0)) for chunk in filtered_chunks])
+        
+        logger.info(f"Filtered down to {len(filtered_chunks)} chunks (Score >= {score_threshold}). Highest score: {highest_score}")
+
+        # 3. 如果有效切片为空，则直接回退
+        if not filtered_chunks: # 仅检查 filtered_chunks 是否为空
+            logger.info("No relevant documents found (all chunks scored below threshold or empty). Falling back to LLM general chat.")
             async for chunk in self._stream_llm_without_rag_context(
                 request.question,
                 chat_history_context_string,
@@ -167,8 +178,7 @@ class QueryService:
             return
         
         # --- 流程4: 准备传递给 LLM 的上下文 ---
-        # 知识库返回的已经是最终重排过的结果，不再需要本地过滤和重排
-        final_retrieved_chunks_for_llm = combined_retrieved_chunks
+        final_retrieved_chunks_for_llm = filtered_chunks
         
         # 计算并限制发送给 LLM 的总 token 数量
         tokenizer = get_tokenizer()

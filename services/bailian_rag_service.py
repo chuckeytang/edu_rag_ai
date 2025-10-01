@@ -276,7 +276,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             query=query_text,
             enable_reranking=rerank_switch, 
             dense_similarity_top_k=limit,
-            # search_filters=bailian_search_filters if bailian_search_filters else None # 传入过滤器
+            search_filters=bailian_search_filters if bailian_search_filters else None # 传入过滤器
         )
         
         # 3. 如果成功生成了 SearchFilters，则添加到 Request 中
@@ -288,7 +288,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         response_data = await self._async_bailian_call(self._client.retrieve_with_options,
             self.workspace_id, retrieve_request, {}, RuntimeOptions())
         
-        result_list = response_data.get("Docs", [])
+        result_list = response_data.get("Nodes", [])
 
         # 5. 结果映射 (使用 Score 字段，不再固定为 1.0)
         mapped_results = []
@@ -303,12 +303,12 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             user_data = metadata.copy()
             
             mapped_results.append({
-                "content": item.get('Content', ''),
+                "content": item.get('Text', ''),
                 "score": item.get('Score', 0.0), # 读取真实的 Score 字段，默认 0.0
                 "rerank_score": item.get('Score', 0.0), 
                 "source": source.get('DocumentName', '未知文件'),
                 "docId": doc_id_from_metadata, 
-                "chunkId": item.get('ChunkId', 'N/A'),
+                "chunkId": metadata.get('_id', 'N/A'),
                 "user_data": user_data 
             })
         return mapped_results
