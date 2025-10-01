@@ -276,7 +276,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             query=query_text,
             enable_reranking=rerank_switch, 
             dense_similarity_top_k=limit,
-            search_filters=bailian_search_filters if bailian_search_filters else None # 传入过滤器
+            # search_filters=bailian_search_filters if bailian_search_filters else None # 传入过滤器
         )
         
         # 3. 如果成功生成了 SearchFilters，则添加到 Request 中
