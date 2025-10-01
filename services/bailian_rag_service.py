@@ -243,17 +243,20 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             if doc_id_list and isinstance(doc_id_list, list):
                 logger.info(f"Mapping doc_id_list filter for Bailian: {doc_id_list}")
                 
-                # 核心修正：必须对传入的 doc_id 进行清洗，以匹配存储时的标签格式
                 for doc_id in doc_id_list:
                     
-                    # 关键：对传入的 doc_id 进行清洗，确保与存储时的标签格式一致
-                    sanitized_tag = self._sanitize_tag(str(doc_id)) 
+                    sanitized_tag = self._sanitize_tag(str(doc_id))
                     
-                    # 实现逻辑 AND 过滤（文档必须包含所有标签）
-                    tag_filter = {
-                        "tags": [sanitized_tag]  # 标签必须是 JSON 字符串列表
-                    }
-                    bailian_search_filters.append(tag_filter)
+                    # 关键检查：确保清洗后的标签非空，避免传入 [""] 或 [null]
+                    if sanitized_tag:
+                        # 修正：恢复官方示例中的 JSON 字符串格式
+                        tag_list = [sanitized_tag]
+                        tag_filter = {
+                            "tags": json.dumps(tag_list) 
+                        }
+                        bailian_search_filters.append(tag_filter)
+                    else:
+                        logger.warning(f"Skipping empty tag generated from doc_id: {doc_id}")
                 
                 logger.info(f"Generated Bailian tags filters for Doc ID: {bailian_search_filters}")
 
