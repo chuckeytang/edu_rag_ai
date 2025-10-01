@@ -3,6 +3,7 @@
 import json
 import logging
 import asyncio
+import re
 from typing import Dict, Any, List, Optional
 import httpx 
 import os 
@@ -106,6 +107,21 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                 raise BailianRagException(1000031, "upload_error", f"Unexpected error during file fetch/upload: {str(e)}")
 
 
+    def _sanitize_tag(self, tag: str) -> str:
+        """
+        清除标签中的非法字符，将其替换为下划线。
+        通常，阿里云标签只允许字母、数字和下划线。
+        """
+        # 移除所有非字母、数字、下划线的字符。特别是冒号、点号、连字符等。
+        # 保持中文。这里我们假设只保留字母、数字、中文和下划线。
+        # 假设业务 Doc ID/File Key 中的连字符 '-' 是允许的，但为安全起见，这里统一清理。
+        
+        # 将所有非法字符替换为下划线
+        cleaned_tag = re.sub(r'[^\w\u4e00-\u9fa5]+', '_', tag).strip('_')
+        
+        # 确保标签不为空且不超过长度限制（假设不超过 32 个字符）
+        return cleaned_tag[:32] if cleaned_tag else 'tag_empty'
+
     async def import_document_url(self, 
                                   url: str, 
                                   doc_name: str, 
@@ -146,25 +162,25 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         # 3. 添加文件到类目 (核心：注入 doc_id 作为 tags)
         
         # 构造 Tags 列表，将业务 doc_id 作为第一个标签
-        all_tags = [doc_id] 
+        all_tags = [self._sanitize_tag(doc_id)]
         if meta and isinstance(meta, dict):
             for key, value in meta.items():
                 if isinstance(value, list):
-                    # 如果值是列表 (如 accessible_to, level_list)，则将列表中的每个元素作为标签
-                    # 注意：这将实现 OR 语义，即检索时需要包含其中任意一个 tag
-                    all_tags.extend([str(v) for v in value])
+                    # 如果值是列表，将列表中的每个元素作为标签，并进行清洗
+                    all_tags.extend([self._sanitize_tag(str(v)) for v in value])
                 elif isinstance(value, (str, int, float)):
-                    # 如果值是单个值，则格式化为 key:value 形式作为标签，方便检索识别
-                    all_tags.append(f"{key}:{value}")
+                    # 如果值是单个值，格式化为 key_value 形式作为标签，并进行清洗
+                    tag_value = f"{key}_{value}" 
+                    all_tags.append(self._sanitize_tag(tag_value))
         # 去重并去除 None/空字符串
-        all_tags = list(set([t for t in all_tags if t]))
+        all_tags = list(set([t for t in all_tags if t and t != 'tag_empty']))
         
         # 实例化 AddFileRequest 并传入 tags
         add_file_request = AddFileRequest(
             lease_id=lease_id, 
             parser=self.parser_type, 
             category_id=self.default_category_id,
-            tags=all_tags # ✨ 修正：通过 tags 字段传递所有通用元数据
+            tags=all_tags
         )
         logger.info(f"Adding file {doc_name} with tags/metadata: {all_tags}")
         
