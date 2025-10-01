@@ -105,11 +105,11 @@ async def debug_retrieve_with_filters_kb(
 
         # 2. 处理 target_file_ids (DocID 过滤)
         if request.target_file_ids:
-            # 恢复 Volcano 格式的 Doc ID 过滤器逻辑，因为这是原始业务期望的格式
+            # 恢复 格式的 Doc ID 过滤器逻辑，因为这是原始业务期望的格式
             doc_id_filter = {
                 "op": "must",
                 "field": "doc_id",
-                "conds": request.target_file_ids # 转换为 Volcano Doc ID 格式
+                "conds": request.target_file_ids # 转换为 Doc ID 格式
             }
             filter_expressions.append(doc_id_filter)
 

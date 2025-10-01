@@ -100,8 +100,6 @@ class DocumentOssService:
             self.task_manager.update_progress(task_id, 10, "Generating temporary URL from OSS...")
             
             # 确定存储桶
-            # 注意：此处重新定义了 accessible_to_list，但我们在前面已经初始化并使用了 request.metadata.accessible_to
-            # 为了保证逻辑一致性，使用上面初始化的 accessible_to_list
             target_bucket = settings.OSS_PUBLIC_BUCKET_NAME if "public" in accessible_to_list else settings.OSS_PRIVATE_BUCKET_NAME
             
             temp_url = self.oss_service.generate_presigned_url(

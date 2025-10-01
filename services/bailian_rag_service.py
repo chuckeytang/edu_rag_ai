@@ -120,7 +120,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         cleaned_tag = re.sub(r'[^\w\u4e00-\u9fa5]+', '_', tag).strip('_')
         
         # 确保标签不为空且不超过长度限制（假设不超过 32 个字符）
-        return cleaned_tag[:32] if cleaned_tag else 'tag_empty'
+        return cleaned_tag if cleaned_tag else 'tag_empty'
 
     async def import_document_url(self, 
                                   url: str, 
@@ -320,3 +320,71 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             "message": "Bailian Indexing API does not support direct metadata updates on existing files. Please re-ingest the document.",
             "status": "not_implemented",
         }
+
+    async def list_knowledge_points(self, 
+                                    knowledge_base_id: str,
+                                    doc_ids: Optional[List[str]] = None, # 接收 doc_id 列表
+                                    limit: int = 100,
+                                    offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        实现 AbstractKnowledgeBaseService.list_knowledge_points，调用阿里百炼 ListChunks 接口。
+        
+        注意：
+        1. Bailian ListChunks 接口不支持 doc_id 列表，只支持单个 FileId 过滤。
+        2. doc_id 必须是 Bailian 的 FileId。
+        """
+        index_id = knowledge_base_id
+        
+        # 1. 确定 FileId (ListChunks 只支持单个 FileId)
+        file_id_filter = None
+        if doc_ids and len(doc_ids) > 0:
+            # ⚠️ 假设传入的 doc_ids 已经是 Bailian 的 FileId，并且我们只取第一个进行过滤
+            file_id_filter = doc_ids[0]
+            logger.warning(f"Bailian ListChunks only supports filtering by one FileId. Using the first ID: {file_id_filter}")
+        
+        page_num = offset // limit + 1
+        page_size = min(limit, 100) # Bailian PageSize 最大为 100
+
+        list_chunks_request = ListChunksRequest(
+            index_id=index_id,
+            # FileId 是文档搜索类知识库的必要过滤条件
+            file_id=file_id_filter, 
+            page_num=page_num,
+            page_size=page_size,
+            # Filed 字段是旧版本 SDK 字段，不需要传入
+        )
+        
+        logger.info(f"Listing chunks for Index '{index_id}' with FileId: {file_id_filter}, PageNum: {page_num}")
+        
+        try:
+            response_data = await self._async_bailian_call(
+                self._client.list_chunks_with_options,
+                self.workspace_id,
+                list_chunks_request,
+                {},
+                RuntimeOptions()
+            )
+            
+            result_list = response_data.get("Nodes", [])
+            
+            mapped_results = []
+            for item in result_list:
+                metadata = item.get('Metadata', {})
+                
+                # 兼容 Volcano 的返回字段
+                mapped_results.append({
+                    "content": item.get('Text', item.get('Content')), # Text 是切片内容
+                    "point_id": metadata.get('nid', 'N/A'), # nid 是切片 ID
+                    "doc_id": metadata.get('doc_id', 'N/A'), # doc_id 是 FileId
+                    "doc_name": metadata.get('doc_name', 'N/A'),
+                    "source": metadata.get('doc_name', 'N/A'),
+                    "metadata": metadata, # 返回完整的元数据字典
+                    "text_snippet": item.get('Text', '')[:500] + "..."
+                })
+
+            return mapped_results
+
+        except Exception as e:
+            logger.error(f"Failed to list chunks from Bailian KB: {e}", exc_info=True)
+            # 为了让上层 DEBUG 接口能捕获到错误，这里重新抛出
+            raise

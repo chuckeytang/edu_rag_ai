@@ -167,7 +167,7 @@ class QueryService:
             return
         
         # --- 流程4: 准备传递给 LLM 的上下文 ---
-        # 火山引擎返回的已经是最终重排过的结果，不再需要本地过滤和重排
+        # 知识库返回的已经是最终重排过的结果，不再需要本地过滤和重排
         final_retrieved_chunks_for_llm = combined_retrieved_chunks
         
         # 计算并限制发送给 LLM 的总 token 数量
@@ -201,7 +201,7 @@ class QueryService:
         rag_sources_info = []
         retrieved_chunk_map = {}
         
-        # 使用火山引擎返回的 chunk 数据构建上下文
+        # 使用知识库返回的 chunk 数据构建上下文
         for chunk in final_retrieved_chunks_for_llm:
             chunk_content = chunk.get('content', '')
             chunk_source = chunk.get('source', '未知文件')
@@ -224,7 +224,7 @@ class QueryService:
 
             rag_sources_info.append({
                 "file_name": chunk_source,
-                "page_number": "N/A", # 火山引擎API通常不直接返回页码，可能需要从元数据解析
+                "page_number": "N/A", 
                 "material_id": chunk_material_id
             })
 
