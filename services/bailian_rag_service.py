@@ -252,7 +252,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                         # 修正：恢复官方示例中的 JSON 字符串格式
                         tag_list = [sanitized_tag]
                         tag_filter = {
-                            "tags": tag_list
+                            "tags": json.dumps(tag_list)
                         }
                         bailian_search_filters.append(tag_filter)
                     else:

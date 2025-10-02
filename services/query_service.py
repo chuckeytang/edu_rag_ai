@@ -153,26 +153,40 @@ class QueryService:
         # 1. 切片级别的过滤
         score_threshold = self.rag_config.retrieval_score_threshold
 
-        # 过滤出所有分数高于阈值的切片
-        filtered_chunks = []
+        # 判断是否开启了强制总结模式 (即用户指定了目标文件)
+        is_forced_summary = bool(request.target_file_ids)
         
-        for chunk in combined_retrieved_chunks:
-            # 获取当前切片的最终分数
-            chunk_score = chunk.get('rerank_score', chunk.get('score', 0.0))
+        if is_forced_summary:
+            # 模式 1: 强制总结模式 - 忽略分数阈值，直接使用召回结果
+            # 这里的 combined_retrieved_chunks 已经是基于 target_file_ids 过滤（或限定）过的
+            # 逻辑：只要底层 KB 返回了内容，就认为它们是有效的上下文。
+            filtered_chunks = combined_retrieved_chunks
             
-            # 打印当前切片的分数（满足你的调试要求）
-            logger.info(f"Chunk score: {chunk_score:.4f} (Threshold: {score_threshold:.4f}) - DocID: {chunk.get('docId', 'N/A')}")
+            # 记录最高分 (仅供参考)
+            highest_score = max([chunk.get('rerank_score', chunk.get('score', 0.0)) for chunk in filtered_chunks]) if filtered_chunks else 0.0
             
-            # 执行过滤
-            if chunk_score >= score_threshold:
-                filtered_chunks.append(chunk)
+            logger.warning(f"FORCED SUMMARY MODE activated (Target Files specified). Using {len(filtered_chunks)} chunks regardless of score.")
+            
+        else:
+            # 模式 2: 标准 RAG 模式 - 严格执行分数阈值过滤
+            
+            # 1. 切片级别的过滤
+            filtered_chunks = []
+            
+            for chunk in combined_retrieved_chunks:
+                chunk_score = chunk.get('rerank_score', chunk.get('score', 0.0))
+                
+                # 打印当前切片的分数（满足你的调试要求）
+                logger.info(f"Chunk score: {chunk_score:.4f} (Threshold: {score_threshold:.4f}) - DocID: {chunk.get('docId', 'N/A')}")
+                
+                # 执行过滤
+                if chunk_score >= score_threshold:
+                    filtered_chunks.append(chunk)
 
-        # 2. 重新计算最高分数（基于已过滤的切片）
-        highest_score = 0.0
-        if filtered_chunks:
-            highest_score = max([chunk.get('rerank_score', chunk.get('score', 0.0)) for chunk in filtered_chunks])
-        
-        logger.info(f"Filtered down to {len(filtered_chunks)} chunks (Score >= {score_threshold}). Highest score: {highest_score}")
+            # 2. 重新计算最高分数（基于已过滤的切片）
+            highest_score = max([chunk.get('rerank_score', chunk.get('score', 0.0)) for chunk in filtered_chunks]) if filtered_chunks else 0.0
+            
+            logger.info(f"STANDARD RAG MODE: Filtered down to {len(filtered_chunks)} chunks (Score >= {score_threshold}). Highest score: {highest_score}")
 
         # 3. 如果有效切片为空，则直接回退
         if not filtered_chunks: # 仅检查 filtered_chunks 是否为空
