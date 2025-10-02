@@ -109,13 +109,32 @@ class AIExtractionService:
                                         user_provided_subject: Optional[str] = None,
                                         user_provided_exam: Optional[str] = None,
                                         user_provided_level: List[str] = [], 
-                                        subscribed_subjects: List[WxMineCollectSubjectList] = [] 
+                                        subscribed_subjects: List[WxMineCollectSubjectList] = []
                                         ) -> ExtractedDocumentMetadata: 
         """
         Extracts document metadata using the DeepSeek model.
         Supports content from OSS or direct text, and determines the bucket based on is_public.
         Considers user-provided preferences and subscribed subjects for better extraction.
         """
+        is_bailian_mode = (
+            hasattr(settings, 'BAILIAN_INDEX_ID') and settings.BAILIAN_INDEX_ID
+        ) or (
+            hasattr(settings, 'BAILIAN_WORKSPACE_ID') and settings.BAILIAN_WORKSPACE_ID
+        )
+
+        if is_bailian_mode:
+            logger.info("Bailian configuration detected in settings. Skipping internal LLM metadata extraction and returning default empty values for Bailian's built-in extraction.")
+            # 返回默认的空 ExtractedDocumentMetadata 实例
+            return ExtractedDocumentMetadata(
+                clazz=None, 
+                exam=None, 
+                labelList=[], 
+                levelList=[], 
+                subject=None, 
+                type=None,
+                description=None 
+            )
+        
         doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public)
 
         clazz_str = ", ".join(self.CLAZZ_OPTIONS)

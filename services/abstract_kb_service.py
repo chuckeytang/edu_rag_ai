@@ -38,3 +38,14 @@ class AbstractKnowledgeBaseService(ABC):
     async def update_document_meta(self, doc_id: str, knowledge_base_id: str, meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """更新现有文档的元数据。"""
         pass
+
+    @abstractmethod
+    async def list_knowledge_points(self, 
+                                    knowledge_base_id: str,
+                                    doc_ids: Optional[List[str]] = None, 
+                                    limit: int = 100,
+                                    offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        列出指定知识库/文档下的所有知识点（切片/Chunk）。
+        """
+        pass

@@ -132,8 +132,18 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                                   ) -> Dict[str, Any]:
         """
         实现百炼的文件导入流程: 1. 申请租约 -> 2. 客户端上传文件 -> 3. 添加文件到类目 -> 4. 提交索引追加任务
+        将 material_id 拼接到 doc_name 前面。
         """
         index_id = knowledge_base_id
+        
+        # --- 拼接 doc_name 以包含 material_id ---
+        material_id = meta.get('material_id') if meta and isinstance(meta, dict) else None
+        # 构造 Bailian 侧实际使用的文件名
+        bailian_doc_name = doc_name
+        if material_id is not None:
+             # 确保 material_id 是字符串，并拼接
+            bailian_doc_name = f"{material_id}_{doc_name}" 
+            logger.info(f"New Bailian Document Name with material_id: {bailian_doc_name}")
         
         # 1. 获取文件大小并申请租约
         file_size = 1024 # 简化处理，实际生产应尝试精确获取
@@ -147,7 +157,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         except Exception:
             logger.warning(f"Failed to get file size via HEAD request for {url}. Using default size 1024.")
 
-        lease_request = ApplyFileUploadLeaseRequest(file_name=doc_name, md_5=file_md5, size_in_bytes=file_size)
+        lease_request = ApplyFileUploadLeaseRequest(file_name=bailian_doc_name, md_5=file_md5, size_in_bytes=file_size)
         lease_response = await self._async_bailian_call(self._client.apply_file_upload_lease_with_options,
             self.default_category_id, self.workspace_id, lease_request, {}, RuntimeOptions())
 
@@ -155,50 +165,30 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         upload_param = lease_response.get('Param', {})
         pre_signed_url = upload_param.get('Url')
         # 1. 获取 Bailian/OSS 预设的 Header
-        # 这些 Header 包含了 OSS 签名所需的 Content-Type, Content-Length 等关键信息。
         upload_headers_dict = {k: v for k, v in upload_param.get('Headers', {}).items()}
         
-        # --- 修正 1：构造 OSS 自定义元数据 Header，并对值进行 URL 编码 ---
-        oss_meta_headers = {}
+        # 2. 客户端上传文件内容到 presigned URL
+        await self._upload_file_content_from_url(pre_signed_url, url, upload_headers_dict)
         
-        # 1. 注入业务 Doc ID
-        # 统一对值进行 URL 编码，以保证 ASCII 兼容性
-        oss_meta_headers[f"x-oss-meta-business-doc-id"] = quote(str(doc_id))
+        # 3. 添加文件到类目
+        # 构造 Tags 列表
+        all_tags = []
+        # 3.1 业务 Doc ID 作为第一个标签 (保留)
+        sanitized_doc_tag = self._sanitize_tag(doc_id)
+        if sanitized_doc_tag and sanitized_doc_tag != 'tag_empty':
+            all_tags.append(sanitized_doc_tag)
         
-        # 2. 注入文档名称
-        oss_meta_headers[f"x-oss-meta-document-name"] = quote(doc_name)
-        
-        # 3. 注入所有自定义 Meta
+        # 3.2 仅对 accessible_to 列表字段进行 Tagging (新增/修改)
         if meta and isinstance(meta, dict):
-             for key, value in meta.items():
-                # 键名小写，替换不兼容字符
-                oss_key = f"x-oss-meta-{key.lower().replace('_', '-')}" 
-                # 对值进行编码
-                oss_meta_headers[oss_key] = quote(str(value)) 
-
-        # 2. 合并 Header (关键步骤)
-        # 将原始的 Bailian Header 作为基准，然后用自定义的 OSS 元数据 Header 覆盖/追加
-        # 由于 x-oss-meta-* 键与原始 Header 不冲突，这里使用 **{} 展开操作符是安全的。
-        final_upload_headers = {**upload_headers_dict, **oss_meta_headers}
-
-        logger.info(f"Uploading file with final headers. Custom keys: {list(oss_meta_headers.keys())}")
-        
-        # 3. 客户端上传文件内容到 presigned URL
-        # 传入包含自定义元数据的 Header
-        await self._upload_file_content_from_url(pre_signed_url, url, final_upload_headers)
-        
-        # 4. 添加文件到类目 (核心：注入 doc_id 作为 tags)
-        # 构造 Tags 列表，将业务 doc_id 作为第一个标签
-        all_tags = [self._sanitize_tag(doc_id)]
-        if meta and isinstance(meta, dict):
-            for key, value in meta.items():
-                if isinstance(value, list):
-                    # 如果值是列表，将列表中的每个元素作为标签，并进行清洗
-                    all_tags.extend([self._sanitize_tag(str(v)) for v in value])
-                elif isinstance(value, (str, int, float)):
-                    # 如果值是单个值，格式化为 key_value 形式作为标签，并进行清洗
-                    tag_value = f"{key}_{value}" 
-                    all_tags.append(self._sanitize_tag(tag_value))
+            # 获取 accessible_to 列表
+            accessible_to_list = meta.get('accessible_to')
+            
+            if accessible_to_list and isinstance(accessible_to_list, list):
+                for item in accessible_to_list:
+                    # 将列表中的每个元素作为标签，并进行清洗
+                    sanitized_tag = self._sanitize_tag(str(item))
+                    if sanitized_tag and sanitized_tag != 'tag_empty':
+                        all_tags.append(sanitized_tag)
         # 去重并去除 None/空字符串
         all_tags = list(set([t for t in all_tags if t and t != 'tag_empty']))
         
@@ -210,7 +200,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             tags=all_tags,
             original_file_url=url 
         )
-        logger.info(f"Adding file {doc_name} with tags/metadata: {all_tags}")
+        logger.info(f"Adding file {bailian_doc_name} with tags/metadata: {all_tags}")
         
         add_file_response = await self._async_bailian_call(self._client.add_file_with_options,
             self.workspace_id, add_file_request, {}, RuntimeOptions())
@@ -326,32 +316,150 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             
             # 从 Metadata 中提取 docId (FileId)
             doc_id_from_metadata = metadata.get('doc_id') or source.get('DocumentId', 'N/A')
+            document_name = metadata.get('doc_name', '未知文件')
+            
+            # --- 改造点 2: 从 DocumentName 中解析 material_id ---
+            material_id = None
+            try:
+                # 尝试从 DocumentName 中解析 {material_id}_{file_name} 格式
+                match = re.match(r'^(\d+)_', document_name)
+                if match:
+                    material_id = match.group(1)
+                    # 可以在这里移除前缀，只保留原始文件名
+                    document_name = document_name[len(match.group(0)):]
+            except Exception:
+                logger.warning(f"Could not parse material_id from DocumentName: {document_name}")
             
             # 将 Metadata 字段映射到 user_data
             user_data = metadata.copy()
+            user_data['material_id'] = material_id
             
             mapped_results.append({
                 "content": item.get('Text', ''),
                 "score": item.get('Score', 0.0), # 读取真实的 Score 字段，默认 0.0
                 "rerank_score": item.get('Score', 0.0), 
-                "source": source.get('DocumentName', '未知文件'),
+                "source": document_name,
                 "docId": doc_id_from_metadata, 
                 "chunkId": metadata.get('_id', 'N/A'),
-                "user_data": user_data 
+                "user_data": user_data,
+                "material_id": material_id
             })
         return mapped_results
+
+
+    async def update_document_tags(self, 
+                                   file_id: str, 
+                                   tags: List[str]) -> Dict[str, Any]:
+        """
+        调用百炼 UpdateFileTag API 更新指定文件的标签。
+        
+        Args:
+            file_id: 百炼的文件 ID (对应业务 doc_id)。
+            tags: 要更新的完整标签列表。
+        """
+        from alibabacloud_bailian20231229.models import UpdateFileTagRequest
+
+        # 1. 对传入的标签进行清洗
+        sanitized_tags = []
+        for tag in tags:
+            sanitized_tag = self._sanitize_tag(str(tag))
+            if sanitized_tag and sanitized_tag != 'tag_empty':
+                sanitized_tags.append(sanitized_tag)
+        
+        # 2. 去重并限制数量 (百炼单个文件最多支持 10 个标签)
+        final_tags = list(set(sanitized_tags))[:10]
+        
+        if not final_tags:
+            logger.warning(f"No valid tags generated for file_id {file_id}. Tags will be cleared.")
+            
+        update_request = UpdateFileTagRequest(
+            file_id=file_id,
+            tags=final_tags # 传入完整的标签列表，它会覆盖原有标签
+        )
+        
+        logger.info(f"Updating tags for file {file_id}. Final tags: {final_tags}")
+
+        # 使用 TeaModel 的 update_file_tag 方法
+        # PUT /{WorkspaceId}/datacenter/file/{FileId}
+        # ⚠️ 注意：SDK 中可能需要传入 FileId 作为路径参数。
+        try:
+            # 查找并使用 SDK 对应的方法 (根据您提供的请求语法，这可能是一个 PUT 请求，SDK 封装为 update_file_tag_with_options)
+            response = await self._async_bailian_call(
+                self._client.update_file_tag_with_options,
+                self.workspace_id, 
+                file_id, # 对应路径参数 {FileId}
+                update_request, # 包含 tags 的 Body
+                {}, 
+                RuntimeOptions()
+            )
+            
+            logger.info(f"Successfully submitted tag update for file ID {file_id}.")
+            
+            return {"status": "success", "message": "File tags updated successfully.", "request_id": response.get('RequestId'), "file_id": file_id}
+
+        except Exception as e:
+            logger.error(f"Failed to update file tags for {file_id}: {e}", exc_info=True)
+            if isinstance(e, BailianRagException):
+                raise e
+            raise BailianRagException(1000032, "tag_update_error", f"SDK error during tag update: {str(e)}")
 
     async def update_document_meta(self, 
                                knowledge_base_id: str, 
                                doc_id: str, 
                                meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """更新文档元数据。阿里百炼无直接 API，返回 Not Implemented。"""
-        logger.warning(f"Update is not directly supported by Bailian Indexing API for doc_id {doc_id}.")
-        return {
-            "message": "Bailian Indexing API does not support direct metadata updates on existing files. Please re-ingest the document.",
-            "status": "not_implemented",
-        }
+        """
+        更新文档元数据。针对百炼，我们将其适配为更新文件标签 (Tags)。
+        我们假设 meta_updates 中包含了要更新的完整权限列表。
+        
+        注意：doc_id 在此方法中通常是 Bailian 的 File ID。
+        """
+        file_id = doc_id 
+        
+        # 期望 meta_updates 结构是 [{'key': 'accessible_to', 'value': ['user1', 'public']}]
+        
+        accessible_to_new_list = None
+        
+        # 1. 提取新的 accessible_to 列表
+        for item in meta_updates:
+            if isinstance(item, dict) and item.get('key') == 'accessible_to':
+                accessible_to_new_list = item.get('value')
+                break
+        
+        if accessible_to_new_list is None:
+             # 如果没有可更新的 accessible_to 字段，则返回不支持其他元数据更新
+            return {
+                "message": "Bailian only supports updating 'accessible_to' via file tags. Other metadata updates are not supported.",
+                "status": "not_implemented",
+            }
 
+        # 2. 构造新的 tags 列表 (百炼的 tag 是覆盖式更新)
+        
+        # 业务逻辑：更新权限标签时，需要保留 doc_id 标签。
+        # ⚠️ 这是一个假设：您需要确保每次更新标签时，doc_id 标签始终在列表中。
+        # 否则，更新权限标签会导致 doc_id 标签丢失，影响基于 doc_id 的检索。
+        
+        # 确保 doc_id 标签始终存在
+        new_tags = [self._sanitize_tag(file_id)] 
+        
+        # 添加新的权限标签
+        if accessible_to_new_list and isinstance(accessible_to_new_list, list):
+            for item in accessible_to_new_list:
+                sanitized_tag = self._sanitize_tag(str(item))
+                if sanitized_tag and sanitized_tag != 'tag_empty':
+                    new_tags.append(sanitized_tag)
+
+        # 3. 调用更新 tags 的 API
+        try:
+            return await self.update_document_tags(
+                file_id=file_id, 
+                tags=list(set(new_tags)) # 再次去重
+            )
+        except Exception as e:
+            return {
+                "message": f"Failed to update file tags (permissions): {str(e)}",
+                "status": "error",
+            }
+        
     async def list_knowledge_points(self, 
                                     knowledge_base_id: str,
                                     doc_ids: Optional[List[str]] = None, # 接收 doc_id 列表

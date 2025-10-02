@@ -4,7 +4,7 @@ from core.config import settings
 from api.api_v1 import api_router
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-from core.logging_config import setup_app_logging # 假设这个模块存在并配置了日志
+from core.logging_config import setup_app_logging
 from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError

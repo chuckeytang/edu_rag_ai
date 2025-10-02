@@ -339,9 +339,7 @@ class QueryService:
         # 用于引用生成的 chunk 列表
         referenced_chunks = [chunk for chunk in final_retrieved_chunks_for_llm if chunk.get('content')]
         referenced_chunk_texts = [c['content'] for c in referenced_chunks]
-        
-        # 因为火山引擎的 chunk 没有唯一的ID，我们使用其 docId 和 chunkId 组合来作为唯一ID
-        referenced_chunk_ids = [f"{c.get('docId')}-{c.get('chunkId')}" for c in referenced_chunks]
+        referenced_chunk_ids = [c.get('chunkId') for c in referenced_chunks]
         
         # 将聊天历史的文本和ID也加入引用池
         combined_referenced_texts = referenced_chunk_texts + chat_history_chunk_texts
@@ -468,6 +466,19 @@ class QueryService:
                                     "page_label": source_node.metadata.get('role', '未知')
                                 })
                         sentence_citations.append(citation_info)
+
+            # 使用集合去重，并只收集有 material_id 的引用
+            material_id_set = set()
+            for citation in sentence_citations:
+                mid = citation.get('material_id')
+                # 只有当引用的类型是 'document' 并且 material_id 不是 None/N/A 时才收集
+                if citation.get('source_type') == 'document' and mid and mid != 'N/A':
+                    material_id_set.add(mid)
+
+            # 赋值给 final_referenced_material_ids
+            final_referenced_material_ids = list(material_id_set)
+            logger.info(f"Final referenced material IDs: {final_referenced_material_ids}")
+
         else:
             logger.warning("Embedding model is not available for sentence-level citation. Skipping this step.")
 

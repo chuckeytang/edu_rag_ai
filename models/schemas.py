@@ -105,7 +105,7 @@ class ExtractionRequest(BaseModel):
         }
         
 # 用于文档元数据提取
-class ExtractedDocumentMetadata(BaseModel): # 新的、更具体的元数据模型名称
+class ExtractedDocumentMetadata(BaseModel):
     clazz: Optional[str] = Field(None, description="课程体系名称，如：IB、IGCSE、AP...，匹配课程体系选项集合中的一个")
     exam: Optional[str] = Field(None, description="考试局名称，如：CAIE、Edexcel、AQA，匹配考试局选项集合中的一个")
     labelList: List[str] = Field([], description="标签名称列表，该字段是从一个label集合中，匹配对应的label，如：[\"Znotes\",\"Definitions\",\"Paper 5\",\"Book\"...]，当然如果没有匹配也可以填空")
