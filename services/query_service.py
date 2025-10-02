@@ -154,10 +154,18 @@ class QueryService:
         score_threshold = self.rag_config.retrieval_score_threshold
 
         # 过滤出所有分数高于阈值的切片
-        filtered_chunks = [
-            chunk for chunk in combined_retrieved_chunks
-            if chunk.get('rerank_score', chunk.get('score', 0.0)) >= score_threshold
-        ]
+        filtered_chunks = []
+        
+        for chunk in combined_retrieved_chunks:
+            # 获取当前切片的最终分数
+            chunk_score = chunk.get('rerank_score', chunk.get('score', 0.0))
+            
+            # 打印当前切片的分数（满足你的调试要求）
+            logger.info(f"Chunk score: {chunk_score:.4f} (Threshold: {score_threshold:.4f}) - DocID: {chunk.get('docId', 'N/A')}")
+            
+            # 执行过滤
+            if chunk_score >= score_threshold:
+                filtered_chunks.append(chunk)
 
         # 2. 重新计算最高分数（基于已过滤的切片）
         highest_score = 0.0
