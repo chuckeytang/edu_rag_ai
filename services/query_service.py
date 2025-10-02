@@ -120,7 +120,7 @@ class QueryService:
         
         final_top_k = request.similarity_top_k if request.similarity_top_k is not None else rag_config.retrieval_top_k
         
-        # --- 流程2: 异步并行调用火山引擎检索API ---
+        # --- 流程2: 异步并行调用知识库检索API ---
         retrieve_tasks = []
         # 构建文档过滤器
         filters = {}
@@ -342,7 +342,7 @@ class QueryService:
                 
                 # 将每次的增量文本块包装成 StreamChunk 并发送
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
-                logger.debug(f"SSE TX: data: {sse_event_json[:70]}...") 
+                logger.info(f"SSE TX: data: {sse_event_json[:70]}...") 
                 yield f"data: {sse_event_json}\n\n".encode("utf-8")
             else:
                 # 记录警告，以防出现预料之外的 chunk 类型
@@ -355,7 +355,7 @@ class QueryService:
              # 处理LLM找不到答案的情况
              logger.info("LLM did not find a relevant response based on context.")
              final_sse_event_json = StreamChunk(content="抱歉，我未能从现有资料中找到相关信息。", is_last=True).json()
-             logger.debug(f"SSE TX (Final - No Content): data: {final_sse_event_json}")
+             logger.info(f"SSE TX (Final - No Content): data: {final_sse_event_json}")
              yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
              return
         
@@ -507,10 +507,12 @@ class QueryService:
                     continue
                 else:
                     error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请稍后再试。", is_last=True).json()
+                    logger.info(f"SSE TX: {error_chunk_json}")
                     yield f"data: {error_chunk_json}\n\n".encode("utf-8")
                     return
         if not llm_response_gen:
             error_chunk_json = StreamChunk(content="AI未能生成有效回复，请尝试换种方式提问。", is_last=True).json()
+            logger.info(f"SSE TX: {error_chunk_json}")
             yield f"data: {error_chunk_json}\n\n".encode("utf-8")
             return
 
@@ -532,7 +534,7 @@ class QueryService:
                 
                 # 将每次的增量文本块包装成 StreamChunk 并发送
                 sse_event_json = StreamChunk(content=chunk_text, is_last=False).json()
-                logger.debug(f"SSE TX (Fallback): data: {sse_event_json}")
+                logger.info(f"SSE TX (Fallback): data: {sse_event_json}")
                 yield f"data: {sse_event_json}\n\n".encode("utf-8")
             else:
                 # 记录警告，以防出现预料之外的 chunk 类型
