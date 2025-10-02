@@ -199,6 +199,8 @@ class AIExtractionService:
             llm=self.llm_metadata,
             verbose=True
         )
+        # 预先定义一个变量用于存储提取的元数据
+        metadata: ExtractedDocumentMetadata 
 
         try:
             logger.info(f"Preparing to extract metadata: {doc_content[:100]}...") 
@@ -216,12 +218,45 @@ class AIExtractionService:
                 cleaned_json_str = raw_output_text[start_index : end_index + 1]
                 logger.info(f"Cleaned JSON String:\n{cleaned_json_str}")
                 metadata = ExtractedDocumentMetadata.model_validate_json(cleaned_json_str)
+                logger.info(f"Successfully extracted metadata: {metadata.model_dump_json(indent=2)}")
+                return metadata
             else:
-                # 如果没有找到合法的 JSON 结构，则抛出异常
-                raise ValueError("LLM output does not contain a valid JSON structure.")
+                # 如果没有找到合法的 JSON 结构
+                logger.error("LLM output does not contain a valid JSON structure. Setting to default values.")
+                # 直接创建空的 ExtractedDocumentMetadata 实例并记录错误
+                metadata = ExtractedDocumentMetadata(
+                    clazz=None, 
+                    exam=None, 
+                    labelList=[], 
+                    levelList=[], 
+                    subject=None, 
+                    type=None,
+                    description=None # 确保所有必填或常用的字段都有默认值
+                )
+                return metadata
 
-            logger.info(f"Successfully extracted metadata: {metadata.model_dump_json(indent=2)}")
+        # 捕获其他可能的异常，例如 Pydantic 校验失败等
+        except Exception as e:
+            logger.error(f"Error during metadata extraction (LLM/Pydantic failed): {e}", exc_info=True)
+            # 修正：创建默认实例
+            metadata = ExtractedDocumentMetadata(
+                clazz=None, 
+                exam=None, 
+                labelList=[], 
+                levelList=[], 
+                subject=None, 
+                type=None,
+                description=None
+            )
+            # 记录一个警告，表示已使用默认值
+            logger.warning("Falling back to default metadata values due to critical error.")
             
+            if metadata is None:
+                logger.error("Metadata object is unexpectedly None after exception handling. Returning minimum valid object.")
+                metadata = ExtractedDocumentMetadata(
+                    clazz="None", exam="None", labelList=[], levelList=[], subject="None", type="Book", description=""
+                )
+                
             # --- 后处理和默认值设置 ---
             if metadata.type is None or metadata.type.strip() == "":
                 logger.warning(f"Extracted metadata 'type' is null or empty. Setting to default 'Book'. Original: {metadata.type}")

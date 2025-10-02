@@ -7,12 +7,12 @@ import re
 from typing import Dict, Any, List, Optional
 import httpx 
 import os 
+from urllib.parse import quote
 from alibabacloud_bailian20231229.client import Client as BailianClient
 from Tea.model import TeaModel
-# 修正 1：Client Config 路径通常在 tea_openapi 或 tea_util 中
 from alibabacloud_tea_openapi.models import Config as BailianConfig 
 from alibabacloud_bailian20231229.models import (ApplyFileUploadLeaseRequest, AddFileRequest, 
-    RetrieveRequest, DeleteIndexDocumentRequest, SubmitIndexAddDocumentsJobRequest
+    RetrieveRequest, DeleteIndexDocumentRequest, SubmitIndexAddDocumentsJobRequest, ListChunksRequest
 )
 from alibabacloud_tea_util.models import RuntimeOptions
 
@@ -94,7 +94,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                     upload_response = await client.request(
                         method="PUT", 
                         url=pre_signed_url,
-                        headers=headers,
+                        headers=headers, # 使用传入的 headers
                         content=source_response.aiter_bytes()
                     )
                     upload_response.raise_for_status()
@@ -154,13 +154,40 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         lease_id = lease_response.get('FileUploadLeaseId')
         upload_param = lease_response.get('Param', {})
         pre_signed_url = upload_param.get('Url')
+        # 1. 获取 Bailian/OSS 预设的 Header
+        # 这些 Header 包含了 OSS 签名所需的 Content-Type, Content-Length 等关键信息。
         upload_headers_dict = {k: v for k, v in upload_param.get('Headers', {}).items()}
         
-        # 2. 客户端上传文件内容到 presigned URL
-        await self._upload_file_content_from_url(pre_signed_url, url, upload_headers_dict)
+        # --- 修正 1：构造 OSS 自定义元数据 Header，并对值进行 URL 编码 ---
+        oss_meta_headers = {}
         
-        # 3. 添加文件到类目 (核心：注入 doc_id 作为 tags)
+        # 1. 注入业务 Doc ID
+        # 统一对值进行 URL 编码，以保证 ASCII 兼容性
+        oss_meta_headers[f"x-oss-meta-business-doc-id"] = quote(str(doc_id))
         
+        # 2. 注入文档名称
+        oss_meta_headers[f"x-oss-meta-document-name"] = quote(doc_name)
+        
+        # 3. 注入所有自定义 Meta
+        if meta and isinstance(meta, dict):
+             for key, value in meta.items():
+                # 键名小写，替换不兼容字符
+                oss_key = f"x-oss-meta-{key.lower().replace('_', '-')}" 
+                # 对值进行编码
+                oss_meta_headers[oss_key] = quote(str(value)) 
+
+        # 2. 合并 Header (关键步骤)
+        # 将原始的 Bailian Header 作为基准，然后用自定义的 OSS 元数据 Header 覆盖/追加
+        # 由于 x-oss-meta-* 键与原始 Header 不冲突，这里使用 **{} 展开操作符是安全的。
+        final_upload_headers = {**upload_headers_dict, **oss_meta_headers}
+
+        logger.info(f"Uploading file with final headers. Custom keys: {list(oss_meta_headers.keys())}")
+        
+        # 3. 客户端上传文件内容到 presigned URL
+        # 传入包含自定义元数据的 Header
+        await self._upload_file_content_from_url(pre_signed_url, url, final_upload_headers)
+        
+        # 4. 添加文件到类目 (核心：注入 doc_id 作为 tags)
         # 构造 Tags 列表，将业务 doc_id 作为第一个标签
         all_tags = [self._sanitize_tag(doc_id)]
         if meta and isinstance(meta, dict):
@@ -180,7 +207,8 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             lease_id=lease_id, 
             parser=self.parser_type, 
             category_id=self.default_category_id,
-            tags=all_tags
+            tags=all_tags,
+            original_file_url=url 
         )
         logger.info(f"Adding file {doc_name} with tags/metadata: {all_tags}")
         
@@ -189,7 +217,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         
         file_id = add_file_response.get('FileId')
         
-        # 4. 提交索引追加任务
+        # 5. 提交索引追加任务
         # SubmitIndexAddDocumentsJobRequest 不包含元数据字段，仅传入文件 ID
         submit_request = SubmitIndexAddDocumentsJobRequest(
             index_id=index_id, 
