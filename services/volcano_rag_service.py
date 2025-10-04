@@ -225,6 +225,7 @@ class VolcanoEngineRagService(Service, AbstractKnowledgeBaseService):
     # 抽象方法实现 4: 更新元数据
     async def update_document_meta(self, 
                                knowledge_base_id: str, 
+                               file_key: str,
                                doc_id: str, 
                                meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]: 
         """

@@ -35,7 +35,7 @@ class AbstractKnowledgeBaseService(ABC):
         pass
         
     @abstractmethod
-    async def update_document_meta(self, doc_id: str, knowledge_base_id: str, meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def update_document_meta(self, doc_id: str, file_key: str,knowledge_base_id: str, meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """更新现有文档的元数据。"""
         pass
 

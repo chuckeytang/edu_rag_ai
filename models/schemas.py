@@ -31,6 +31,7 @@ class UploadResponse(BaseModel):
 class TaskStatus(BaseModel):
     """一个通用的后台任务状态模型"""
     task_id: str
+    kb_doc_id: str
     task_type: str # 例如 'document_indexing', 'report_generation'
     status: str # e.g., 'pending', 'running', 'success', 'error', 'duplicate'
     progress: int = Field(0, ge=0, le=100)
@@ -138,6 +139,7 @@ class RAGMetadata(BaseModel):
     type: str
     accessible_to: Optional[List[str]] = Field(None)
     level_list: Optional[List[str]] = Field(None)
+    kb_doc_id: Optional[str] = None
     class Config:
         # 允许Pydantic从额外的字段创建模型，但不会包含在模型中
         extra = 'ignore' 
@@ -152,8 +154,8 @@ class UploadFromOssRequest(BaseModel):
         description="RAG 配置，用于文档索引阶段的参数，例如 chunk_size。"
     )
 
-# Volcano API 的元数据格式
-class VolcanoMetaField(BaseModel):
+# Kb API 的元数据格式
+class KbMetaField(BaseModel):
     field_name: str
     field_type: str
     field_value: Any # 可以是 string, bool, list<string> 等
@@ -162,16 +164,11 @@ class UpdateMetadataRequest(BaseModel):
     """
     用于从 Java 端通知 Python RAG 服务更新文档元数据（例如权限）的请求 DTO。
     """
-    doc_id: str = Field(..., description="火山知识库中的文档 ID。")
-    meta_updates: List[VolcanoMetaField] = Field(..., description="要更新的元数据字段列表。")
+    doc_id: str = Field(..., description="知识库中的文档 ID。")
+    file_key: str = Field(..., description="原始 OSS 文件键 (fileUrl)。")
+    meta_updates: List[KbMetaField] = Field(..., description="要更新的元数据字段列表。")
     knowledge_base_id: str
     rag_config: RagConfig
-
-class UpdateMetadataResponse(BaseModel):
-    message: str
-    material_id: int
-    task_id: str
-    status: str
 
 class DeleteByMetadataRequest(BaseModel):
     knowledge_base_id: str = Field(..., description="The name of the knowledge base to delete from.")
@@ -239,16 +236,6 @@ class DeleteChatMessagesRequest(BaseModel):
     """
     session_id: str = Field(..., description="要删除的会话ID")
     account_id: int = Field(..., description="会话所属的用户ID")
-
-class RagCallbackRequest(BaseModel):
-    """
-    用于 Python 服务向 Java 服务发送 RAG 任务结果的回调请求
-    """
-    material_type: str = Field(..., description="文档类型，例如 'paper' 或 'paper_cut'")
-    material_id: int = Field(..., description="材料在业务侧的唯一ID，例如 paper_cut_id")
-    status: str = Field(..., description="任务最终状态：'success', 'error', 'duplicate'")
-    message: str = Field(..., description="任务结果描述")
-    details: Optional[Any] = Field(None, description="任务结果的额外详情")
 
 class PaperCutMetadataPayload(BaseModel):
     file_key: Optional[str] = None

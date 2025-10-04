@@ -32,3 +32,30 @@ async def rag_query_with_context_api(request: ChatQueryRequest,
     except Exception as e:
         logger.error(f"Unhandled error in /rag-query-with-context: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during RAG processing.")
+    
+@router.get("/doc-id/bailian/{knowledge_base_id}/{doc_id}", 
+            summary="根据业务ID查找百炼KB的文档ID")
+async def get_bailian_doc_id(
+    knowledge_base_id: str,
+    doc_id: str, # 业务侧的filekey
+    rag_service: QueryService = Depends(get_query_service) 
+):
+    """
+    通过业务 Doc ID (Material ID) 检索阿里百炼的 File ID (kb_doc_id)。
+    """
+    try:
+        bailian_doc_id = await rag_service.get_bailian_doc_id_by_doc_id(
+            knowledge_base_id=knowledge_base_id, 
+            doc_id=doc_id
+        )
+        
+        if bailian_doc_id:
+            return {"kb_doc_id": bailian_doc_id}
+        else:
+            # 如果找不到，返回 404
+            raise HTTPException(status_code=404, detail=f"Bailian KB ID not found for Doc ID: {doc_id}")
+            
+    except Exception as e:
+        logger.error(f"Failed to retrieve Bailian Doc ID for {doc_id}: {e}", exc_info=True)
+        # 向上抛出更具体的错误
+        raise HTTPException(status_code=500, detail=f"Internal RAG Service Error: {str(e)}")

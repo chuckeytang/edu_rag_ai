@@ -73,9 +73,9 @@ class IndexerService:
         
         logger.info(f"Attempting to delete documents from '{knowledge_base_id}' with filters: {filters}")
         
-        doc_id_to_delete = filters.get("doc_id") 
+        doc_id_to_delete = filters.get("kb_doc_id") 
         if not doc_id_to_delete:
-            message = "Deletion requires a 'doc_id' filter (should be FileId)."
+            message = "Deletion requires a 'kb_doc_id' filter (should be FileId)."
             logger.error(message)
             return {"status": "error", "message": message}
             
@@ -123,6 +123,7 @@ class IndexerService:
            
     async def update_document_meta(self, 
                              doc_id: str, 
+                             file_key: str,
                              knowledge_base_id: str, 
                              meta_updates: List[Dict[str, Any]]) -> dict:
         """通用元数据更新方法，直接调用 AbstractKnowledgeBaseService。"""
@@ -132,6 +133,7 @@ class IndexerService:
             # 调用抽象接口
             response = await self.kb_service.update_document_meta(
                 knowledge_base_id=knowledge_base_id,
+                file_key=file_key,
                 doc_id=doc_id,
                 meta_updates=meta_updates
             )

@@ -24,6 +24,7 @@ from models.schemas import (
 from api.dependencies import (
     get_indexer_service, 
     get_document_oss_service,
+    get_query_service,
     get_task_manager_service,
     get_document_service
 )
@@ -90,7 +91,7 @@ async def notify_metadata_update(
     
     # 1. 映射 Pydantic 模型到 IndexerService 需要的 List[Dict]
     # Pydantic 模型的 model_dump 方法会处理好嵌套结构
-    # 确保 Python 端的 UpdateMetadataRequest 中的 meta_updates 字段使用了 List[VolcanoMetaField]
+    # 确保 Python 端的 UpdateMetadataRequest 中的 meta_updates 字段使用了 List[KbMetaField]
     meta_updates_dicts = [
         meta_field.model_dump(exclude_none=True) 
         for meta_field in request.meta_updates
@@ -100,6 +101,7 @@ async def notify_metadata_update(
         # 2. 直接调用 IndexerService 中的元数据更新方法
         result = await indexer_service.update_document_meta(
             doc_id=request.doc_id,
+            file_key=request.file_key,
             knowledge_base_id=request.knowledge_base_id,
             meta_updates=meta_updates_dicts
         )

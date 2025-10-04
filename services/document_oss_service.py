@@ -159,7 +159,7 @@ class DocumentOssService:
             logger.info(f"Indexing document '{display_file_name}' into knowledge base '{rag_config.knowledge_base_id}'...")
             
             # IndexerService 负责将这里的通用 meta 适配给底层 KB
-            await self.indexer_service.add_documents_to_index(
+            result = await self.indexer_service.add_documents_to_index(
                 documents=[final_document_payload], 
                 knowledge_base_id=rag_config.knowledge_base_id 
             )
@@ -172,7 +172,7 @@ class DocumentOssService:
                 "file_key": file_key,
                 "knowledge_base_id": rag_config.knowledge_base_id
             }
-            self.task_manager.finish_task(task_id, "success", result=success_result)
+            self.task_manager.finish_task(task_id, "success", result=result.get('result'))
             return {"status": "success", "message": success_result["message"]}
 
         except Exception as e:

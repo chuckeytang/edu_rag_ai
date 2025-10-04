@@ -220,7 +220,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         job_id = submit_response.get('Id')
         
         return {
-            "file_id": file_id, # 百炼返回的 File ID
+            "kb_doc_id": file_id, # 百炼返回的 File ID
             "business_doc_id": doc_id, # 业务传入的 Doc ID
             "job_id": job_id,
             "status": "Submitted for indexing",
@@ -372,23 +372,22 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         if not final_tags:
             logger.warning(f"No valid tags generated for file_id {file_id}. Tags will be cleared.")
             
+        # 1. 构造请求体 (Body) DTO: 
+        #    UpdateFileTagRequest 只需要 tags，因为它只代表 HTTP Body 内容。
         update_request = UpdateFileTagRequest(
-            file_id=file_id,
-            tags=final_tags # 传入完整的标签列表，它会覆盖原有标签
+            tags=final_tags 
         )
         
         logger.info(f"Updating tags for file {file_id}. Final tags: {final_tags}")
-
-        # 使用 TeaModel 的 update_file_tag 方法
-        # PUT /{WorkspaceId}/datacenter/file/{FileId}
-        # ⚠️ 注意：SDK 中可能需要传入 FileId 作为路径参数。
+        
         try:
-            # 查找并使用 SDK 对应的方法 (根据您提供的请求语法，这可能是一个 PUT 请求，SDK 封装为 update_file_tag_with_options)
+            # 2. 调用 SDK 方法：File ID 作为路径参数传入
+            #    SDK 的方法签名通常是: update_file_tag_with_options(WorkspaceId, FileId, UpdateFileTagRequest, ...)
             response = await self._async_bailian_call(
                 self._client.update_file_tag_with_options,
-                self.workspace_id, 
-                file_id, # 对应路径参数 {FileId}
-                update_request, # 包含 tags 的 Body
+                self.workspace_id,      # 路径参数 1: WorkspaceId
+                file_id,                # 路径参数 2: FileId (您的 SDK 封装会在这里找到它)
+                update_request,         # 请求体: UpdateFileTagRequest
                 {}, 
                 RuntimeOptions()
             )
@@ -406,6 +405,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
     async def update_document_meta(self, 
                                knowledge_base_id: str, 
                                doc_id: str, 
+                               file_key: str,
                                meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         更新文档元数据。针对百炼，我们将其适配为更新文件标签 (Tags)。
@@ -421,25 +421,28 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         
         # 1. 提取新的 accessible_to 列表
         for item in meta_updates:
-            if isinstance(item, dict) and item.get('key') == 'accessible_to':
-                accessible_to_new_list = item.get('value')
+            if isinstance(item, dict) and item.get('field_name') == 'accessible_to':
+                accessible_to_new_list = item.get('field_value')
                 break
         
         if accessible_to_new_list is None:
              # 如果没有可更新的 accessible_to 字段，则返回不支持其他元数据更新
+            logger.error(f"Bailian only supports updating 'accessible_to' via file tags. Other metadata updates are not supported.")
             return {
                 "message": "Bailian only supports updating 'accessible_to' via file tags. Other metadata updates are not supported.",
                 "status": "not_implemented",
             }
 
-        # 2. 构造新的 tags 列表 (百炼的 tag 是覆盖式更新)
-        
-        # 业务逻辑：更新权限标签时，需要保留 doc_id 标签。
-        # ⚠️ 这是一个假设：您需要确保每次更新标签时，doc_id 标签始终在列表中。
-        # 否则，更新权限标签会导致 doc_id 标签丢失，影响基于 doc_id 的检索。
-        
-        # 确保 doc_id 标签始终存在
-        new_tags = [self._sanitize_tag(file_id)] 
+        import re
+        # 1. 正则表达式: 匹配所有不是字母、数字、_、- 的字符
+        cleaned_file_key_tag = re.sub(r'[^a-zA-Z0-9_-]', '_', file_key)
+        # 2. 确保第一个字符是字母或下划线
+        if not re.match(r'^[a-zA-Z_]', cleaned_file_key_tag):
+            cleaned_file_key_tag = 'doc_' + cleaned_file_key_tag
+            
+        # 2.2 初始化标签列表，将清洗后的 File Key 作为业务标识 Tag 放在第一位
+        new_tags = [self._sanitize_tag(cleaned_file_key_tag)] 
+        logger.info(f"Retaining business tag based on file_key: {cleaned_file_key_tag}")
         
         # 添加新的权限标签
         if accessible_to_new_list and isinstance(accessible_to_new_list, list):

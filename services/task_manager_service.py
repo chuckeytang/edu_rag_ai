@@ -20,6 +20,7 @@ class TaskManagerService:
         task_id = str(uuid.uuid4())
         new_task = SchemasTaskStatus(
             task_id=task_id,
+            kb_doc_id="",
             task_type=task_type,
             status="pending",
             message=initial_message,
@@ -34,11 +35,12 @@ class TaskManagerService:
         return self._tasks.get(task_id)
 
     def update_progress(self, task_id: str, progress: int, message: str):
-        """[核心方法] 更新任务的进度和消息"""
+        """更新任务的进度和消息"""
         task = self.get_status(task_id)
         if task and task.status not in ["success", "error", "duplicate"]:
             task.progress = min(max(progress, 0), 100) # 保证进度在0-100之间
             task.message = message
+            task.kb_doc_id = ""
             task.status = "running"
             task.updated_at = datetime.now(timezone.utc)
             logger.info(f"[TASK_ID: {task_id}] Progress: {progress}%, Message: {message}")
@@ -46,10 +48,11 @@ class TaskManagerService:
             logger.warning(f"Attempted to update progress for non-existent task_id: {task_id}")
 
     def finish_task(self, task_id: str, final_status: str, result: Optional[Dict] = None):
-        """[核心方法] 标记任务为完成（成功或失败）"""
+        """ 标记任务为完成（成功或失败）"""
         task = self.get_status(task_id)
         if task:
             task.progress = 100
+            task.kb_doc_id = result.get('kb_doc_id')
             task.status = final_status
             task.message = result.get("message", f"Task finished with status: {final_status}") if result else f"Task finished with status: {final_status}"
             task.result = result

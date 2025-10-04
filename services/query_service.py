@@ -584,3 +584,41 @@ class QueryService:
         yield f"data: {final_sse_event_json}\n\n".encode("utf-8")
 
         return
+    
+
+    # ----------------------------------------------------------------------
+    # 根据业务 Doc ID 查找 Bailian File ID
+    # ----------------------------------------------------------------------
+    async def get_bailian_doc_id_by_doc_id(
+        self, 
+        knowledge_base_id: str, 
+        doc_id: str # 业务侧的filekey
+    ) -> Optional[str]:
+        """
+        通过业务 Doc ID (materialId) 检索 Bailian File ID (kbDocId)。
+        利用 Bailian 的 Tag 过滤机制实现。
+        """
+        # 1. 设置一个空查询文本，以保证召回不依赖于语义相关性
+        query_text = "placeholder query" 
+        
+        # 2. 构造过滤器：只包含业务 Doc ID 列表
+        filters = {"doc_id_list": [doc_id]}
+        
+        # 3. 调用底层的 Bailian 检索服务
+        # 限制 top_k=1 即可，因为我们只关心 File ID
+        retrieved_chunks = await self.kb_service.retrieve_documents(
+            query_text=query_text,
+            knowledge_base_id=knowledge_base_id,
+            limit=1,
+            rerank_switch=False, # 无需重排
+            filters=filters
+        )
+        
+        if retrieved_chunks:
+            # BailianRagService.retrieve_documents 返回的列表中，每个元素都有 docId 字段，即 Bailian 的 FileId
+            bailian_doc_id = retrieved_chunks[0].get('docId')
+            logger.info(f"Successfully retrieved Bailian Doc ID: {bailian_doc_id} for Doc ID: {doc_id}")
+            return bailian_doc_id
+        
+        logger.warning(f"Failed to retrieve Bailian Doc ID for Doc ID: {doc_id}. No document found.")
+        return None
