@@ -122,12 +122,10 @@ class QueryService:
         
         # --- 流程2: 异步并行调用知识库检索API ---
         retrieve_tasks = []
-        # 构建文档过滤器
-        filters = {}
         if request.target_file_ids:
             logger.info(f"Applying doc_id filter: {request.target_file_ids}. Note: Filter support depends on underlying KB implementation.")
             # 简化 filters 示例: 
-            filters = {"doc_id_list": request.target_file_ids} # 传递简化后的过滤器，由底层服务决定如何处理
+            combined_rag_filters["doc_id_list"] = request.target_file_ids
 
         for kb_id in knowledge_base_ids_to_query:
             # 调用抽象接口
@@ -136,7 +134,7 @@ class QueryService:
                 knowledge_base_id=kb_id,
                 limit=final_top_k,
                 rerank_switch=True,
-                filters=filters
+                filters=combined_rag_filters
             )
             retrieve_tasks.append(task)
         

@@ -278,6 +278,30 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                 
                 logger.info(f"Generated Bailian tags filters for Doc ID: {bailian_search_filters}")
 
+            accessible_to_list = filters.get("accessible_to")
+
+            if accessible_to_list and isinstance(accessible_to_list, list):
+                logger.info(f"Mapping accessible_to filter for Bailian: {accessible_to_list}")
+                
+                # 对于权限过滤，我们希望文档匹配列表中的任一标签 (OR 关系)，例如 ['80', 'public']。
+                # 百炼的 SearchFilters 是一个列表，其元素之间是 AND 关系。
+                # 但是单个过滤器内部的 'tags' 字段，如果传入多个，则是 OR 关系。
+                # ⚠️ 关键：百炼 SDK 要求 tags 字段值是一个 JSON 字符串，代表一个列表。
+                
+                sanitized_acl_tags = []
+                for access_id in accessible_to_list:
+                    sanitized_tag = self._sanitize_tag(str(access_id))
+                    if sanitized_tag:
+                        sanitized_acl_tags.append(sanitized_tag)
+                
+                if sanitized_acl_tags:
+                    # 构造单个 Tag 过滤器，包含所有权限标签，实现 OR 关系
+                    acl_filter = {
+                        "tags": json.dumps(sanitized_acl_tags) # 将列表序列化为 JSON 字符串
+                    }
+                    bailian_search_filters.append(acl_filter)
+                    logger.info(f"Generated Bailian ACL filter: {acl_filter}")
+
             else:
                 # 如果传入的不是 doc_id_list 而是其他复杂的 K/V 结构，
                 # 假设它已经是简单的 Bailian 子分组结构，直接作为唯一分组传入。
