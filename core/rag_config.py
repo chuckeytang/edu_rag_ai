@@ -112,7 +112,6 @@ class RagConfig(BaseModel):
                 "- Focus on accuracy: represent the actual intent or topic of the user's question\n"
                 "---------------------\n"
                 "User query: {query_str}\n"
-                "Relevant document content: {context_str}\n"
                 "Session Title:"
             ),
             general_chat_prompt_template=(

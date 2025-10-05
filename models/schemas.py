@@ -216,6 +216,7 @@ class ChatQueryRequest(BaseModel):
     prompt: Optional[str] = None
     is_first_query: bool = False
     rag_config: RagConfig
+    session_title: Optional[str] = None
 
 class UpdateChatMessageRequest(BaseModel):
     """

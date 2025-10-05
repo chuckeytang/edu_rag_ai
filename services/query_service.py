@@ -52,7 +52,7 @@ class QueryService:
         # 使用配置中的提示词
         # 这里可以使用字符串格式化代替 PromptTemplate，以减少对 LlamaIndex 的依赖
         self.qa_prompt_template = rag_config.qa_prompt_template
-        self.title_generation_prompt_template = rag_config.title_prompt_template
+        self.title_generation_prompt = rag_config.title_prompt_template
         self.general_chat_prompt_template = rag_config.general_chat_prompt_template
         
         self.llm_reranker = None
@@ -104,6 +104,38 @@ class QueryService:
         final_referenced_material_ids = []
         generated_title = "" 
 
+        if request.session_title and request.session_title.strip():
+            # 如果 Java 侧已经获取到有效的现有标题，则直接使用，跳过生成
+            generated_title = request.session_title.strip()
+            logger.info(f"Using existing session title passed from Java: '{generated_title}'")
+            
+        elif request.is_first_query: 
+            logger.info("Attempting to generate session title as requested (is_first_query is True).")
+            try:
+                # 1. 构造标题生成 Prompt
+                title_prompt_text = self.title_generation_prompt.format(
+                    query_str=request.question
+                )
+                
+                # 2. 使用 LLM 进行同步或异步查询 (使用 self.llm.acomplete 确保它是一个简短的 API 调用)
+                # 注意: 这里使用 self.llm.acomplete 是为了快速同步结果，而不是流式返回。
+                title_response = await self.llm.acomplete(title_prompt_text)
+                
+                generated_title = title_response.text.strip()
+                
+                logger.info(f"Generated session title: '{generated_title}'")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate session title: {e}", exc_info=True)
+                generated_title = ""
+        else:
+            logger.info("Skipping session title generation as not requested by Java side (is_first_query is False).")
+
+        if generated_title:
+            title_context = f"The current chat session topic is: '{generated_title}'. Use this topic to better focus your response.\n---\n"
+            chat_history_context_string = "Session Title:" + title_context + "\n\n" + chat_history_context_string
+            logger.info(f"Augmented chat history with session title: {generated_title}")
+        
         # --- 流程1: 统一调用抽象服务的检索服务 ---
         knowledge_base_ids_to_query = []
         default_index_id = settings.BAILIAN_INDEX_ID if hasattr(settings, 'BAILIAN_INDEX_ID') else settings.VOLCANO_ENGINE_KNOWLEDGE_BASE_ID
