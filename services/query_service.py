@@ -269,7 +269,7 @@ class QueryService:
             chunk_source = chunk.get('source', '未知文件')
             chunk_doc_id = chunk.get('docId', 'N/A')
             chunk_material_id = chunk.get('material_id', 'N/A')
-            chunk_id = f"{chunk_doc_id}-{chunk.get('chunkId', 'N/A')}" 
+            chunk_id = chunk.get('chunkId', 'N/A')
             
             if tokenizer:
                 chunk_tokens = len(tokenizer.encode(chunk_content))
@@ -416,8 +416,9 @@ class QueryService:
             response_sentences = re.split(r'(?<=[.!?。！？])\s+', full_response_content)
 
         if self.embedding_model:
-            referenced_chunk_texts = [node.text for node in retrieved_chunk_map.values()]
-            referenced_chunk_ids = list(retrieved_chunk_map.keys())
+            retrieved_chunks_for_citation = list(retrieved_chunk_map.values())
+            referenced_chunk_texts = [node.text for node in retrieved_chunks_for_citation]
+            referenced_chunk_ids = [node.id_ for node in retrieved_chunks_for_citation]
 
             combined_referenced_texts = referenced_chunk_texts + chat_history_chunk_texts
             combined_referenced_ids = referenced_chunk_ids + chat_history_chunk_ids
@@ -442,13 +443,15 @@ class QueryService:
                         return 0
                     return dot_product / (norm_v1 * norm_v2)
 
+                # 用于构建最终的 referenced_docs 数组 (集合用于确保唯一性)
+                unique_referenced_docs = {} # Key: chunk_id (referenced_chunk_id), Value: full detail dict
+
                 for i, sentence in enumerate(response_sentences):
                     sentence_embedding = response_sentence_embeddings[i]
                     best_match_id = None
                     max_similarity = -1.0
                     best_match_type = ""
-                    citation_info = {}
-
+                    
                     for j, chunk_embedding in enumerate(referenced_chunk_embeddings):
                         similarity = cosine_similarity(sentence_embedding, chunk_embedding)
                         if similarity > max_similarity:
@@ -460,70 +463,79 @@ class QueryService:
                                 best_match_type = "chat_history"
 
                     if max_similarity > self.rag_config.citation_similarity_threshold:
-                        # 获取完整的引用文本
+                        # 1. 获取完整的引用文本和元数据
                         full_referenced_text = combined_referenced_texts[combined_referenced_ids.index(best_match_id)]
-                        
-                        # 核心修改点：对引用文本进行截断
                         truncated_referenced_text = (full_referenced_text[:TRUNCATE_LENGTH] + '...') if len(full_referenced_text) > TRUNCATE_LENGTH else full_referenced_text
 
-                        citation_info = {
-                            "sentence": sentence,
-                            "referenced_chunk_id": best_match_id, 
-                            "source_type": best_match_type, 
-                            "referenced_chunk_text": truncated_referenced_text,
-                            "document_id": None,
-                            "material_id": None,
-                            "file_name": None,
-                            "page_label": None
-                        }
-
+                        source_metadata = {}
                         if best_match_type == "document":
                             source_node = retrieved_chunk_map.get(best_match_id)
                             if source_node:
-                                citation_info.update({
-                                    "document_id": source_node.metadata.get('document_id'),
-                                    "material_id": source_node.metadata.get('material_id'),
-                                    "file_name": source_node.metadata.get('file_name'),
-                                    "page_label": source_node.metadata.get('page_label')
-                                })
+                                source_metadata = source_node.metadata
                         else: 
                             source_node = next((node for node in chat_history_context_nodes if node.id_ == best_match_id), None)
                             if source_node:
-                                citation_info.update({
-                                    "document_id": None,
-                                    "material_id": None,
-                                    "file_name": "聊天历史",
-                                    "page_label": source_node.metadata.get('role', '未知')
-                                })
-                        sentence_citations.append(citation_info)
+                                source_metadata = {
+                                    'document_id': None,
+                                    'material_id': None,
+                                    'file_name': "聊天历史",
+                                    'page_label': source_node.metadata.get('role', '未知')
+                                }
+                        
+                        # 2. 构建唯一的引用块详情 (referenced_docs的元素)
+                        # kb_doc_id 映射到 source_metadata.get('document_id')
+                        ref_doc_detail = {
+                            "_id": best_match_id, # 用作引用的唯一标识 (referenced_chunk_id)
+                            "source_type": best_match_type,
+                            "referenced_chunk_text": truncated_referenced_text,
+                            "kb_doc_id": source_metadata.get('document_id', source_metadata.get('kb_doc_id')), # 兼容性获取
+                            "material_id": source_metadata.get('material_id'),
+                            "file_name": source_metadata.get('file_name'),
+                            "page_label": source_metadata.get('page_label')
+                        }
+                        
+                        # 3. 将引用块详情加入唯一集合
+                        unique_referenced_docs[best_match_id] = ref_doc_detail
 
-            # 使用集合去重，并只收集有 material_id 的引用
-            material_id_set = set()
-            for citation in sentence_citations:
-                mid = citation.get('material_id')
-                # 只有当引用的类型是 'document' 并且 material_id 不是 None/N/A 时才收集
-                if citation.get('source_type') == 'document' and mid and mid != 'N/A':
-                    material_id_set.add(mid)
+                        # 4. 构建 sentence_citations 元素
+                        sentence_citations.append({
+                            "sentence": sentence,
+                            "refid": best_match_id # 引用 referenced_docs 中的 _id
+                        })
 
-            # 赋值给 final_referenced_material_ids
-            final_referenced_material_ids = list(material_id_set)
-            logger.info(f"Final referenced material IDs: {final_referenced_material_ids}")
+                # 5. 最终的 referenced_docs 列表
+                final_referenced_docs_list = list(unique_referenced_docs.values())
+                
+                # 使用集合去重，并只收集有 material_id 的引用
+                material_id_set = set()
+                for doc_detail in final_referenced_docs_list:
+                    mid = doc_detail.get('material_id')
+                    # 仅收集文档类型的 material_id
+                    if doc_detail.get('source_type') == 'document' and mid and mid != 'N/A':
+                        material_id_set.add(mid)
+
+                # 赋值给 final_referenced_material_ids
+                final_referenced_material_ids = list(material_id_set)
+                logger.info(f"Final referenced material IDs: {final_referenced_material_ids}")
 
         else:
+            final_referenced_docs_list = []
             logger.warning("Embedding model is not available for sentence-level citation. Skipping this step.")
 
         # --- 构建最终的 metadata ---
         final_metadata = {}
         final_metadata["rag_sources"] = rag_sources_info 
 
-        if final_referenced_material_ids:
-            final_metadata["referenced_docs"] = final_referenced_material_ids
+        if final_referenced_docs_list:
+             final_metadata["referenced_docs"] = final_referenced_docs_list
+
 
         if generated_title:
             final_metadata["session_title"] = generated_title
 
         if sentence_citations:
             final_metadata["sentence_citations"] = sentence_citations
+        # -----------------------------------------------------------
 
         logger.debug(f"DEBUG: Final metadata before StreamChunk creation: {final_metadata}")
 
