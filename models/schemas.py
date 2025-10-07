@@ -113,7 +113,6 @@ class ExtractedDocumentMetadata(BaseModel):
     levelList: List[str] = Field([], description="等级名称，如：[\"AS\",\"A2\",...]，匹配等级集合中的0-多个")
     subject: Optional[str] = Field(None, description="学科，如：Chemistry、Business、Computer Science，匹配学科选项集合中的一个")
     type: Optional[str] = Field(None, description="资料类型，如：Handout、Paper1、IA...，匹配资料类型选项集合中的一个")
-    description: Optional[str] = Field(None, max_length=1024, description="文档摘要，对文档内容的简洁描述，最大长度1024字符。") 
 
 # 用于知识点（记忆卡）提炼
 class Flashcard(BaseModel):
@@ -208,7 +207,6 @@ class ChatQueryRequest(BaseModel):
     question: str
     session_id: str
     account_id: int
-    context_retrieval_query: str
     knowledge_base_id: str
     target_file_ids: Optional[List[str]] = None
     filters: Optional[Dict[str, Any]] = None

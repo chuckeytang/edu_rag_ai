@@ -178,17 +178,33 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         if sanitized_doc_tag and sanitized_doc_tag != 'tag_empty':
             all_tags.append(sanitized_doc_tag)
         
-        # 3.2 仅对 accessible_to 列表字段进行 Tagging (新增/修改)
+        FIELDS_TO_TAG = [
+            'accessible_to', 'level_list', 'clazz', 'exam', 'subject', 'type'
+        ]
+        
         if meta and isinstance(meta, dict):
-            # 获取 accessible_to 列表
-            accessible_to_list = meta.get('accessible_to')
-            
-            if accessible_to_list and isinstance(accessible_to_list, list):
-                for item in accessible_to_list:
-                    # 将列表中的每个元素作为标签，并进行清洗
-                    sanitized_tag = self._sanitize_tag(str(item))
-                    if sanitized_tag and sanitized_tag != 'tag_empty':
-                        all_tags.append(sanitized_tag)
+            for field in FIELDS_TO_TAG:
+                value = meta.get(field)
+                
+                # 确定要处理的值列表 (如果是单值，转换为单元素列表)
+                if value is None:
+                    continue
+                elif isinstance(value, list):
+                    value_list = value
+                else:
+                    # 单值字段 (clazz, exam, subject, type) 转化为列表
+                    value_list = [value] 
+                
+                for item in value_list:
+                    # 将 item 转换为字符串并清洗，然后拼接为 tag: key_value
+                    item_str = str(item)
+                    if not item_str:
+                        continue
+
+                    # 构建最终的 Tag: key_value
+                    final_tag = self._sanitize_tag(f"{field}_{item_str}")
+                    all_tags.append(final_tag)
+                        
         # 去重并去除 None/空字符串
         all_tags = list(set([t for t in all_tags if t and t != 'tag_empty']))
         
@@ -254,45 +270,41 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         # 1. 过滤器适配逻辑：将上层业务 filter 转换为 Bailian SearchFilters
         if filters and isinstance(filters, dict):
             
-            # --- 适配 Doc ID 列表过滤 (业务最常见需求) ---
-            # 传入格式示例: {"doc_id_list": ["id1", "id2"]}
-            doc_id_list = filters.get("doc_id_list")
+            # 复制一份过滤器，以便在处理过程中移除已识别的字段
+            remaining_filters = filters.copy()
+            
+            # --- 适配 Doc ID 列表过滤 ---
+            doc_id_list = remaining_filters.pop("doc_id_list", None)
             
             if doc_id_list and isinstance(doc_id_list, list):
                 logger.info(f"Mapping doc_id_list filter for Bailian: {doc_id_list}")
                 
+                # Doc ID 过滤: 每一个 Doc ID 都是一个 Tag
                 for doc_id in doc_id_list:
-                    
                     sanitized_tag = self._sanitize_tag(str(doc_id))
-                    
-                    # 关键检查：确保清洗后的标签非空，避免传入 [""] 或 [null]
                     if sanitized_tag:
-                        # 修正：恢复官方示例中的 JSON 字符串格式
+                        # 生成 Tag 过滤器，Doc ID 之间是 AND 关系 (百炼默认行为)
                         tag_list = [sanitized_tag]
                         tag_filter = {
                             "tags": json.dumps(tag_list)
                         }
                         bailian_search_filters.append(tag_filter)
-                    else:
-                        logger.warning(f"Skipping empty tag generated from doc_id: {doc_id}")
                 
                 logger.info(f"Generated Bailian tags filters for Doc ID: {bailian_search_filters}")
 
-            accessible_to_list = filters.get("accessible_to")
+            # --- 适配 accessible_to 权限过滤 (OR 关系) ---
+            accessible_to_list = remaining_filters.pop("accessible_to", None)
 
             if accessible_to_list and isinstance(accessible_to_list, list):
                 logger.info(f"Mapping accessible_to filter for Bailian: {accessible_to_list}")
                 
-                # 对于权限过滤，我们希望文档匹配列表中的任一标签 (OR 关系)，例如 ['80', 'public']。
-                # 百炼的 SearchFilters 是一个列表，其元素之间是 AND 关系。
-                # 但是单个过滤器内部的 'tags' 字段，如果传入多个，则是 OR 关系。
-                # ⚠️ 关键：百炼 SDK 要求 tags 字段值是一个 JSON 字符串，代表一个列表。
-                
                 sanitized_acl_tags = []
+                # 权限 Tag 格式也是 key_value 模式：accessible_to_value
                 for access_id in accessible_to_list:
-                    sanitized_tag = self._sanitize_tag(str(access_id))
-                    if sanitized_tag:
-                        sanitized_acl_tags.append(sanitized_tag)
+                    # 关键：在这里将权限值格式化为 key_value Tag
+                    final_tag = self._sanitize_tag(f"accessible_to_{str(access_id)}")
+                    if final_tag:
+                        sanitized_acl_tags.append(final_tag)
                 
                 if sanitized_acl_tags:
                     # 构造单个 Tag 过滤器，包含所有权限标签，实现 OR 关系
@@ -302,15 +314,43 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                     bailian_search_filters.append(acl_filter)
                     logger.info(f"Generated Bailian ACL filter: {acl_filter}")
 
-            else:
-                # 如果传入的不是 doc_id_list 而是其他复杂的 K/V 结构，
-                # 假设它已经是简单的 Bailian 子分组结构，直接作为唯一分组传入。
-                # ⚠️ 警告：这部分适配存在风险，因为它依赖于业务层传入的 K/V 键名与百炼索引字段名一致。
-                if filters.get("op") is None: # 排除 Volcano 复杂的 op/conds 结构
-                    bailian_search_filters.append(filters)
-                    logger.warning("Treating complex filter as a single Bailian SearchFilter subgroup.")
-                else:
-                    logger.warning(f"Complex Volcano-style filter structure detected: {json.dumps(filters)}. Ignoring for Bailian API.")
+            # --- 适配剩余的 K/V 元数据过滤器 (AND/OR Tag 过滤) ---
+            
+            # 遍历剩余的 filters 字典。这些字段都是 clazz, subject, levelList 等业务元数据。
+            if remaining_filters:
+                logger.info(f"Mapping remaining metadata filters for Bailian: {remaining_filters}")
+                
+                for field, value in remaining_filters.items():
+                    # 确定要过滤的值列表 (如果单值，转换为单元素列表)
+                    if value is None:
+                        continue
+                    elif isinstance(value, list):
+                        filter_values = value
+                    else:
+                        filter_values = [value]
+                    
+                    # 构造 Tag 列表：key_value 格式
+                    field_tags = []
+                    for val in filter_values:
+                        item_str = str(val)
+                        if not item_str: continue
+
+                        # 关键：将 Field Key 和 Value 格式化为 key_value Tag
+                        final_tag = self._sanitize_tag(f"{field}_{item_str}")
+                        field_tags.append(final_tag)
+                        
+                    if field_tags:
+                        # 构造 Tag 过滤器。对于单个字段的多个值，通常我们希望是 OR 关系。
+                        # 例如 Subject: ['Biology', 'Physics'] 应该是匹配 Biology_Tag OR Physics_Tag。
+                        # 百炼的单个 'tags' 字段列表实现了这个 OR 逻辑。
+                        meta_filter = {
+                            "tags": json.dumps(field_tags)
+                        }
+                        # 由于 bailian_search_filters 列表之间是 AND 关系，这保证了
+                        # 多个不同字段（如 clazz 和 subject）之间的 AND 关系。
+                        bailian_search_filters.append(meta_filter)
+                        logger.info(f"Generated meta filter for {field}: {meta_filter}")
+
 
         # 2. 构造 Retrieve 请求体
         retrieve_request = RetrieveRequest(
@@ -433,57 +473,87 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                                meta_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         更新文档元数据。针对百炼，我们将其适配为更新文件标签 (Tags)。
-        我们假设 meta_updates 中包含了要更新的完整权限列表。
+        此方法将 meta_updates 中所有支持的字段（权限和四属性）格式化为 key_value Tag，
+        并执行完整的覆盖式 Tag 更新。
         
-        注意：doc_id 在此方法中通常是 Bailian 的 File ID。
+        注意：doc_id 在此方法中是 Bailian 的 File ID。
         """
         file_id = doc_id 
         
-        # 期望 meta_updates 结构是 [{'key': 'accessible_to', 'value': ['user1', 'public']}]
-        
-        accessible_to_new_list = None
-        
-        # 1. 提取新的 accessible_to 列表
-        for item in meta_updates:
-            if isinstance(item, dict) and item.get('field_name') == 'accessible_to':
-                accessible_to_new_list = item.get('field_value')
-                break
-        
-        if accessible_to_new_list is None:
-             # 如果没有可更新的 accessible_to 字段，则返回不支持其他元数据更新
-            logger.error(f"Bailian only supports updating 'accessible_to' via file tags. Other metadata updates are not supported.")
-            return {
-                "message": "Bailian only supports updating 'accessible_to' via file tags. Other metadata updates are not supported.",
-                "status": "not_implemented",
-            }
-
+        # --- 1. 业务标识 Tag (File Key 清洗后的格式) ---
         import re
-        # 1. 正则表达式: 匹配所有不是字母、数字、_、- 的字符
-        cleaned_file_key_tag = re.sub(r'[^a-zA-Z0-9_-]', '_', file_key)
-        # 2. 确保第一个字符是字母或下划线
-        if not re.match(r'^[a-zA-Z_]', cleaned_file_key_tag):
-            cleaned_file_key_tag = 'doc_' + cleaned_file_key_tag
-            
-        # 2.2 初始化标签列表，将清洗后的 File Key 作为业务标识 Tag 放在第一位
-        new_tags = [self._sanitize_tag(cleaned_file_key_tag)] 
-        logger.info(f"Retaining business tag based on file_key: {cleaned_file_key_tag}")
+        # 匹配所有不是字母、数字、_、- 的字符，并替换为 _
+        cleaned_file_key_tag_raw = re.sub(r'[^a-zA-Z0-9_-]', '_', file_key)
+        # 确保第一个字符是字母或下划线
+        if not re.match(r'^[a-zA-Z_]', cleaned_file_key_tag_raw):
+            cleaned_file_key_tag_raw = 'doc_' + cleaned_file_key_tag_raw
         
-        # 添加新的权限标签
-        if accessible_to_new_list and isinstance(accessible_to_new_list, list):
-            for item in accessible_to_new_list:
-                sanitized_tag = self._sanitize_tag(str(item))
-                if sanitized_tag and sanitized_tag != 'tag_empty':
-                    new_tags.append(sanitized_tag)
+        # 确保 Doc ID Tag（这是用于检索的原始 File Key 标识）和 File Key Tag 一致
+        business_id_tag = self._sanitize_tag(cleaned_file_key_tag_raw)
+        
+        # 初始化标签列表，必须保留业务标识 Tag
+        # new_tags = [self._sanitize_tag(cleaned_file_key_tag)] # 原始代码有误，应使用 business_id_tag
+        new_tags = [business_id_tag] 
+        
+        logger.info(f"Retaining business identifier tag: {business_id_tag}")
 
-        # 3. 调用更新 tags 的 API
+        
+        # --- 2. 收集并格式化所有要更新的业务元数据 Tag ---
+        
+        # 定义需要转化为 key_value Tag 的字段集合
+        FIELDS_TO_TAG = [
+            'accessible_to', 'level_list', 'clazz', 'exam', 'subject', 'type'
+        ]
+        
+        # 收集更新中的所有 Tag
+        updated_meta_tags = []
+        
+        # 遍历 Spring 传入的 meta_updates 列表
+        for item in meta_updates:
+            field = item.get('field_name')
+            value = item.get('field_value')
+            
+            if field in FIELDS_TO_TAG:
+                
+                # 确定要处理的值列表 (如果是单值，转换为单元素列表)
+                if value is None:
+                    continue
+                elif isinstance(value, list):
+                    value_list = value
+                else:
+                    value_list = [value] 
+                
+                for item_value in value_list:
+                    item_str = str(item_value)
+                    if not item_str:
+                        continue
+                        
+                    # 格式化 Field Key 和 Value
+                    sanitized_field_key = self._sanitize_tag(field) 
+                    sanitized_item_value = self._sanitize_tag(item_str)
+                    
+                    if sanitized_item_value and sanitized_field_key:
+                        # 构建最终的 Tag: key_value
+                        final_tag = f"{sanitized_field_key}_{sanitized_item_value}"
+                        updated_meta_tags.append(final_tag)
+
+        # 3. 合并所有 Tag 并去重
+        # new_tags 现在包含：[业务标识 Tag] + [所有格式化的元数据 Tag]
+        new_tags.extend(updated_meta_tags)
+        
+        final_tags_to_apply = list(set(new_tags))
+        
+        # 4. 调用更新 tags 的 API
         try:
+            logger.info(f"Updating tags for file {file_id}. Tags to be applied: {final_tags_to_apply}")
             return await self.update_document_tags(
                 file_id=file_id, 
-                tags=list(set(new_tags)) # 再次去重
+                tags=final_tags_to_apply # 执行完整的覆盖式更新
             )
         except Exception as e:
+            logger.error(f"Failed to update file tags (metadata update failed): {e}", exc_info=True)
             return {
-                "message": f"Failed to update file tags (permissions): {str(e)}",
+                "message": f"Failed to update file tags (metadata update): {str(e)}",
                 "status": "error",
             }
         

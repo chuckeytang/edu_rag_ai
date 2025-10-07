@@ -122,6 +122,8 @@ class AIExtractionService:
             hasattr(settings, 'BAILIAN_WORKSPACE_ID') and settings.BAILIAN_WORKSPACE_ID
         )
 
+        # 百炼的metadata无法取出，现在暂时禁用掉
+        is_bailian_mode = False
         if is_bailian_mode:
             logger.info("Bailian configuration detected in settings. Skipping internal LLM metadata extraction and returning default empty values for Bailian's built-in extraction.")
             # 返回默认的空 ExtractedDocumentMetadata 实例
@@ -132,7 +134,6 @@ class AIExtractionService:
                 levelList=[], 
                 subject=None, 
                 type=None,
-                description=None 
             )
         
         doc_content = await self._get_content_from_oss_or_text(file_key, text_content, is_public)
@@ -188,6 +189,12 @@ class AIExtractionService:
         - These labels should be single words or short phrases, acting as descriptive tags.
         - Do NOT select from a predefined list for 'labelList'; generate them based on the document's content.
 
+        Constraint on 'levelList':
+        - The 'levelList' array MUST contain **at most one** relevant level designation from the available options (e.g., ["HL"] or ["AS"]). If multiple levels apply equally, select the highest relevant level. If no levels apply, return an empty array ([]).
+
+        JSON Structure Adherence (CRITICAL):
+        - **Maintain JSON completeness.** If a field's value cannot be determined from the document or is not applicable, you MUST return `null` for that field (except for `labelList` and `levelList`, which should return `[]`).
+
         {user_context_str}
 
         Document Content:
@@ -201,7 +208,7 @@ class AIExtractionService:
             "clazz": "IB",
             "exam": "CAIE",
             "labelList": ["Photosynthesis", "Carbon Cycle", "Plant Biology"],
-            "levelList": ["HL"],
+            "levelList": ["HL"],        
             "subject": "Biology",
             "type": "Handout"
         }}
@@ -250,7 +257,6 @@ class AIExtractionService:
                     levelList=[], 
                     subject=None, 
                     type=None,
-                    description=None # 确保所有必填或常用的字段都有默认值
                 )
                 return metadata
 
@@ -265,7 +271,6 @@ class AIExtractionService:
                 levelList=[], 
                 subject=None, 
                 type=None,
-                description=None
             )
             # 记录一个警告，表示已使用默认值
             logger.warning("Falling back to default metadata values due to critical error.")
@@ -273,7 +278,7 @@ class AIExtractionService:
             if metadata is None:
                 logger.error("Metadata object is unexpectedly None after exception handling. Returning minimum valid object.")
                 metadata = ExtractedDocumentMetadata(
-                    clazz="None", exam="None", labelList=[], levelList=[], subject="None", type="Book", description=""
+                    clazz="None", exam="None", labelList=[], levelList=[], subject="None", type="Book"
                 )
                 
             # --- 后处理和默认值设置 ---

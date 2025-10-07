@@ -37,7 +37,7 @@ class DebugQueryResponse(BaseModel):
     final_response_content: str
     citations: List[Dict[str, Any]]
     
-@router.get("/list-chunks-kb", summary="[DEBUG-KB] 按 Doc ID 查看知识库切片")
+@router.get("/list-chunks", summary="[DEBUG-KB] 按 Doc ID 查看知识库切片")
 async def list_chunks_kb(
     knowledge_base_id: str = Query(..., description="要查询的知识库唯一 ID (Index ID/resource_id)"),
     doc_id: Optional[str] = Query(
@@ -87,7 +87,7 @@ async def list_chunks_kb(
             raise HTTPException(status_code=500, detail=f"KB API Error (Code {e.code}): {e.message}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
     
-@router.post("/retrieve-with-filters-kb", summary="[DEBUG-KB] 测试带过滤的节点召回")
+@router.post("/retrieve-with-filters", summary="[DEBUG-KB] 测试带过滤的节点召回")
 async def debug_retrieve_with_filters_kb(
         request: QueryRequest,
         kb_service: AbstractKnowledgeBaseService = Depends(get_kb_service), # 依赖注入抽象接口
@@ -95,53 +95,43 @@ async def debug_retrieve_with_filters_kb(
 ) -> List[Dict[str, Any]]:
     """
     只执行知识库的检索步骤，并返回召回的文档块列表及其分数。
-    - **filters**: 传递底层 KB API 格式的元数据过滤（例如 Volcano 的 op, field, conds）。
+    - **filters**: 传递简化元数据过滤（例如 {"accessible_to": ["80", "public"]}）。
     - **target_file_ids**: 传递文档 ID 字符串列表进行精确过滤。
     """
     try:
-        # 1. 初始化过滤器
-        vendor_filters = request.filters.copy() if request.filters else {}
-        filter_expressions = []
-
+        # 1. 初始化过滤器：从请求中获取所有自定义过滤器
+        # 确保 filters 字段存在且是可变字典
+        combined_rag_filters = request.filters.copy() if request.filters else {}
+        
         # 2. 处理 target_file_ids (DocID 过滤)
         if request.target_file_ids:
-            # 恢复 格式的 Doc ID 过滤器逻辑，因为这是原始业务期望的格式
-            doc_id_filter = {
-                "op": "must",
-                "field": "doc_id",
-                "conds": request.target_file_ids # 转换为 Doc ID 格式
-            }
-            filter_expressions.append(doc_id_filter)
-
-        # 3. 合并其他元数据过滤器 (假设 request.filters 已是底层 KB 格式)
-        if vendor_filters:
-            filter_expressions.append(vendor_filters)
-            
-        # 4. 组合所有过滤器（使用 AND 逻辑）
-        final_doc_filter = None
-        if len(filter_expressions) == 1:
-            final_doc_filter = filter_expressions[0]
-        elif len(filter_expressions) > 1:
-            final_doc_filter = {"op": "and", "conds": filter_expressions}
-
-        logger.info(f"Final KB Doc Filter (Volcano/Abstract format): {json.dumps(final_doc_filter)}")
+            logger.info(f"Applying doc_id filter: {request.target_file_ids}. Merging with existing filters.")
+            # **核心修改：** 将 target_file_ids 直接合并为 'doc_id_list'
+            combined_rag_filters["doc_id_list"] = request.target_file_ids
         
+        # 3. 最终的过滤器就是这个扁平化字典
+        final_doc_filter = combined_rag_filters 
+
+        logger.info(f"Final KB Doc Filter (Simplified format): {json.dumps(final_doc_filter)}")
+        
+        # 4. 确定 top_k
         final_top_k = request.similarity_top_k if request.similarity_top_k is not None else query_service.rag_config.retrieval_top_k
 
-        # 5. 调用抽象接口 (rerank_switch=True 确保返回 rerank score)
+        # 5. 调用抽象接口。底层 kb_service (如 BailianRagService) 会负责将简化格式
+        #    (如 doc_id_list, accessible_to) 转换为其 API 所需的格式 (SearchFilters/Tags)。
         retrieved_chunks = await kb_service.retrieve_documents(
             query_text=request.question,
             knowledge_base_id=request.knowledge_base_id,
             limit=final_top_k,
             rerank_switch=True,
-            filters=final_doc_filter # 传入组合后的过滤器
+            filters=final_doc_filter # 传入整合后的过滤器
         )
 
         # 6. 格式化结果 (依赖底层服务返回的统一字典结构)
         results = []
         for chunk in retrieved_chunks:
+            # chunk.get('user_data', {}) 包含了所有的元数据，包括 accessible_to 等
             results.append({
-                # score 字段由底层服务提供，百炼可能返回 1.0
                 "score": chunk.get('rerank_score', chunk.get('score', 0.0)),
                 "raw_score": chunk.get('score', 0.0),
                 "doc_id": chunk.get('docId'),
@@ -156,10 +146,11 @@ async def debug_retrieve_with_filters_kb(
     except Exception as e:
         logger.error(f"Debug KB retrieval failed: {e}", exc_info=True)
         if hasattr(e, 'code') and hasattr(e, 'message'):
+            # 捕获 BailianRagException 或其他底层服务错误
             raise HTTPException(status_code=500, detail=f"KB API Error (Code {e.code}): {e.message}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
-@router.post("/debug-rag-flow-kb", summary="[DEBUG-KB] 执行并展示完整的RAG流程")
+@router.post("/debug-rag-flow", summary="[DEBUG-KB] 执行并展示完整的RAG流程")
 async def debug_rag_flow_kb(
         request: ChatQueryRequest,
         query_service: QueryService = Depends(get_query_service),
@@ -171,6 +162,7 @@ async def debug_rag_flow_kb(
     logger.info(f"Starting debug RAG flow for KB '{request.knowledge_base_id}' with query: '{request.question}'")
 
     # 注意：QueryService.rag_query_with_context 已经使用抽象 KB Service
+    # 确保传入请求的 rag_config 包含最新的配置
     response_stream = query_service.rag_query_with_context(request, request.rag_config)
     
     full_response_content = ""
@@ -195,34 +187,44 @@ async def debug_rag_flow_kb(
         logger.error(f"Error during streaming RAG query: {e}", exc_info=True)
         if hasattr(e, 'code'):
             # 使用通用的 KB Retrieval Error
-            raise HTTPException(status_code=500, detail=f"KB Retrieval Error (Code {e.code}): {e.message}")
+            # 假设异常有一个 code 属性 (如 BailianRagException)
+            error_code = getattr(e, 'code', 'UNKNOWN')
+            error_message = getattr(e, 'message', str(e))
+            raise HTTPException(status_code=500, detail=f"KB Retrieval Error (Code {error_code}): {error_message}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
-    # --- 提取调试信息 (逻辑不变) ---
+    # --- 核心修改：重构最终引用的节点信息 ---
     
     final_response_content = full_response_content
+    # 获取新的解耦引用结构
+    final_referenced_docs = final_metadata.get("referenced_docs", [])
     citations = final_metadata.get("sentence_citations", [])
     
-    final_retrieved_nodes_map = {}
+    # 1. 将所有引用的文档块详情映射到字典，以便通过 _id 查找
+    doc_detail_map = {doc["_id"]: doc for doc in final_referenced_docs}
     
-    for citation in citations:
-        chunk_id = citation['referenced_chunk_id']
-        if chunk_id not in final_retrieved_nodes_map:
-            final_retrieved_nodes_map[chunk_id] = {
-                "score": "N/A (Citations)",
-                "node_id": chunk_id,
-                "text_snippet": citation['referenced_chunk_text'][:300] + "...",
-                "metadata": {
-                    "document_id": citation.get('document_id'),
-                    "material_id": citation.get('material_id'),
-                    "file_name": citation.get('file_name'),
-                    "source_type": citation.get('source_type'),
-                }
+    # 2. 构建 final_retrieved_nodes (用于调试面板展示的节点列表)
+    final_retrieved_nodes = []
+    
+    # 使用 final_referenced_docs 列表中的数据来构建调试节点
+    for doc_id, doc_detail in doc_detail_map.items():
+        # 注意：这里直接使用 doc_detail 的信息，因为它已经是清洗和截断后的
+        final_retrieved_nodes.append({
+            "score": "N/A (Citation)", # 分数在句子引用中无法精确获取
+            "raw_score": "N/A",
+            "node_id": doc_detail["_id"],
+            "chunk_id": doc_detail["_id"],
+            "source": doc_detail.get('file_name', 'N/A'),
+            "text_snippet": doc_detail['referenced_chunk_text'], # 使用截断后的引用文本
+            "metadata": {
+                "kb_doc_id": doc_detail.get('kb_doc_id'),
+                "material_id": doc_detail.get('material_id'),
+                "source_type": doc_detail.get('source_type'),
+                "page_label": doc_detail.get('page_label', 'N/A'),
             }
+        })
 
-    final_retrieved_nodes = list(final_retrieved_nodes_map.values())
-    original_retrieved_nodes = [] 
-
+    original_retrieved_nodes = [] # 保持为空，因为完整的检索结果在流式架构中难以捕获
     final_llm_prompt_placeholder = "The full prompt is constructed internally by QueryService. Please check service logs for 'final_prompt_for_llm'."
     
     # 4. 封装并返回所有调试信息
@@ -230,9 +232,9 @@ async def debug_rag_flow_kb(
         query_text=request.question,
         final_llm_prompt=final_llm_prompt_placeholder,
         original_retrieved_nodes=original_retrieved_nodes,
-        final_retrieved_nodes=final_retrieved_nodes,
+        final_retrieved_nodes=final_retrieved_nodes, # <--- 包含了解耦后的引用详情
         final_response_content=final_response_content,
-        citations=citations
+        citations=citations # <--- 包含 refid 的句子引用列表
     )
 
 @router.delete("/delete-by-metadata-kb", summary="[DEBUG-KB] 根据元数据删除文档")

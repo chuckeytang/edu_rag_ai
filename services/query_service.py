@@ -81,7 +81,7 @@ class QueryService:
                 chat_history_context_nodes = await self._chat_history_service.retrieve_chat_history_context( 
                     session_id=request.session_id,
                     account_id=request.account_id,
-                    query_text=request.context_retrieval_query,
+                    query_text=request.question,
                     top_k=self.rag_config.history_retrieval_top_k or 5
                 )
                 if chat_history_context_nodes:
