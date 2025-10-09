@@ -195,3 +195,36 @@ class ChatHistoryService:
         except Exception as e:
             logger.error(f"Failed to get chat message count for session {session_id}: {e}", exc_info=True)
             return 0
+            
+    def add_qa_pair_to_chroma(self, session_id: str, account_id: int, user_question: str, ai_answer: str, timestamp: float):
+        """
+        将一问一答作为一个文档（Chunk）入库。
+        """
+        qa_pair_content = f"[USER]: {user_question}\n[ASSISTANT]: {ai_answer}"
+        
+        # 使用会话 ID + 时间戳作为唯一的文档 ID
+        doc_id = f"qa_pair_{session_id}_{timestamp}" 
+
+        metadata = {
+            "session_id": session_id,
+            "account_id": account_id,
+            "role": "qa_pair", # 标记这是一个问答对
+            "timestamp": timestamp,
+            "user_question_len": len(user_question),
+            "ai_answer_len": len(ai_answer)
+        }
+
+        doc = LlamaDocument(
+            text=qa_pair_content,
+            id_=doc_id,
+            metadata=prepare_metadata_for_storage(metadata)
+        )
+            
+        try:
+            # 注意: 如果 qa_pair_content 超过 CHROMA_CHAT_HISTORY_CHUNK_SIZE，这里会被切分
+            nodes = self.node_parser.get_nodes_from_documents([doc])
+            self._index.insert_nodes(nodes)
+            logger.info(f"Successfully added QA pair '{doc.id_}' to ChromaDB.")
+        except Exception as e:
+            logger.error(f"Failed to add QA pair '{doc.id_}' to ChromaDB: {e}", exc_info=True)
+            raise

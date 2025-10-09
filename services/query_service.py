@@ -522,13 +522,35 @@ class QueryService:
             final_referenced_docs_list = []
             logger.warning("Embedding model is not available for sentence-level citation. Skipping this step.")
 
+        # 确保 full_response_content 不为空
+        if full_response_content and full_response_content.strip() != "NO_RELEVANT_DOCUMENTS_FOUND":
+            # --- 异步执行 QA Pair 入库 ---
+            if self._chat_history_service:
+                try:
+                    import time
+                    current_timestamp = time.time()
+                    self._chat_history_service.add_qa_pair_to_chroma(
+                        session_id=request.session_id,
+                        account_id=request.account_id,
+                        user_question=request.question,
+                        ai_answer=full_response_content,
+                        timestamp=current_timestamp
+                    )
+                    logger.info(f"Successfully saved QA pair for session {request.session_id}.")
+                except Exception as e:
+                    # 记录错误，但不阻止最终返回
+                    logger.error(f"Failed to save QA pair to chat history: {e}", exc_info=True)
+            else:
+                logger.warning("ChatHistoryService not available, skipping QA pair saving.")
+
         # --- 构建最终的 metadata ---
         final_metadata = {}
         final_metadata["rag_sources"] = rag_sources_info 
 
+        final_metadata["session_id"] = request.session_id 
+
         if final_referenced_docs_list:
              final_metadata["referenced_docs"] = final_referenced_docs_list
-
 
         if generated_title:
             final_metadata["session_title"] = generated_title

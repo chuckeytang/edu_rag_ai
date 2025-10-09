@@ -35,7 +35,7 @@ class RagConfig(BaseModel):
 
     # 检索分数阈值
     retrieval_score_threshold: confloat(ge=0.0, le=1.0) = Field(
-        0.3, # 默认值可以根据测试调整
+        0.15, # 默认值可以根据测试调整
         description="用于判断检索结果是否有效的最高重排分数阈值。低于此阈值将回退到通用问答。"
     )
     
