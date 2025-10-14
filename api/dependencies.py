@@ -41,23 +41,6 @@ logger = logging.getLogger(__name__)
 
 # 全局变量
 _global_chroma_client_instance = None 
-_current_rag_config = RagConfig.get_default_config()
-
-def get_rag_config():
-    """返回当前的RAG配置"""
-    return _current_rag_config
-
-def update_rag_config(new_config_json_str: str):
-    """用于从后端更新 RAG 配置"""
-    global _current_rag_config
-    try:
-        config_dict = json.loads(new_config_json_str)
-        _current_rag_config = RagConfig(**config_dict)
-        logger.info("RAG configuration updated successfully.")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to update RAG config: {e}")
-        return False
 
 # --- ChromaDB 和 Embedding 依赖 (仅用于聊天历史) ---
 def get_chroma_client():
