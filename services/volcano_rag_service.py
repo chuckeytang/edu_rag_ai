@@ -222,6 +222,16 @@ class VolcanoEngineRagService(Service, AbstractKnowledgeBaseService):
             logger.error(f"Failed to retrieve from Volcano Engine RAG: {e}")
             return []
 
+    async def import_document_text(self, 
+                                text_content: str,
+                                doc_name: str, 
+                                knowledge_base_id: str, # Index ID
+                                doc_id: str, 
+                                doc_type: str, # 应该是 'txt'
+                                meta: Optional[Dict[str, Any]] = None
+                                ) -> Dict[str, Any]:
+        pass
+    
     # 抽象方法实现 4: 更新元数据
     async def update_document_meta(self, 
                                knowledge_base_id: str, 

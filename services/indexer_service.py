@@ -34,33 +34,55 @@ class IndexerService:
 
         document_to_add = documents[0]
         url = document_to_add.get("url")
+        text_content = document_to_add.get("text_content")
+
         doc_name = document_to_add.get("doc_name")
         doc_id = document_to_add.get("doc_id")
         doc_type = document_to_add.get("doc_type")
         meta = document_to_add.get("meta")
         
-        if not url:
+        if not url and not text_content:
             logger.error("Document dictionary is missing 'url'. Cannot index.")
             return {"status": "error", "message": "Document dictionary is missing 'url'"}
         
         indexing_metadata = {
-            "url": url, "doc_id": doc_id, "doc_name": doc_name, "doc_type": doc_type, 
+            "url_present": bool(url), "text_content_present": bool(text_content), 
+            "doc_id": doc_id, "doc_name": doc_name, "doc_type": doc_type, 
             "knowledge_base_id": knowledge_base_id, "meta": meta
         }
         logger.info(f"Preparing to index document with the following metadata: {indexing_metadata}")
         
         try:
-            # 调用抽象接口
-            result = await self.kb_service.import_document_url(
-                url=url, 
-                doc_id=doc_id, 
-                doc_name=doc_name, 
-                doc_type=doc_type,
-                knowledge_base_id=knowledge_base_id, 
-                meta=meta # 传入通用字典
-            )
-            logger.info(f"Document '{doc_name}' from URL uploaded successfully. Response: {result}")
-            return {"status": "success", "result": result, "file_id": result.get('file_id')}
+            result = None
+            if url:
+                # --- 路径 1: URL 导入 (PDF/DOCX 等) ---
+                logger.info(f"Using URL import path for document: {doc_name}")
+                result = await self.kb_service.import_document_url(
+                    url=url, 
+                    doc_id=doc_id, 
+                    doc_name=doc_name, 
+                    doc_type=doc_type,
+                    knowledge_base_id=knowledge_base_id, 
+                    meta=meta
+                )
+            elif text_content:
+                # --- 路径 2: TEXT 导入 (PaperCut) ---
+                logger.info(f"Using TEXT content import path for document: {doc_name}")
+                # 📢 调用抽象接口的新方法
+                result = await self.kb_service.import_document_text( 
+                    text_content=text_content, # 传入文本内容
+                    doc_id=doc_id, 
+                    doc_name=doc_name, 
+                    doc_type=doc_type,
+                    knowledge_base_id=knowledge_base_id, 
+                    meta=meta
+                )
+            else:
+                raise ValueError("Document dictionary is missing both 'url' and 'text_content'. Cannot index.")
+
+            logger.info(f"Document '{doc_name}' uploaded successfully. Response: {result}")
+            # 注意：百炼返回的是 file_id，我们统一使用 kb_doc_id
+            return {"status": "success", "result": result, "kb_doc_id": result.get('kb_doc_id')} 
             
         except Exception as e:
             logger.error(f"Failed to upload document '{doc_name}' from URL: {e}", exc_info=True)

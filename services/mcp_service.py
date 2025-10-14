@@ -86,7 +86,7 @@ class MCPService:
                         # 调用抽象接口进行检索
                         retrieved_chunks: List[Dict[str, Any]] = await self.kb_service.retrieve_documents(
                             query_text=user_question, 
-                            knowledge_base_id=settings.PAPER_CUT_COLLECTION_ID or "paper_cut_collection", # 知识库ID从配置中读取，或者使用默认值
+                            knowledge_base_id=settings.BAILIAN_PAPERCUT_INDEX_ID or "qip7hsynj3", # 知识库ID从配置中读取，或者使用默认值
                             limit=10,
                             rerank_switch=True 
                         )
@@ -95,10 +95,6 @@ class MCPService:
                         
                         retrieved_ids = []
                         for chunk in retrieved_chunks:
-                            # 假设 Volcano 的返回结构是：chunk["doc_info"]["user_data"] 包含 paper_cut_id
-                            # 由于 Bailian 和 Volcano 的返回结构不同，这里需要兼容处理，但 MCPService 应该只知道通用结构
-                            # ⚠️ 重要：抽象层必须保证返回的 List[Dict[str, Any]] 结构中，user_data 字段包含 paper_cut_id
-                            
                             # 这里的逻辑是针对 Volcano Engine 的特定返回结构（用户数据在 user_data 字段）
                             user_data = chunk.get("user_data", {})
                             paper_cut_id_raw = user_data.get("paper_cut_id")

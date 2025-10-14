@@ -17,6 +17,17 @@ class AbstractKnowledgeBaseService(ABC):
                                   meta: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """导入外部 URL 文档到知识库。"""
         pass
+
+    @abstractmethod
+    async def import_document_text(self, 
+                                text_content: str,
+                                doc_name: str, 
+                                knowledge_base_id: str, # Index ID
+                                doc_id: str, 
+                                doc_type: str, # 应该是 'txt'
+                                meta: Optional[Dict[str, Any]] = None
+                                ) -> Dict[str, Any]:
+        pass
     
     @abstractmethod
     async def delete_document(self, knowledge_base_id: str, doc_id: str) -> Dict[str, Any]:

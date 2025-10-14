@@ -149,7 +149,6 @@ class DocumentOssService:
                 "meta": generic_metadata 
             }
 
-            # 根据火山引擎文档，doc_type需要进行特殊处理 (此处保留，因为它与文档类型强相关)
             if final_document_payload["doc_type"] == 'jpg':
                 final_document_payload["doc_type"] = 'jpeg'
 

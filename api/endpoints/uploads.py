@@ -4,8 +4,7 @@ import httpx
 from typing import Dict, List, Optional
  
 from fastapi import APIRouter, Depends, Query, File, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-from core.rag_config import RagConfig
+from core.config import settings 
 from services.chat_history_service import ChatHistoryService
 from services.document_service import DocumentService
 from services.document_oss_service import DocumentOssService
@@ -156,23 +155,38 @@ async def process_text_indexing_task(request: UploadFromTextRequest, task_id: st
     
     try:
         metadata_payload = request.metadata.model_dump(by_alias=True, exclude_none=True)
-        metadata_payload["page_label"] = f"PaperCut-{request.metadata.paper_cut_id}" 
+        # 提取核心字段，用于构建 final_document_payload
+        file_key = metadata_payload.get('file_key') or f"paper-cut/{request.metadata.paper_cut_id}.txt"
+        doc_name = metadata_payload.get('title') or f"PaperCut_{request.metadata.paper_cut_id}"
+        doc_id = f"paper_cut_{request.metadata.paper_cut_id}"
+        doc_type = "txt"
 
-        doc = Document(
-            text=request.text_content,
-            metadata=metadata_payload
-        )
-        
+        # 2. 构造 IndexerService 期望的通用文档结构
+        final_document_payload = {
+            # 关键：使用文本内容而不是 URL
+            "text_content": request.text_content, 
+            "doc_name": doc_name,
+            "doc_id": doc_id, 
+            "doc_type": doc_type,
+            # 这里的 meta 就是原始的 metadata_payload 字典
+            "meta": metadata_payload 
+        }
+
         indexer_service = get_indexer_service()
-        indexer_service.add_documents_to_index(
-            [doc], 
-            knowledge_base_id=request.knowledge_base_id, 
-            rag_config=request.rag_config
+        # 使用 PaperCut 专用的 Knowledge Base ID
+        knowledge_base_id = settings.BAILIAN_PAPERCUT_INDEX_ID
+        
+        result = await indexer_service.add_documents_to_index(
+            documents=[final_document_payload], 
+            knowledge_base_id=knowledge_base_id # 使用专用的 KB ID
         )
         
-        final_status = "success"
-        final_message = "试题索引成功。"
-        logger.info(f"[TASK_ID: {task_id}] Successfully indexed text content for paper_cut_id: {request.metadata.paper_cut_id}")
+        if result.get("status") == "success":
+            final_status = "success"
+            final_message = "试题索引成功。"
+            logger.info(f"[TASK_ID: {task_id}] Successfully indexed text content for paper_cut_id: {request.metadata.paper_cut_id}")
+        else:
+            raise Exception(result.get("message", "索引失败，详情请看日志。"))
 
     except Exception as e:
         final_status = "error"

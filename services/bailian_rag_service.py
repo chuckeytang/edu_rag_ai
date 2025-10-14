@@ -134,15 +134,32 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         实现百炼的文件导入流程: 1. 申请租约 -> 2. 客户端上传文件 -> 3. 添加文件到类目 -> 4. 提交索引追加任务
         将 material_id 拼接到 doc_name 前面。
         """
+
+        # 清理 URL，移除查询参数
+        from urllib.parse import urlparse, urlunparse
+        parsed_url = urlparse(url)
+        # 只保留 scheme, netloc, path，去除 params, query, fragment
+        cleaned_oss_path_url = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', '', ''))
+        
+        logger.info(f"Original URL: {url}")
+        logger.info(f"Cleaned OSS Path URL for Bailian Check: {cleaned_oss_path_url}")
+        
         index_id = knowledge_base_id
+        final_doc_name = doc_name
+        
+        # 检查 doc_name 是否以 doc_type 结尾（忽略大小写和点）
+        if doc_type and not final_doc_name.lower().endswith(f'.{doc_type}'.lower()):
+            # 补全文件后缀，例如：'document' + '.pdf'
+            final_doc_name = f"{final_doc_name}.{doc_type}"
+            logger.info(f"Appended doc_type '{doc_type}' to doc_name. Final name: {final_doc_name}")
         
         # --- 拼接 doc_name 以包含 material_id ---
         material_id = meta.get('material_id') if meta and isinstance(meta, dict) else None
         # 构造 Bailian 侧实际使用的文件名
-        bailian_doc_name = doc_name
+        bailian_doc_name = final_doc_name
         if material_id is not None:
              # 确保 material_id 是字符串，并拼接
-            bailian_doc_name = f"{material_id}_{doc_name}" 
+            bailian_doc_name = f"{material_id}_{final_doc_name}" 
             logger.info(f"New Bailian Document Name with material_id: {bailian_doc_name}")
         
         # 1. 获取文件大小并申请租约
@@ -151,11 +168,11 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                head_resp = await client.head(url)
+                head_resp = await client.head(cleaned_oss_path_url)
                 head_resp.raise_for_status()
                 file_size = int(head_resp.headers.get('content-length'))
         except Exception:
-            logger.warning(f"Failed to get file size via HEAD request for {url}. Using default size 1024.")
+            logger.warning(f"Failed to get file size via HEAD request for {cleaned_oss_path_url}. Using default size 1024.")
 
         lease_request = ApplyFileUploadLeaseRequest(file_name=bailian_doc_name, md_5=file_md5, size_in_bytes=file_size)
         lease_response = await self._async_bailian_call(self._client.apply_file_upload_lease_with_options,
@@ -170,10 +187,102 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         # 2. 客户端上传文件内容到 presigned URL
         await self._upload_file_content_from_url(pre_signed_url, url, upload_headers_dict)
         
-        # 3. 添加文件到类目
-        # 构造 Tags 列表
+        # 4. 调用公共方法完成 AddFileRequest 和索引提交
+        return await self._process_import_job(
+            lease_id=lease_id,
+            bailian_doc_name=bailian_doc_name,
+            knowledge_base_id=knowledge_base_id,
+            doc_id=doc_id,
+            meta=meta,
+            original_file_url=cleaned_oss_path_url # 传入清理后的 URL
+        )
+
+    async def import_document_text(self, 
+                                text_content: str,
+                                doc_name: str, 
+                                knowledge_base_id: str, # Index ID
+                                doc_id: str, 
+                                doc_type: str, # 应该是 'txt'
+                                meta: Optional[Dict[str, Any]] = None
+                                ) -> Dict[str, Any]:
+        """
+        将文本内容作为文件上传到百炼知识库 (PaperCut)。
+        """
+        
+        # 1. 准备文本数据和大小
+        text_bytes = text_content.encode('utf-8')
+        file_size = len(text_bytes)
+        file_md5 = "ignored" 
+        
+        # 确保 doc_type 为 txt/md，并补全文件名
+        doc_type = 'txt' 
+        final_doc_name = doc_name
+        if not final_doc_name.lower().endswith(f'.{doc_type}'):
+            final_doc_name = f"{final_doc_name}.{doc_type}"
+        
+        # 拼接 material_id 
+        material_id = meta.get('material_id') if meta and isinstance(meta, dict) else None
+        bailian_doc_name = final_doc_name
+        if material_id is not None:
+            bailian_doc_name = f"{material_id}_{final_doc_name}" 
+            logger.info(f"Bailian Text Document Name: {bailian_doc_name}")
+
+        # 2. 申请租约
+        lease_request = ApplyFileUploadLeaseRequest(file_name=bailian_doc_name, md_5=file_md5, size_in_bytes=file_size)
+        lease_response = await self._async_bailian_call(self._client.apply_file_upload_lease_with_options,
+            self.default_category_id, self.workspace_id, lease_request, {}, RuntimeOptions())
+
+        lease_id = lease_response.get('FileUploadLeaseId')
+        upload_param = lease_response.get('Param', {})
+        pre_signed_url = upload_param.get('Url')
+        upload_headers_dict = {k: v for k, v in upload_param.get('Headers', {}).items()}
+        
+        # 3. 直接上传文本内容到 presigned URL
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                upload_response = await client.request(
+                    method="PUT", 
+                    url=pre_signed_url,
+                    headers=upload_headers_dict, 
+                    content=text_bytes
+                )
+                upload_response.raise_for_status()
+                logger.info("Text content successfully uploaded to Bailian temporary storage.")
+            except Exception as e:
+                raise BailianRagException(1000031, "upload_error", f"Unexpected error during text upload: {str(e)}")
+
+        # 4. 调用公共方法完成 AddFileRequest 和索引提交
+        return await self._process_import_job(
+            lease_id=lease_id,
+            bailian_doc_name=bailian_doc_name,
+            knowledge_base_id=knowledge_base_id,
+            doc_id=doc_id,
+            meta=meta,
+            original_file_url="" # 纯文本上传，不提供源 URL
+        )
+
+    async def _process_import_job(self, 
+                                lease_id: str, 
+                                bailian_doc_name: str,
+                                knowledge_base_id: str, 
+                                doc_id: str, 
+                                meta: Optional[Dict[str, Any]] = None,
+                                original_file_url: str = "") -> Dict[str, Any]:
+        """
+        处理文件上传后的后续步骤：AddFileRequest 和 SubmitIndexAddDocumentsJobRequest。
+        
+        Args:
+            lease_id: 申请文件上传租约返回的 ID。
+            bailian_doc_name: 百炼实际使用的文件名（已包含 material_id 和后缀）。
+            knowledge_base_id: 索引 ID。
+            doc_id: 业务文档 ID。
+            meta: 业务元数据字典。
+            original_file_url: 文件的源 URL (如果存在，用于 AddFileRequest)。
+        """
+        index_id = knowledge_base_id
+
+        # 3. 构造 Tags 列表 (从原方法中抽取，确保 meta 是字典)
         all_tags = []
-        # 3.1 业务 Doc ID 作为第一个标签 (保留)
         sanitized_doc_tag = self._sanitize_tag(doc_id)
         if sanitized_doc_tag and sanitized_doc_tag != 'tag_empty':
             all_tags.append(sanitized_doc_tag)
@@ -185,27 +294,14 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         if meta and isinstance(meta, dict):
             for field in FIELDS_TO_TAG:
                 value = meta.get(field)
-                
-                # 确定要处理的值列表 (如果是单值，转换为单元素列表)
-                if value is None:
-                    continue
-                elif isinstance(value, list):
-                    value_list = value
-                else:
-                    # 单值字段 (clazz, exam, subject, type) 转化为列表
-                    value_list = [value] 
-                
+                if value is None: continue
+                value_list = value if isinstance(value, list) else [value] 
                 for item in value_list:
-                    # 将 item 转换为字符串并清洗，然后拼接为 tag: key_value
                     item_str = str(item)
-                    if not item_str:
-                        continue
-
-                    # 构建最终的 Tag: key_value
+                    if not item_str: continue
                     final_tag = self._sanitize_tag(f"{field}_{item_str}")
                     all_tags.append(final_tag)
                         
-        # 去重并去除 None/空字符串
         all_tags = list(set([t for t in all_tags if t and t != 'tag_empty']))
         
         # 实例化 AddFileRequest 并传入 tags
@@ -214,9 +310,9 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             parser=self.parser_type, 
             category_id=self.default_category_id,
             tags=all_tags,
-            original_file_url=url 
+            original_file_url=original_file_url 
         )
-        logger.info(f"Adding file {bailian_doc_name} with tags/metadata: {all_tags}")
+        logger.info(f"Adding file {bailian_doc_name} with tags/metadata: {all_tags}, URL: {original_file_url[:50]}...")
         
         add_file_response = await self._async_bailian_call(self._client.add_file_with_options,
             self.workspace_id, add_file_request, {}, RuntimeOptions())
@@ -224,7 +320,6 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         file_id = add_file_response.get('FileId')
         
         # 5. 提交索引追加任务
-        # SubmitIndexAddDocumentsJobRequest 不包含元数据字段，仅传入文件 ID
         submit_request = SubmitIndexAddDocumentsJobRequest(
             index_id=index_id, 
             document_ids=[file_id], 

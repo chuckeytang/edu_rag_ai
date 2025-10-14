@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     BAILIAN_WORKSPACE_ID: str
     # 阿里百炼的 Index ID（知识库 ID）
     BAILIAN_INDEX_ID: str 
+    BAILIAN_PAPERCUT_INDEX_ID: str
 
     # 使用 SettingsConfigDict 来配置 Pydantic
     model_config = SettingsConfigDict(
