@@ -262,7 +262,6 @@ class PaperCutMetadataPayload(BaseModel):
 class UploadFromTextRequest(BaseModel):
     text_content: str
     metadata: PaperCutMetadataPayload # 使用新的元数据模型
-    knowledge_base_id: Optional[str] = RagConfig.get_default_config().knowledge_base_id
     rag_config: Optional[RagConfig] = None
 
 # --- MCP 调度相关的模型 ---

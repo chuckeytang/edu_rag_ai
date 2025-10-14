@@ -14,7 +14,7 @@ class RagConfig(BaseModel):
     )
     title_prompt_template: str = Field(
         ...,
-        description="标题生成提示词模板。{query_str}, {context_str} 是占位符。"
+        description="标题生成提示词模板。{query_str}是占位符。"
     )
     general_chat_prompt_template: str = Field(
         ...,

@@ -16,10 +16,8 @@ PERSIST_DIR = settings.INDEX_PATH
 
 class IndexerService:
     def __init__(self, 
-                 rag_config: RagConfig,
                  kb_service: AbstractKnowledgeBaseService): 
         
-        self._current_rag_config = rag_config
         self.indices: Dict[str, Any] = {} 
         # 使用通用名称 self.kb_service
         self.kb_service = kb_service 

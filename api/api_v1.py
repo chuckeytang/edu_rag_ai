@@ -1,7 +1,7 @@
 # api/api_v1.py
 from fastapi import APIRouter
 
-from api.endpoints import chat_history, extraction, queries, uploads, config, mcp, debug_index
+from api.endpoints import chat_history, extraction, queries, uploads, mcp, debug_index
 
 api_router = APIRouter()
 
@@ -19,10 +19,6 @@ api_router.include_router(
 
 api_router.include_router(
     chat_history.router, prefix="/chat_history", tags=["chat_history"]
-)
-
-api_router.include_router(
-    config.router, prefix="/config", tags=["config"]
 )
 
 api_router.include_router(

@@ -200,10 +200,8 @@ def get_abstract_kb_service() -> AbstractKnowledgeBaseService:
 def get_indexer_service() -> IndexerService:
     """提供 IndexerService 的单例实例，注入抽象 KB Service"""
     logger.info("Initializing IndexerService...")
-    rag_config = get_rag_config()
     # 注入抽象知识库服务
     return IndexerService(
-        rag_config=rag_config,
         kb_service=get_abstract_kb_service() # 更改：使用抽象接口
     )
 
@@ -221,14 +219,12 @@ def get_chat_history_service() -> ChatHistoryService:
 def get_query_service() -> QueryService:
     """提供 QueryService 的单例实例"""
     logger.info("Initializing QueryService...")
-    rag_config = get_rag_config()
     return QueryService(
         llm=get_dashscope_rag_llm(),
         embedding_model=get_embedding_model(),
         indexer_service=get_indexer_service(),
         chat_history_service=get_chat_history_service(),
         kb_service=get_abstract_kb_service(),
-        rag_config=rag_config, 
     )
 
 @lru_cache(maxsize=1)

@@ -38,7 +38,6 @@ class QueryService:
                  embedding_model: BaseEmbedding,
                  indexer_service: IndexerService,
                  kb_service: AbstractKnowledgeBaseService, 
-                 rag_config: RagConfig, 
                  chat_history_service: Optional[ChatHistoryService] = None):
         """构造函数 - 切换到抽象 RAG 服务"""
         self.llm = llm             
@@ -47,13 +46,6 @@ class QueryService:
         # 使用通用名称 self.kb_service
         self.kb_service = kb_service 
         self._chat_history_service = chat_history_service
-        self.rag_config = rag_config
-
-        # 使用配置中的提示词
-        # 这里可以使用字符串格式化代替 PromptTemplate，以减少对 LlamaIndex 的依赖
-        self.qa_prompt_template = rag_config.qa_prompt_template
-        self.title_generation_prompt = rag_config.title_prompt_template
-        self.general_chat_prompt_template = rag_config.general_chat_prompt_template
         
         self.llm_reranker = None
         self.local_reranker = None
@@ -67,7 +59,6 @@ class QueryService:
     ) -> AsyncGenerator[bytes, None]:
         
         logger.info(f"Starting RAG query for session {request.session_id}, user {request.account_id} with query: '{request.question}'")
-        self.rag_config = rag_config
         
         request_params = request.dict()
         logger.info(f"ChatQueryRequest parameters: {request_params}")
@@ -82,7 +73,7 @@ class QueryService:
                     session_id=request.session_id,
                     account_id=request.account_id,
                     query_text=request.question,
-                    top_k=self.rag_config.history_retrieval_top_k or 5
+                    top_k=rag_config.history_retrieval_top_k or 5
                 )
                 if chat_history_context_nodes:
                     chat_history_context_string = "The following are excerpts from a historical conversation relevant to your current problem:\n" + \
@@ -113,7 +104,7 @@ class QueryService:
             logger.info("Attempting to generate session title as requested (is_first_query is True).")
             try:
                 # 1. 构造标题生成 Prompt
-                title_prompt_text = self.title_generation_prompt.format(
+                title_prompt_text = rag_config.title_prompt_template.format(
                     query_str=request.question
                 )
                 
@@ -181,7 +172,7 @@ class QueryService:
         logger.info(f"Retrieved {len(combined_retrieved_chunks)} chunks from all knowledge bases combined.")
 
         # 1. 切片级别的过滤
-        score_threshold = self.rag_config.retrieval_score_threshold
+        score_threshold = rag_config.retrieval_score_threshold
 
         # 判断是否开启了强制总结模式 (即用户指定了目标文件)
         is_forced_summary = bool(request.target_file_ids)
@@ -224,6 +215,7 @@ class QueryService:
             async for chunk in self._stream_llm_without_rag_context(
                 request.question,
                 chat_history_context_string,
+                rag_config,
                 generated_title
             ):
                 yield chunk
@@ -242,7 +234,7 @@ class QueryService:
         static_prompt_tokens = 0
         if tokenizer:
             try:
-                template_tokens = len(tokenizer.encode(self.qa_prompt_template))
+                template_tokens = len(tokenizer.encode(rag_config.qa_prompt_template))
                 history_tokens = len(tokenizer.encode(chat_history_context_string))
                 query_tokens = len(tokenizer.encode(request.question))
                 placeholder_tokens = len(tokenizer.encode('{chat_history_context}{context_str}{query_str}'))
@@ -308,8 +300,7 @@ class QueryService:
         llm_response_obj = None 
         for attempt in range(max_retries):
             try:
-                self.qa_prompt_template = PromptTemplate(rag_config.qa_prompt_template)
-                final_prompt_for_llm = self.qa_prompt_template.format(
+                final_prompt_for_llm = rag_config.qa_prompt_template.format(
                     chat_history_context=chat_history_context_string,
                     context_str=context_str_for_llm, 
                     query_str=request.question
@@ -462,7 +453,7 @@ class QueryService:
                             else:
                                 best_match_type = "chat_history"
 
-                    if max_similarity > self.rag_config.citation_similarity_threshold:
+                    if max_similarity > rag_config.citation_similarity_threshold:
                         # 1. 获取完整的引用文本和元数据
                         full_referenced_text = combined_referenced_texts[combined_referenced_ids.index(best_match_id)]
                         truncated_referenced_text = (full_referenced_text[:TRUNCATE_LENGTH] + '...') if len(full_referenced_text) > TRUNCATE_LENGTH else full_referenced_text
@@ -575,18 +566,19 @@ class QueryService:
     async def _stream_llm_without_rag_context(self, 
                                               question: str, 
                                               chat_history_context_string: str, 
+                                              rag_config: RagConfig,
                                               generated_title: Optional[str] = None,
                                               final_referenced_material_ids: Optional[List[str]] = None) -> AsyncGenerator[bytes, None]:
         
         logger.info(f"RAG context is empty. Calling LLM directly for question: '{question}'")
         
-        final_prompt_for_llm = self.general_chat_prompt_template.format(
+        final_prompt_for_llm = rag_config.general_chat_prompt_template.format(
             chat_history_context=chat_history_context_string,
             query_str=question
         )
         
         llm_response_gen = None 
-        max_retries = self.rag_config.llm_max_retries
+        max_retries = rag_config.llm_max_retries
         for attempt in range(max_retries):
             try:
                 # 使用 LlamaIndex 的 ChatMessage 对象
@@ -600,7 +592,7 @@ class QueryService:
             except Exception as e:
                 logger.error(f"Attempt {attempt + 1}: Error calling LLM without RAG context for '{question}': {e}", exc_info=True)
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(self.rag_config.retry_base_delay * (2 ** attempt))
+                    await asyncio.sleep(rag_config.retry_base_delay * (2 ** attempt))
                     continue
                 else:
                     error_chunk_json = StreamChunk(content="抱歉，AI未能生成有效回复，请稍后再试。", is_last=True).json()

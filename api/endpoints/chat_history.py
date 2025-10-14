@@ -1,8 +1,7 @@
 # api/endpoints/chat_history.py
 from fastapi import APIRouter, HTTPException, Depends, status
-from typing import Dict, Any
 
-from models.schemas import AddChatMessageRequest, DeleteChatMessagesRequest, UpdateChatMessageRequest 
+from models.schemas import AddChatMessageRequest, DeleteChatMessagesRequest 
 from services.chat_history_service import ChatHistoryService
 from api.dependencies import get_chat_history_service
 import logging
