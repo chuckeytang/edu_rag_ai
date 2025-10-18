@@ -1,6 +1,8 @@
 # services/llm_service.py
 
 from http import HTTPStatus
+import json
+import logging
 from typing import Any, AsyncGenerator, Sequence
 from llama_index.llms.dashscope import DashScope as LlamaDashScope
 from llama_index.core.llms import ChatMessage
@@ -10,6 +12,7 @@ from llama_index.llms.dashscope.utils import (
     chat_message_to_dashscope_messages,
     dashscope_response_to_chat_response
 )
+logger = logging.getLogger(__name__)
 
 # 确保你可以从这里导入 acall_with_messages 和 astream_call_with_messages
 # 你需要从 LlamaIndex 源码的 llama_index/llms/dashscope/base.py 中复制这两个函数
@@ -28,27 +31,75 @@ class DashScopeWithTools(LlamaDashScope):
         parameters = self._get_default_parameters()
         parameters.update(kwargs)
         
-        # 核心改造：从 kwargs 中取出 tools 和 tool_choice，并从 parameters 中移除
+        # ... (参数提取和准备代码不变)
         tools = parameters.pop("tools", None)
         tool_choice = parameters.pop("tool_choice", "auto")
 
-        # 将 tools 和 tool_choice 添加到底层调用参数中
         if tools:
             parameters["tools"] = tools
             parameters["tool_choice"] = tool_choice
 
-        # 移除流式参数，确保调用的是非流式 API
         parameters.pop("stream", None)
         parameters.pop("incremental_output", None)
         parameters["result_format"] = "message"
 
-        response = await acall_with_messages(
+        dashscope_response = await acall_with_messages(
             model=self.model_name,
             messages=chat_message_to_dashscope_messages(messages),
             api_key=self.api_key,
             parameters=parameters,
         )
-        return dashscope_response_to_chat_response(response)
+        
+        if dashscope_response.status_code != HTTPStatus.OK:
+            logger.error(f"DashScope API error: {dashscope_response.code} - {dashscope_response.message}")
+            return ChatResponse(message=ChatMessage(), raw=dashscope_response)
+
+        # 核心：从原始响应中提取信息
+        top_choice = dashscope_response.output.choices[0]
+        choice_message = top_choice.get("message", {})
+        
+        content = choice_message.get("content", "")
+        role = choice_message.get("role")
+        tool_calls_raw = choice_message.get("tool_calls", [])
+        
+        additional_kwargs = {}
+        
+        # 1. 提取并封装 tool_calls
+        if tool_calls_raw:
+            # 直接构建符合 OpenAI/LlamaIndex 期望的字典列表
+            llama_tool_calls = []
+            for tc in tool_calls_raw:
+                func = tc.get("function", {})
+                
+                # 尝试安全地解析 arguments 字符串为字典
+                args_str = func.get("arguments", "{}")
+                # LlamaIndex 期望 additional_kwargs["tool_calls"] 中的 arguments 是一个字符串！
+                # 它是要被传递给底层 LLM 客户端的 OpenAI 兼容结构，args 字段应是字符串。
+                
+                # 构造符合 OpenAI Message ToolCall 规范的字典
+                tool_call_dict = {
+                    "id": tc.get("id", f"call_{func.get('name')}_{tc.get('index', 0)}"), # 确保有 id
+                    "type": "function",
+                    "function": {
+                        "name": func.get("name"),
+                        "arguments": args_str # 保持为 JSON 字符串
+                    }
+                }
+                llama_tool_calls.append(tool_call_dict)
+
+            if llama_tool_calls:
+                 additional_kwargs["tool_calls"] = llama_tool_calls
+                 logger.info(f"Successfully injected {len(llama_tool_calls)} tool calls into additional_kwargs.")
+
+        # 2. 构建最终的 ChatResponse
+        return ChatResponse(
+            message=ChatMessage(
+                role=role, 
+                content=content,
+                additional_kwargs=additional_kwargs # 注入工具调用
+            ), 
+            raw=dashscope_response
+        )
 
     @llm_chat_callback()
     async def astream_chat(

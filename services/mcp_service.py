@@ -40,6 +40,61 @@ class MCPService:
         """返回LLM需要的tools格式"""
         return self.tool_definitions
 
+    # 辅助函数：安全地将复杂对象转换为可序列化的字典
+    def safe_to_dict(self, obj: Any, max_depth: int = 15, current_depth: int = 0) -> Any:
+        """递归地将对象的关键属性转换为字典，以避免循环引用和不可序列化错误。"""
+        if current_depth >= max_depth:
+            return f"<<Max Depth Reached: {type(obj).__name__}>>"
+        
+        if isinstance(obj, (int, float, str, bool, type(None))):
+            return obj
+        
+        if isinstance(obj, (list, tuple)):
+            return [self.safe_to_dict(item, max_depth, current_depth + 1) for item in obj]
+            
+        if isinstance(obj, dict):
+            return {k: self.safe_to_dict(v, max_depth, current_depth + 1) for k, v in obj.items()}
+
+        # 针对 LlamaIndex 或其他 LLM 响应对象
+        result = {}
+        
+        # 尝试使用内置方法 to_dict() 或 dict()
+        if hasattr(obj, 'to_dict'):
+            try:
+                return self.safe_to_dict(obj.to_dict(), max_depth, current_depth + 1)
+            except Exception:
+                pass # 忽略错误
+                
+        if hasattr(obj, 'dict'): # Pydantic v1
+            try:
+                return self.safe_to_dict(obj.dict(), max_depth, current_depth + 1)
+            except Exception:
+                pass # 忽略错误
+                
+        # 遍历对象的公共属性
+        for attr_name in dir(obj):
+            # 忽略私有属性、魔法方法和方法
+            if attr_name.startswith('_') or callable(getattr(obj, attr_name)):
+                continue
+            
+            try:
+                attr_value = getattr(obj, attr_name)
+                # 仅处理常见类型和已知的重要对象
+                if isinstance(attr_value, (str, int, float, bool, dict, list, tuple, type(None))) or hasattr(attr_value, 'to_dict') or hasattr(attr_value, 'dict') or hasattr(attr_value, 'additional_kwargs'):
+                    result[attr_name] = self.safe_to_dict(attr_value, max_depth, current_depth + 1)
+                else:
+                    result[attr_name] = f"<{type(attr_value).__name__} object>"
+            except Exception:
+                # 捕获访问属性时的任何错误
+                result[attr_name] = f"<<Error accessing {attr_name}>>"
+
+        if result:
+            # 确保类型信息也被保留
+            return {"__type__": type(obj).__name__, **result}
+        
+        return f"<{type(obj).__name__} instance>"
+
+
     async def generate_mcp_command(self, user_question: str) -> MCPResponse:
         """
         根据用户问题，调用LLM生成一个MCP协议命令。
@@ -55,13 +110,26 @@ class MCPService:
         
         try:
             response = await self.llm.achat(messages, tools=self.get_tool_for_llm(), tool_choice="auto")
+            logger.info("--- LLM Achat Response Deep Inspection START ---")
+            
+            # 将复杂的响应对象安全地转换为字典
+            # response_dict = self.safe_to_dict(response, max_depth=15) 
+            
+            # # 打印完整的结构
+            # logger.info(f"Full LLM Response Structure (JSON): \n{json.dumps(response_dict, indent=2, ensure_ascii=False)}")
+            # logger.info("--- LLM Achat Response Deep Inspection END ---")
+
             tool_calls = response.message.additional_kwargs.get("tool_calls", None)
 
             if tool_calls:
                 tool_call = tool_calls[0]
                 
-                function_name = tool_call.function.name
-                arguments_str = tool_call.function.arguments
+                function_name = tool_call.get("function", {}).get("name")
+                arguments_str = tool_call.get("function", {}).get("arguments")
+                
+                if not function_name or not arguments_str:
+                    logger.error("Tool call structure is invalid or missing function name/arguments.")
+                    raise ValueError("Invalid tool call structure received from LLM.")
                 
                 try:
                     parameters = json.loads(arguments_str)

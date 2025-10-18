@@ -163,7 +163,6 @@ async def process_text_indexing_task(request: UploadFromTextRequest, task_id: st
 
         # 2. 构造 IndexerService 期望的通用文档结构
         final_document_payload = {
-            # 关键：使用文本内容而不是 URL
             "text_content": request.text_content, 
             "doc_name": doc_name,
             "doc_id": doc_id, 
