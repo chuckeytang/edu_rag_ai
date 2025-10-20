@@ -1,6 +1,6 @@
 # services/abstract_kb_service.py
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Awaitable
+from typing import AsyncGenerator, Dict, Any, List, Optional, Awaitable, Tuple
 
 class AbstractKnowledgeBaseService(ABC):
     """
@@ -58,5 +58,29 @@ class AbstractKnowledgeBaseService(ABC):
                                     offset: int = 0) -> List[Dict[str, Any]]:
         """
         列出指定知识库/文档下的所有知识点（切片/Chunk）。
+        """
+        pass
+
+    @abstractmethod
+    async def list_files_iterator(self, category_id: str, max_results: int = 100) -> AsyncGenerator[Tuple[List[Dict[str, Any]], Optional[str], int], None]:
+        """
+        异步生成器：分页循环调用 ListFile 接口，每次 yield 一页的文件列表。
+        
+        Yields:
+            Tuple[List[Dict[str, Any]], Optional[str], int, int]: 
+            (文件列表, 下一页Token, 页码, 总数)
+        """
+        pass
+        
+    @abstractmethod
+    async def delete_file_permanently(self, file_id: str) -> Dict[str, Any]:
+        """
+        永久删除应用数据中的指定文件（不影响已构建的索引）。
+        
+        Args:
+            file_id: 要删除的文件的 FileId。
+            
+        Returns:
+            操作结果字典。
         """
         pass

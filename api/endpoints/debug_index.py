@@ -37,6 +37,12 @@ class DebugQueryResponse(BaseModel):
     final_response_content: str
     citations: List[Dict[str, Any]]
     
+class CleanAllFilesRequest(BaseModel):
+    knowledge_base_id: str = Query(..., description="要清理的知识库唯一 ID (Index ID/resource_id)")
+    category_id: str = Query(..., description="知识库所属的类目 ID (CategoryId)，例如: default")
+    max_results_per_page: int = Query(100, ge=1, le=200, description="分页查询时每页行数")
+    force_index_delete: bool = Query(True, description="是否同时删除知识库索引中的文档")
+
 @router.get("/list-chunks", summary="[DEBUG-KB] 按 Doc ID 查看知识库切片")
 async def list_chunks_kb(
     knowledge_base_id: str = Query(..., description="要查询的知识库唯一 ID (Index ID/resource_id)"),
@@ -258,3 +264,85 @@ def delete_by_metadata_kb(request: DeleteByMetadataRequest,
     except Exception as e:
         logger.error(f"KB Deletion request failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during deletion: {str(e)}")
+    
+@router.delete("/clean-all-files", summary="[ADMIN] 批量删除所有文件和索引文档")
+async def clean_all_files_kb(
+    request: CleanAllFilesRequest,
+    kb_service: AbstractKnowledgeBaseService = Depends(get_kb_service)
+):
+    """
+    分页查询指定 CategoryId 下的所有文件，并执行：查一批、删一批。
+    """
+    
+    index_id = request.knowledge_base_id
+    category_id = request.category_id
+    
+    logger.warning(f"!!! STARTING DESTRUCTIVE CLEANUP (Paged)!!! Index: {index_id}, Category: {category_id}")
+    
+    total_found = 0
+    total_deleted = 0
+    delete_results = {"index_delete": [], "file_delete": [], "errors": []}
+    
+    try:
+        # 1. 使用异步生成器进行分批查询和处理
+        async for file_list, next_token, page_count, total_count in kb_service.list_files_iterator(
+            category_id, 
+            request.max_results_per_page
+        ):
+            if not file_list:
+                logger.info(f"Page {page_count} returned no files.")
+                continue
+
+            current_page_count = len(file_list)
+            total_found += current_page_count
+            file_ids = [f.get('FileId') for f in file_list if f.get('FileId')]
+            
+            logger.info(f"Processing Page {page_count}: Found {current_page_count} files. Total processed so far: {total_found}")
+
+            # 2. 优先删除知识库索引中的文档 (DeleteIndexDocument)
+            if request.force_index_delete and file_ids:
+                logger.info(f"Submitting DeleteIndexDocument jobs for {len(file_ids)} documents...")
+                for file_id in file_ids:
+                    try:
+                        # kb_service.delete_document 实现的是 DeleteIndexDocument
+                        result = await kb_service.delete_document(index_id, file_id) 
+                        delete_results["index_delete"].append({"file_id": file_id, "status": "submitted", "req_id": result.get('request_id')})
+                        # API 限流：10 次/秒，等待 0.1 秒，保证删除速度
+                        await asyncio.sleep(0.1) 
+                    except Exception as e:
+                        delete_results["errors"].append({"step": "index_delete", "file_id": file_id, "error": str(e)})
+
+            # 3. 永久删除应用数据中的文件 (DeleteFile)
+            logger.info(f"Starting permanent file deletion (DeleteFile) for {len(file_ids)} files...")
+            
+            for file_id in file_ids:
+                try:
+                    # kb_service.delete_file_permanently 实现的是 DeleteFile
+                    result = await kb_service.delete_file_permanently(file_id)
+                    delete_results["file_delete"].append({"file_id": file_id, "status": "success", "req_id": result.get('request_id')})
+                    total_deleted += 1
+                    # API 限流：10 次/秒，等待 0.1 秒
+                    await asyncio.sleep(0.1) 
+                except Exception as e:
+                    delete_results["errors"].append({"step": "file_delete", "file_id": file_id, "error": str(e)})
+            
+            # 查完一页，删完一页，继续下一页的查询，无需等待。
+
+        final_message = (
+            f"Cleanup finished. Total files found: {total_found}. "
+            f"Total files deleted from data center: {total_deleted}. "
+            f"Errors encountered: {len(delete_results['errors'])}."
+        )
+        logger.warning(f"!!! CLEANUP REPORT !!! {final_message}")
+        
+        return {
+            "status": "success", 
+            "message": final_message, 
+            "total_files_found": total_found,
+            "total_files_deleted": total_deleted,
+            "results": delete_results # 返回详细结果，方便调试
+        }
+
+    except Exception as e:
+        logger.error(f"Critical error during file cleanup: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Critical cleanup error: {str(e)}")

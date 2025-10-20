@@ -40,7 +40,7 @@ class MCPService:
         """返回LLM需要的tools格式"""
         return self.tool_definitions
 
-    # 辅助函数：安全地将复杂对象转换为可序列化的字典
+    # 安全地将复杂对象转换为可序列化的字典
     def safe_to_dict(self, obj: Any, max_depth: int = 15, current_depth: int = 0) -> Any:
         """递归地将对象的关键属性转换为字典，以避免循环引用和不可序列化错误。"""
         if current_depth >= max_depth:
@@ -94,6 +94,27 @@ class MCPService:
         
         return f"<{type(obj).__name__} instance>"
 
+    def extract_paper_cut_ids_from_text(self, text: str) -> List[int]:
+        """
+        使用正则表达式从文本中提取嵌入的 PaperCut ID。
+        我们查找的模式是：'## PaperCut ID: [ID] | ...'
+        """
+        # 正则表达式：查找 'PaperCut ID: ' 后面跟着一个或多个数字 (\\d+)，直到遇到空格或 '|'
+        # re.IGNORECASE 是为了确保匹配不区分大小写
+        pattern = re.compile(r"##\s*PaperCut\s*ID:\s*(\d+)", re.IGNORECASE)
+        
+        matches = pattern.findall(text)
+        
+        extracted_ids = []
+        for match in matches:
+            try:
+                # 将匹配到的字符串转换为整数
+                extracted_ids.append(int(match))
+            except ValueError:
+                # 理论上不会发生，因为正则已经限定了数字
+                logger.warning(f"Could not convert matched ID '{match}' to integer.")
+        
+        return extracted_ids
 
     async def generate_mcp_command(self, user_question: str) -> MCPResponse:
         """
@@ -159,21 +180,28 @@ class MCPService:
                             rerank_switch=True 
                         )
                         
-                        # --- 以下是业务侧的后处理逻辑，适配火山引擎的返回值结构 ---
+                        # --- 以下是业务侧的后处理逻辑，适配知识库引擎的返回值结构 ---
                         
                         retrieved_ids = []
                         for chunk in retrieved_chunks:
-                            # 这里的逻辑是针对 Volcano Engine 的特定返回结构（用户数据在 user_data 字段）
+                            # 1. 优先尝试从 metadata 提取 paper_cut_id (兼容旧的单个文档逻辑)
                             user_data = chunk.get("user_data", {})
                             paper_cut_id_raw = user_data.get("paper_cut_id")
                             
                             if paper_cut_id_raw is not None:
                                 try:
-                                    # 尝试转换成 int，兼容原始逻辑
                                     retrieved_ids.append(int(paper_cut_id_raw))
                                 except ValueError:
-                                    logger.warning(f"Could not convert paper_cut_id '{paper_cut_id_raw}' to int.")
-
+                                    logger.warning(f"Could not convert paper_cut_id '{paper_cut_id_raw}' to int from metadata. Attempting content extraction.")
+                            
+                            # 2. 从 chunk 的文本内容中提取嵌入的 ID (处理合并文档的新逻辑)
+                            chunk_content = chunk.get("content", "") # 百炼返回的 content 是 chunk 的文本内容
+                            if chunk_content:
+                                extracted_ids_from_content = self.extract_paper_cut_ids_from_text(chunk_content)
+                                if extracted_ids_from_content:
+                                    retrieved_ids.extend(extracted_ids_from_content)
+                                    logger.debug(f"Extracted IDs from content: {extracted_ids_from_content}")
+                                    
                         # 去重
                         retrieved_ids = list(set(retrieved_ids))
                         

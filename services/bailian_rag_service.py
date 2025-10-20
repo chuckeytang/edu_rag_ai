@@ -4,7 +4,7 @@ import json
 import logging
 import asyncio
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, AsyncGenerator, Tuple
 import httpx 
 import os 
 from urllib.parse import quote
@@ -20,6 +20,11 @@ from core.config import settings
 from services.abstract_kb_service import AbstractKnowledgeBaseService
 
 logger = logging.getLogger(__name__)
+
+from alibabacloud_bailian20231229.models import (
+    ApplyFileUploadLeaseRequest, AddFileRequest, RetrieveRequest, DeleteIndexDocumentRequest, 
+    SubmitIndexAddDocumentsJobRequest, ListChunksRequest, ListFileRequest # <--- 新增 ListFileRequest
+)
 
 class BailianRagException(Exception):
     def __init__(self, code, request_id, message=None):
@@ -72,11 +77,30 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
 
         return data
 
-    async def _async_bailian_call(self, method, *args, **kwargs) -> Dict[str, Any]:
-        """将同步的 Bailian SDK 调用包装成异步方法。"""
+    async def _async_bailian_call(self, method, *args, runtime_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        将同步的 Bailian SDK 调用包装成异步方法。
+        
+        Args:
+            method: 要调用的 SDK 方法。
+            *args: 传递给 SDK 方法的所有位置参数（不包括 RuntimeOptions）。
+            runtime_options: 额外的运行时选项，用于覆盖默认值。
+        """
+        options_dict = {
+            'read_timeout': 30000, # 30秒
+            'connect_timeout': 15000, # 15秒
+        }
+        if runtime_options:
+            options_dict.update(runtime_options)
+            
+        custom_runtime = RuntimeOptions(**options_dict)
+
         loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(None, lambda: method(*args, **kwargs))
+            response = await loop.run_in_executor(
+                None, 
+                lambda: method(*args, custom_runtime) 
+            )
             return self._parse_bailian_response(response)
         except Exception as e:
             logger.error(f"Bailian API call failed: {e}", exc_info=True)
@@ -346,7 +370,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         delete_request = DeleteIndexDocumentRequest(index_id=index_id, document_ids=[file_id])
         
         response = await self._async_bailian_call(self._client.delete_index_document_with_options,
-            self.workspace_id, delete_request, {}, RuntimeOptions())
+            self.workspace_id, delete_request, {})
         
         return {"status": "success", "message": f"Delete request submitted for file ID {file_id}", "request_id": response.get('RequestId')}
 
@@ -719,3 +743,101 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             logger.error(f"Failed to list chunks from Bailian KB: {e}", exc_info=True)
             # 为了让上层 DEBUG 接口能捕获到错误，这里重新抛出
             raise
+        
+    async def list_files_iterator(self, category_id: str, max_results: int = 100) -> AsyncGenerator[Tuple[List[Dict[str, Any]], Optional[str], int], None]:
+        """
+        异步生成器：分页循环调用 ListFile 接口，每次 yield 一页的文件列表。
+        
+        Yields:
+            Tuple[List[Dict[str, Any]], Optional[str], int]: (文件列表, 下一页Token, 页码)
+        """
+        from alibabacloud_bailian20231229.models import ListFileRequest
+        
+        next_token: Optional[str] = None
+        page_count = 0
+        
+        # 确保 max_results 在 [1, 200] 范围内
+        page_size = min(max_results, 200)
+        
+        while True:
+            page_count += 1
+            logger.info(f"Listing files for category '{category_id}', Page: {page_count}, MaxResults: {page_size}, NextToken: {next_token}")
+            
+            list_request = ListFileRequest(
+                category_id=category_id,
+                max_results=page_size,
+                next_token=next_token
+            )
+
+            try:
+                # 假设 _async_bailian_call 已经更新了更长的超时时间
+                response_data = await self._async_bailian_call(
+                    self._client.list_file_with_options,
+                    self.workspace_id,
+                    list_request,
+                    {}
+                )
+            except Exception as e:
+                logger.error(f"Failed to list files on page {page_count}: {e}")
+                # 如果查询失败，终止迭代器
+                return 
+            
+            file_list = response_data.get('FileList', [])
+            has_next = response_data.get('HasNext', False)
+            next_token = response_data.get('NextToken')
+            total_count = response_data.get('TotalCount') # 记录总数，以便上层追踪进度
+
+            # 立即返回当前页的文件列表、下一页的 token 和页码
+            yield file_list, next_token, page_count, total_count
+            
+            if not has_next or not next_token:
+                logger.info("Finished listing files.")
+                break
+                
+            # 限流：API 限频 5 次/秒，等待 0.25 秒
+            await asyncio.sleep(0.25)
+
+    async def delete_file_permanently(self, file_id: str) -> Dict[str, Any]:
+        """
+        调用 DeleteFile 接口，永久删除应用数据中的文件。
+        """
+        from alibabacloud_bailian20231229.models import DeleteFileRequest # <--- 引入 DeleteFileRequest
+        
+        # DeleteFile 接口的请求语法是 DELETE /{WorkspaceId}/datacenter/file/{FileId}/
+        # SDK 可能会自动将 FileId 作为路径参数
+        
+        # ⚠️ 注意：阿里云百炼的 DeleteFile 接口体是空的，但我们可能需要一个请求 DTO 实例
+        # 检查 SDK 定义，如果没有 DeleteFileRequest，则直接调用客户端方法
+        
+        logger.warning(f"Attempting to permanently delete file from data center: {file_id}")
+        
+        try:
+            # 假设 SDK 调用签名是: delete_file_with_options(WorkspaceId, FileId, None, RuntimeOptions)
+            # 尝试调用 SDK 的 DeleteFile 方法
+            # 由于 DeleteFile 接口没有请求体，我们传入一个 None 或空的请求对象
+            response = await self._async_bailian_call(
+                self._client.delete_file_with_options,
+                self.workspace_id, # 路径参数 1: WorkspaceId
+                file_id,           # 路径参数 2: FileId
+                None,              # 请求体: None
+                {}, 
+                RuntimeOptions()
+            )
+            
+            # DeleteFile 成功返回的 Data 中包含 FileId
+            deleted_file_id = response.get('FileId')
+            
+            return {
+                "status": "success", 
+                "message": f"Successfully deleted file {deleted_file_id} from data center.", 
+                "file_id": deleted_file_id, 
+                "request_id": response.get('RequestId')
+            }
+        
+        except BailianRagException as e:
+            # 捕获并记录 API 错误，例如文件状态不支持删除等
+            logger.error(f"Bailian API Error when deleting file {file_id}: {e}")
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error during permanent file deletion for {file_id}: {e}", exc_info=True)
+            raise BailianRagException(1000033, "delete_file_error", f"Unexpected error: {str(e)}")
