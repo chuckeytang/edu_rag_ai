@@ -308,9 +308,11 @@ async def clean_all_files_kb(
                         result = await kb_service.delete_document(index_id, file_id) 
                         delete_results["index_delete"].append({"file_id": file_id, "status": "submitted", "req_id": result.get('request_id')})
                         # API 限流：10 次/秒，等待 0.1 秒，保证删除速度
-                        await asyncio.sleep(0.1) 
+                        await asyncio.sleep(0.2) 
                     except Exception as e:
-                        delete_results["errors"].append({"step": "index_delete", "file_id": file_id, "error": str(e)})
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        logger.error(f"Index Delete Error for {file_id}: {error_msg}")
+                        delete_results["errors"].append({"step": "index_delete", "file_id": file_id, "error": error_msg})
 
             # 3. 永久删除应用数据中的文件 (DeleteFile)
             logger.info(f"Starting permanent file deletion (DeleteFile) for {len(file_ids)} files...")
@@ -322,9 +324,11 @@ async def clean_all_files_kb(
                     delete_results["file_delete"].append({"file_id": file_id, "status": "success", "req_id": result.get('request_id')})
                     total_deleted += 1
                     # API 限流：10 次/秒，等待 0.1 秒
-                    await asyncio.sleep(0.1) 
+                    await asyncio.sleep(0.2) 
                 except Exception as e:
-                    delete_results["errors"].append({"step": "file_delete", "file_id": file_id, "error": str(e)})
+                    error_msg = f"{type(e).__name__}: {str(e)}"
+                    logger.error(f"File Delete Error for {file_id}: {error_msg}")
+                    delete_results["errors"].append({"step": "file_delete", "file_id": file_id, "error": error_msg})
             
             # 查完一页，删完一页，继续下一页的查询，无需等待。
 
