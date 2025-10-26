@@ -171,7 +171,13 @@ class DocumentOssService:
                 "file_key": file_key,
                 "knowledge_base_id": rag_config.knowledge_base_id
             }
-            self.task_manager.finish_task(task_id, "success", result=result.get('result'))
+            final_task_result = {}
+            if isinstance(result, dict) and 'result' in result:
+                final_task_result = result['result']
+            elif isinstance(result, dict):
+                 final_task_result = result
+
+            self.task_manager.finish_task(task_id, "success", result=final_task_result)
             return {"status": "success", "message": success_result["message"]}
 
         except Exception as e:

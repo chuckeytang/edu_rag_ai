@@ -90,7 +90,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             
         return data
 
-    async def _async_bailian_call(self, method, *args, runtime_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def _async_bailian_call(self, method, *args) -> Dict[str, Any]:
         """
         将同步的 Bailian SDK 调用包装成异步方法。
         
@@ -102,14 +102,32 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         MAX_RETRIES = 5
         BASE_DELAY = 1.0  # 初始等待 1 秒
 
+        # 1. 确保至少有一个参数 (RuntimeOptions)
+        if not args:
+            raise ValueError("Bailian SDK call requires at least one argument (RuntimeOptions).")
+            
+        # 2. 提取并覆盖 RuntimeOptions
+        runtime_index = len(args) - 1
+        original_runtime = args[runtime_index]
+
         options_dict = {
             'read_timeout': 30000, # 30秒
             'connect_timeout': 15000, # 15秒
         }
-        if runtime_options:
-            options_dict.update(runtime_options)
-            
-        custom_runtime = RuntimeOptions(**options_dict)
+        
+        # 这里我们使用原始的 RuntimeOptions 作为模板，并覆盖其值
+        if isinstance(original_runtime, RuntimeOptions):
+            # 将 RuntimeOptions 转换为字典，并用我们的定制值覆盖
+            new_runtime_dict = original_runtime.to_map()
+            new_runtime_dict.update(options_dict)
+            custom_runtime = RuntimeOptions(**new_runtime_dict)
+        else:
+            # 如果最后一个参数不是 RuntimeOptions (理论上不应发生)，则抛出错误或使用默认
+            custom_runtime = RuntimeOptions(**options_dict)
+        
+        # 3. 重建 *args，用 custom_runtime 替换原始的 RuntimeOptions
+        final_args = list(args[:runtime_index])
+        final_args.append(custom_runtime)
 
         loop = asyncio.get_event_loop()
         for attempt in range(MAX_RETRIES):
@@ -230,7 +248,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
 
         lease_request = ApplyFileUploadLeaseRequest(file_name=bailian_doc_name, md_5=file_md5, size_in_bytes=file_size)
         lease_response = await self._async_bailian_call(self._client.apply_file_upload_lease_with_options,
-            self.default_category_id, self.workspace_id, lease_request, {}, RuntimeOptions())
+            self.default_category_id, self.workspace_id, lease_request, RuntimeOptions())
 
         lease_id = lease_response.get('FileUploadLeaseId')
         upload_param = lease_response.get('Param', {})
@@ -284,7 +302,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         # 2. 申请租约
         lease_request = ApplyFileUploadLeaseRequest(file_name=bailian_doc_name, md_5=file_md5, size_in_bytes=file_size)
         lease_response = await self._async_bailian_call(self._client.apply_file_upload_lease_with_options,
-            self.default_category_id, self.workspace_id, lease_request, {}, RuntimeOptions())
+            self.default_category_id, self.workspace_id, lease_request, RuntimeOptions())
 
         lease_id = lease_response.get('FileUploadLeaseId')
         upload_param = lease_response.get('Param', {})
@@ -369,7 +387,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         logger.info(f"Adding file {bailian_doc_name} with tags/metadata: {all_tags}, URL: {original_file_url[:50]}...")
         
         add_file_response = await self._async_bailian_call(self._client.add_file_with_options,
-            self.workspace_id, add_file_request, {}, RuntimeOptions())
+            self.workspace_id, add_file_request, RuntimeOptions())
         
         file_id = add_file_response.get('FileId')
         
@@ -380,7 +398,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
             source_type='DATA_CENTER_FILE'
         )
         submit_response = await self._async_bailian_call(self._client.submit_index_add_documents_job_with_options,
-            self.workspace_id, submit_request, {}, RuntimeOptions())
+            self.workspace_id, submit_request, RuntimeOptions())
         
         job_id = submit_response.get('Id')
         
@@ -400,7 +418,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         delete_request = DeleteIndexDocumentRequest(index_id=index_id, document_ids=[file_id])
         
         response = await self._async_bailian_call(self._client.delete_index_document_with_options,
-            self.workspace_id, delete_request, {})
+            self.workspace_id, delete_request)
         
         return {"status": "success", "message": f"Delete request submitted for file ID {file_id}", "request_id": response.get('RequestId')}
 
@@ -551,7 +569,7 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
         
         # 4. 调用 API
         response_data = await self._async_bailian_call(self._client.retrieve_with_options,
-            self.workspace_id, retrieve_request, {}, RuntimeOptions())
+            self.workspace_id, retrieve_request, RuntimeOptions())
         
         result_list = response_data.get("Nodes", [])
 
@@ -635,7 +653,6 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                 self.workspace_id,      # 路径参数 1: WorkspaceId
                 file_id,                # 路径参数 2: FileId (您的 SDK 封装会在这里找到它)
                 update_request,         # 请求体: UpdateFileTagRequest
-                {}, 
                 RuntimeOptions()
             )
             
@@ -780,7 +797,6 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                 self._client.list_chunks_with_options,
                 self.workspace_id,
                 list_chunks_request,
-                {},
                 RuntimeOptions()
             )
             
@@ -839,7 +855,6 @@ class BailianRagService(AbstractKnowledgeBaseService): # 继承抽象接口
                     self._client.list_file_with_options,
                     self.workspace_id,
                     list_request,
-                    {}
                 )
             except Exception as e:
                 logger.error(f"Failed to list files on page {page_count}: {e}")

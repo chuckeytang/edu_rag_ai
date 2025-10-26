@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 from typing import Dict, Any, List, Union
 from llama_index.llms.openai_like import OpenAILike
 from core.config import settings
@@ -175,7 +176,7 @@ class MCPService:
                         # 调用抽象接口进行检索
                         retrieved_chunks: List[Dict[str, Any]] = await self.kb_service.retrieve_documents(
                             query_text=user_question, 
-                            knowledge_base_id=settings.BAILIAN_PAPERCUT_INDEX_ID or "qip7hsynj3", # 知识库ID从配置中读取，或者使用默认值
+                            knowledge_base_id=settings.BAILIAN_PAPERCUT_INDEX_ID or "aecoaxl9dm", # 知识库ID从配置中读取，或者使用默认值
                             limit=10,
                             rerank_switch=True 
                         )
